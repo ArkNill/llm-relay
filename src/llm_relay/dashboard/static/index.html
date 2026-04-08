@@ -1,0 +1,39 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>llm-relay Dashboard</title>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <header>
+    <h1>llm-relay</h1>
+    <span id="health-badge" class="badge">loading...</span>
+  </header>
+
+  <main>
+    <section id="cli-status">
+      <h2>CLI Status</h2>
+      <div id="cli-cards" class="cards"></div>
+    </section>
+
+    <section id="stats">
+      <h2>Delegation Stats</h2>
+      <div id="stats-content" class="stats-grid"></div>
+    </section>
+
+    <section id="history">
+      <h2>Recent Delegations</h2>
+      <table id="history-table">
+        <thead>
+          <tr><th>Time</th><th>CLI</th><th>Status</th><th>Duration</th><th>Preview</th></tr>
+        </thead>
+        <tbody></tbody>
+      </table>
+    </section>
+  </main>
+
+  <script src="app.js"></script>
+</body>
+</html>

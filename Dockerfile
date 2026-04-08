@@ -5,7 +5,7 @@ WORKDIR /app
 # Install build deps
 RUN pip install --no-cache-dir hatchling
 
-# Install tokpress first (from vendored copy)
+# Install tokpress (from vendored copy)
 COPY vendor/tokpress /tmp/tokpress
 RUN pip install --no-cache-dir /tmp/tokpress && rm -rf /tmp/tokpress
 

@@ -14,7 +14,7 @@ import httpx
 from starlette.applications import Starlette
 from starlette.requests import Request
 from starlette.responses import Response, StreamingResponse
-from starlette.routing import Route
+from starlette.routing import Mount, Route
 
 from .db import get_conn, log_request, log_microcompact, log_budget_event
 
@@ -251,7 +251,7 @@ async def _proxy(request: Request) -> Response:
     body = await request.body()
     headers = dict(request.headers)
     # Remove hop-by-hop and encoding headers
-    for h in ("host", "transfer-encoding", "connection", "accept-encoding"):
+    for h in ("host", "transfer-encoding", "connection", "accept-encoding", "content-length"):
         headers.pop(h, None)
 
     is_stream = False
@@ -445,13 +445,36 @@ async def _lifespan(app):
     yield
 
 
-# Catch-all must be last
+# Build unified route list — API and dashboard before catch-all proxy
+_routes = [
+    Route("/_health", _health, methods=["GET"]),
+    Route("/_stats", _stats, methods=["GET"]),
+    Route("/_recent", _recent, methods=["GET"]),
+]
+
+# Mount API routes (requires starlette, already available here)
+try:
+    from llm_relay.api.routes import get_api_routes
+    _routes.extend(get_api_routes())
+    logger.info("API routes mounted at /api/v1/")
+except ImportError:
+    logger.debug("API module not available, skipping")
+
+# Mount dashboard static files
+try:
+    from starlette.staticfiles import StaticFiles
+    from llm_relay.dashboard import get_static_dir
+    _dashboard_dir = get_static_dir()
+    if _dashboard_dir.exists():
+        _routes.append(Mount("/dashboard", app=StaticFiles(directory=str(_dashboard_dir), html=True)))
+        logger.info("Dashboard mounted at /dashboard/")
+except ImportError:
+    logger.debug("Dashboard module not available, skipping")
+
+# Catch-all proxy must be last
+_routes.append(Route("/{path:path}", _proxy, methods=["GET", "POST", "PUT", "DELETE", "PATCH", "OPTIONS"]))
+
 app = Starlette(
-    routes=[
-        Route("/_health", _health, methods=["GET"]),
-        Route("/_stats", _stats, methods=["GET"]),
-        Route("/_recent", _recent, methods=["GET"]),
-        Route("/{path:path}", _proxy, methods=["GET", "POST", "PUT", "DELETE", "PATCH", "OPTIONS"]),
-    ],
+    routes=_routes,
     lifespan=_lifespan,
 )

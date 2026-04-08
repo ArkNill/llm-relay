@@ -6,13 +6,13 @@ services:
     container_name: llm-relay
     restart: unless-stopped
     ports:
-      - "127.0.0.1:8082:8080"
+      - "127.0.0.1:8080:8080"  # llm-relay 대체 (Claude Code ANTHROPIC_BASE_URL)
+      - "127.0.0.1:8082:8080"  # 기존 호환
     volumes:
-      - relay-data:/data
-      - ${HOME}/.llm-relay:/data/legacy:ro  # read legacy DB if needed
+      - ${HOME}/.llm-relay:/data/legacy  # llm-relay DB 이어쓰기
     environment:
       - LLM_RELAY_UPSTREAM=https://api.anthropic.com
-      - LLM_RELAY_DB=/data/usage.db
+      - LLM_RELAY_DB=/data/legacy/usage.db
       - LLM_RELAY_PORT=8080
       - LLM_RELAY_WARN_RATIO=50.0
     mem_limit: 256m
@@ -27,6 +27,3 @@ services:
       options:
         max-size: "10m"
         max-file: "3"
-
-volumes:
-  relay-data:

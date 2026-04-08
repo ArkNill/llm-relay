@@ -41,17 +41,31 @@ classifiers = [
 
 [project.optional-dependencies]
 proxy = ["httpx>=0.28", "uvicorn>=0.34", "starlette>=0.46"]
+mcp = ["mcp[cli]>=1.0"]
 cli = ["click>=8.0", "rich>=13.0"]
-all = ["httpx>=0.28", "uvicorn>=0.34", "starlette>=0.46", "click>=8.0", "rich>=13.0"]
-dev = ["pytest>=8.0", "ruff>=0.8", "click>=8.0", "rich>=13.0", "httpx>=0.28"]
+all = [
+    "httpx>=0.28", "uvicorn>=0.34", "starlette>=0.46",
+    "mcp[cli]>=1.0",
+    "click>=8.0", "rich>=13.0",
+]
+dev = [
+    "pytest>=8.0", "ruff>=0.8",
+    "click>=8.0", "rich>=13.0",
+    "httpx>=0.28",
+    "mcp[cli]>=1.0",
+]
 
 [project.scripts]
 llm-relay = "llm_relay.detect.__main__:main"
+llm-relay-mcp = "llm_relay.mcp:run_server"
 
 [project.urls]
-Homepage = "https://github.com/ArkNill/llm-relay"
-Repository = "https://github.com/ArkNill/llm-relay"
-Issues = "https://github.com/ArkNill/llm-relay/issues"
+Homepage = "https://github.com/QuartzUnit/llm-relay"
+Repository = "https://github.com/QuartzUnit/llm-relay"
+Issues = "https://github.com/QuartzUnit/llm-relay/issues"
+
+[tool.hatch.build.targets.sdist]
+exclude = ["vendor/"]
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/llm_relay"]
@@ -66,3 +80,4 @@ target-version = "py39"
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "W", "UP"]
+ignore = ["UP006", "UP007", "UP032", "UP035", "UP045"]  # Py3.9 compat: keep typing.Optional/List/Dict, .format()
