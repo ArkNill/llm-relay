@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "llm-relay"
-version = "0.1.0"
+version = "0.2.0"
 description = "Unified LLM usage management — API proxy, session diagnostics, multi-CLI orchestration. multi-CLI open-network DLC."
 readme = "README.md"
 license = "MIT"
