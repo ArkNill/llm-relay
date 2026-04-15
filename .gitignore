@@ -20,6 +20,10 @@ docs/evidence-*/
 # Backup files
 docker-compose.yml.bak*
 
+# Claude Code project files (local-only)
+CLAUDE.md
+PLAN.txt
+
 # Credential files
 *.key
 *.pem
