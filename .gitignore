@@ -13,9 +13,6 @@ build/
 .mypy_cache/
 vendor/
 
-# FeatureFlags intercept (LOCAL-ONLY — DO NOT COMMIT)
-src/llm_relay/proxy/legacy_module.py
-
 # Investigation/evidence files (local-only analysis)
 docs/investigation-*
 docs/evidence-*/

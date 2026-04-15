@@ -85,15 +85,6 @@ _MIGRATIONS = [
         detail TEXT,
         session_id TEXT
     )""",
-    """CREATE TABLE IF NOT EXISTS legacy_table (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        ts REAL NOT NULL,
-        session_id TEXT,
-        endpoint TEXT,
-        flags_count INTEGER DEFAULT 0,
-        flags_overridden TEXT
-    )""",
-    "CREATE INDEX IF NOT EXISTS idx_legacy_ts ON legacy_table(ts)",
     """CREATE TABLE IF NOT EXISTS session_terminals (
         session_id TEXT PRIMARY KEY,
         tty TEXT,
@@ -237,28 +228,6 @@ def log_budget_event(
            (ts, session_id, msg_index, tool_name, content_chars, truncated, marker)
            VALUES (?, ?, ?, ?, ?, ?, ?)""",
         (time.time(), session_id, msg_index, tool_name, content_chars, int(truncated), marker),
-    )
-    conn.commit()
-
-
-def legacy_fn(
-    conn: sqlite3.Connection,
-    *,
-    session_id: str | None = None,
-    endpoint: str = "",
-    flags_overridden: list[str] | None = None,
-) -> None:
-    conn.execute(
-        """INSERT INTO legacy_table
-           (ts, session_id, endpoint, flags_count, flags_overridden)
-           VALUES (?, ?, ?, ?, ?)""",
-        (
-            time.time(),
-            session_id,
-            endpoint,
-            len(flags_overridden) if flags_overridden else 0,
-            json.dumps(flags_overridden) if flags_overridden else None,
-        ),
     )
     conn.commit()
 

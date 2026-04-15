@@ -19,14 +19,6 @@ from starlette.routing import Mount, Route
 
 from .db import get_conn, log_budget_event, log_microcompact, log_request
 
-# FeatureFlags intercept (local-only, file excluded via .gitignore)
-try:
-    from .db import legacy_fn
-    from .legacy_module import legacy_fn, legacy_fn, legacy_fn
-    _legacy_flag = True
-except ImportError:
-    _legacy_flag = False
-
 # CC cache fix (opt-in, LLM_RELAY_CACHE_FIX=1)
 _cache_fix_available = False
 if os.getenv("LLM_RELAY_CACHE_FIX", "0") == "1":
@@ -324,27 +316,6 @@ async def _proxy(request: Request) -> Response:
     # Parse and log usage
     resp_body = upstream_resp.content
     rl_headers = _extract_ratelimit_headers(upstream_resp.headers)
-
-    # FeatureFlags feature routing (local-only defence -- no-op if module absent)
-    if _legacy_flag and legacy_fn() and legacy_fn(path):
-        try:
-            gb_data = json.loads(resp_body)
-            modified, touched = legacy_fn(gb_data)
-            if modified:
-                resp_body = json.dumps(gb_data, ensure_ascii=False).encode("utf-8")
-                sid = headers.get("x-claude-code-session-id") or headers.get("x-session-id")
-                logger.info(
-                    "\U0001f6e1 INTERCEPTED %s -- %d flags: %s",
-                    path, len(touched), ", ".join(touched),
-                )
-                legacy_fn(
-                    _get_conn(),
-                    session_id=sid,
-                    endpoint=path,
-                    flags_overridden=touched,
-                )
-        except (json.JSONDecodeError, UnicodeDecodeError, TypeError):
-            pass
 
     try:
         resp_json = json.loads(resp_body)
