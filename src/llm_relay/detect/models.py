@@ -245,23 +245,11 @@ class SessionReport:
 
 
 @dataclass
-class FeatureFlagsConfig:
-    """Extracted FeatureFlags feature flags relevant to diagnostics."""
-
-    budget_window_window: int | None = None  # aggregate tool result cap
-    per_tool_caps: dict[str, Any] | None = None  # per-tool caps
-    time_compact: Any | None = None  # time-based microcompact
-    ctx_gate: Any | None = None  # SM compact gate
-    raw_flags: dict[str, Any] = field(default_factory=dict)
-
-
-@dataclass
 class FullReport:
     """Complete scan report."""
 
     session_reports: list[SessionReport] = field(default_factory=list)
     global_findings: list[Finding] = field(default_factory=list)
-    featureflags: FeatureFlagsConfig | None = None
     scan_timestamp: str = ""
     relay_version: str = ""
     sessions_scanned: int = 0

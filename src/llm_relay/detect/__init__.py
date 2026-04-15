@@ -31,7 +31,6 @@ def get_detectors_for_provider(provider_id: str) -> list[BaseDetector]:
 
     if provider_id == "claude-code":
         from llm_relay.detect.bloat import BloatDetector
-        from llm_relay.detect.featureflags import FeatureFlagsDetector
         from llm_relay.detect.microcompact import MicrocompactDetector
         from llm_relay.detect.orphan import OrphanDetector
         from llm_relay.detect.resume import ResumeDetector
@@ -44,7 +43,6 @@ def get_detectors_for_provider(provider_id: str) -> list[BaseDetector]:
             MicrocompactDetector(),
             BloatDetector(),
             ResumeDetector(),
-            FeatureFlagsDetector(),
             OrphanDetector(),
             StuckDetector(),
         ]

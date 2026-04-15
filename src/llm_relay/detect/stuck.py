@@ -9,7 +9,7 @@ import statistics
 from datetime import datetime
 
 from llm_relay.detect.base import BaseDetector
-from llm_relay.detect.models import Finding, FeatureFlagsConfig, ParsedSession, Severity
+from llm_relay.detect.models import Finding, ParsedSession, Severity
 
 
 def _parse_ts(ts_str: str) -> float | None:
@@ -31,7 +31,7 @@ class StuckDetector(BaseDetector):
 
     STUCK_THRESHOLD_S = 120  # 2 minutes without result = stuck
 
-    def check(self, session: ParsedSession, featureflags: FeatureFlagsConfig | None = None) -> list[Finding]:
+    def check(self, session: ParsedSession) -> list[Finding]:
         # Build tool_use index: id → (entry_idx, name, timestamp)
         tool_uses: dict[str, tuple[int, str, float | None]] = {}
         tool_results: set[str] = set()

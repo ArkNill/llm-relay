@@ -3,14 +3,14 @@
 from __future__ import annotations
 
 from llm_relay.detect.base import BaseDetector
-from llm_relay.detect.models import Finding, FeatureFlagsConfig, ParsedSession, Severity
+from llm_relay.detect.models import Finding, ParsedSession, Severity
 
 
 class BloatDetector(BaseDetector):
     detector_id = "bloat"
     display_name = "Log Inflation"
 
-    def check(self, session: ParsedSession, featureflags: FeatureFlagsConfig | None = None) -> list[Finding]:
+    def check(self, session: ParsedSession) -> list[Finding]:
         groups = session.group_by_request_id()
         if not groups:
             return []

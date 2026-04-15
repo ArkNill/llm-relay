@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from llm_relay.detect.base import BaseDetector
-from llm_relay.detect.models import Finding, FeatureFlagsConfig, ParsedSession, Severity
+from llm_relay.detect.models import Finding, ParsedSession, Severity
 
 CLEARED_MARKER = "[Old tool result content cleared]"
 
@@ -12,7 +12,7 @@ class MicrocompactDetector(BaseDetector):
     detector_id = "microcompact"
     display_name = "Context Stripping (B4)"
 
-    def check(self, session: ParsedSession, featureflags: FeatureFlagsConfig | None = None) -> list[Finding]:
+    def check(self, session: ParsedSession) -> list[Finding]:
         findings: list[Finding] = []
 
         # Method 1: Scan user entries for cleared tool results

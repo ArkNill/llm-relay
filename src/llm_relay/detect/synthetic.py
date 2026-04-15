@@ -3,14 +3,14 @@
 from __future__ import annotations
 
 from llm_relay.detect.base import BaseDetector
-from llm_relay.detect.models import Finding, FeatureFlagsConfig, ParsedSession, Severity
+from llm_relay.detect.models import Finding, ParsedSession, Severity
 
 
 class SyntheticDetector(BaseDetector):
     detector_id = "synthetic"
     display_name = "False Rate Limiter (B3)"
 
-    def check(self, session: ParsedSession, featureflags: FeatureFlagsConfig | None = None) -> list[Finding]:
+    def check(self, session: ParsedSession) -> list[Finding]:
         evidence: list[str] = []
 
         for entry in session.entries:

@@ -3,14 +3,14 @@
 from __future__ import annotations
 
 from llm_relay.detect.base import BaseDetector
-from llm_relay.detect.models import Finding, FeatureFlagsConfig, ParsedSession, Severity
+from llm_relay.detect.models import Finding, ParsedSession, Severity
 
 
 class ResumeDetector(BaseDetector):
     detector_id = "resume"
     display_name = "Resume Issues"
 
-    def check(self, session: ParsedSession, featureflags: FeatureFlagsConfig | None = None) -> list[Finding]:
+    def check(self, session: ParsedSession) -> list[Finding]:
         findings: list[Finding] = []
 
         # Check 1: Null bytes in file

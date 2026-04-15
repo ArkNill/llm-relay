@@ -6,14 +6,14 @@ Absorbs the two-pass correlation algorithm from kolkov/ccdiag.
 from __future__ import annotations
 
 from llm_relay.detect.base import BaseDetector
-from llm_relay.detect.models import Finding, FeatureFlagsConfig, ParsedSession, Severity
+from llm_relay.detect.models import Finding, ParsedSession, Severity
 
 
 class OrphanDetector(BaseDetector):
     detector_id = "orphan"
     display_name = "Orphan Tool Calls"
 
-    def check(self, session: ParsedSession, featureflags: FeatureFlagsConfig | None = None) -> list[Finding]:
+    def check(self, session: ParsedSession) -> list[Finding]:
         # Pass 1: index tool_use and tool_result by ID
         tool_uses: dict[str, tuple[int, str]] = {}   # tool_use_id → (entry_idx, tool_name)
         tool_results: dict[str, int] = {}              # tool_use_id → entry_idx

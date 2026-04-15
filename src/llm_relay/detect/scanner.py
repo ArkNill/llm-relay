@@ -8,8 +8,6 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from llm_relay.detect.models import FeatureFlagsConfig
-
 
 def find_claude_home() -> Path:
     """Locate the Claude Code data directory."""
@@ -93,50 +91,6 @@ def discover_sessions(
 
 def total_session_size(sessions: list[SessionFile]) -> int:
     return sum(s.size_bytes for s in sessions)
-
-
-def load_featureflags_config() -> FeatureFlagsConfig | None:
-    """Extract FeatureFlags feature flags from ~/.claude.json."""
-    claude_json_path = find_claude_home().parent / ".claude.json"
-    # Also check home directory directly
-    alt_path = Path.home() / ".claude.json"
-
-    target = None
-    for p in [claude_json_path, alt_path]:
-        if p.is_file():
-            target = p
-            break
-
-    if target is None:
-        return None
-
-    try:
-        with open(target, encoding="utf-8") as f:
-            data = json.load(f)
-    except (json.JSONDecodeError, OSError):
-        return None
-
-    features: dict[str, Any] = data.get("cachedFeatureFlagsFeatures", {})
-    if not features:
-        return None
-
-    config = FeatureFlagsConfig(raw_flags={})
-
-    for key, value in features.items():
-        if "budget_window" in key:
-            config.budget_window_window = value if isinstance(value, int) else None
-        elif "per_tool" in key and "caps" in key:
-            config.per_tool_caps = value if isinstance(value, dict) else None
-        elif "slate" in key and "heron" in key:
-            config.time_compact = value
-        elif "ctx_gate" in key and "config" not in key:
-            config.ctx_gate = value
-
-        # Keep all config_ flags
-        if key.startswith("config_") or "config" in key.lower():
-            config.raw_flags[key] = value
-
-    return config
 
 
 def load_stats_cache() -> dict[str, Any] | None:

@@ -57,7 +57,4 @@ class JsonFormatter(BaseFormatter):
             "global_findings": [_finding_to_dict(f) for f in report.global_findings],
         }
 
-        if report.featureflags and report.featureflags.raw_flags:
-            data["featureflags_flags"] = report.featureflags.raw_flags
-
         return json.dumps(data, indent=2, ensure_ascii=False)

@@ -2,13 +2,11 @@
 
 from __future__ import annotations
 
-import json
 from pathlib import Path
 
-import pytest
 from helpers import make_entry, write_session_file
 
-from llm_relay.detect.scanner import discover_sessions, load_featureflags_config
+from llm_relay.detect.scanner import discover_sessions
 
 
 class TestDiscoverSessions:
@@ -77,32 +75,3 @@ class TestDiscoverSessions:
         assert len(results) == 2
 
 
-class TestLoadFeatureFlags:
-    def test_loads_config_flags(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-        claude_json = tmp_path / ".claude.json"
-        claude_json.write_text(
-            json.dumps(
-                {
-                    "cachedFeatureFlagsFeatures": {
-                        "config_budget_window_window": 200000,
-                        "config_per_tool_caps": {"global": 50000, "Bash": 30000},
-                        "config_time_compact": True,
-                        "config_ctx_gate": False,
-                    }
-                }
-            )
-        )
-        monkeypatch.setattr("pathlib.Path.home", lambda: tmp_path)
-
-        config = load_featureflags_config()
-        assert config is not None
-        assert config.budget_window_window == 200000
-        assert config.per_tool_caps == {"global": 50000, "Bash": 30000}
-        assert config.time_compact is True
-        assert config.ctx_gate is False
-        assert len(config.raw_flags) == 4
-
-    def test_returns_none_when_missing(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-        monkeypatch.setattr("pathlib.Path.home", lambda: tmp_path)
-        config = load_featureflags_config()
-        assert config is None
