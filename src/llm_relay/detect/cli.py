@@ -226,6 +226,32 @@ def doctor(fix: bool) -> None:
                 click.echo(f"          -> {r.recommendation}")
 
 
+@cli.command()
+@click.option("--host", default="0.0.0.0", help="Bind address.")
+@click.option("--port", "-p", default=8083, type=int, help="Listen port.")
+@click.option("--workers", "-w", default=1, type=int, help="Number of worker processes.")
+def serve(host: str, port: int, workers: int) -> None:
+    """Start the proxy server with dashboard and display pages."""
+    try:
+        import uvicorn
+    except ImportError:
+        click.echo("Error: uvicorn not installed. Run: pip install llm-relay[proxy]", err=True)
+        raise SystemExit(1)
+
+    click.echo(f"llm-relay v{__version__} -- starting on http://{host}:{port}")
+    click.echo("  /dashboard/  -- CLI status, cost, delegation history")
+    click.echo("  /display/    -- turn counter with CC/Codex/Gemini sessions")
+    click.echo(f"  Proxy:       ANTHROPIC_BASE_URL=http://localhost:{port}")
+    click.echo()
+    uvicorn.run(
+        "llm_relay.proxy.proxy:app",
+        host=host,
+        port=port,
+        workers=workers,
+        log_level="info",
+    )
+
+
 def main() -> None:
     """Entry point."""
     cli()
