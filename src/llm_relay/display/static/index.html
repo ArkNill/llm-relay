@@ -1,0 +1,26 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Turn Monitor — llm-relay</title>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <header>
+    <h1>Turn Monitor</h1>
+    <span id="updated" class="updated-ts">loading...</span>
+  </header>
+
+  <main>
+    <div id="session-cards" class="session-cards"></div>
+  </main>
+
+  <footer>
+    <span>polling 2s · auto-pause on tab hide</span>
+    <span id="session-count"></span>
+  </footer>
+
+  <script src="app.js"></script>
+</body>
+</html>
