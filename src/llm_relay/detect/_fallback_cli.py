@@ -21,8 +21,36 @@ def _format_size(size_bytes: int) -> str:
     return f"{size_bytes} B"
 
 
+def _serve_fallback() -> None:
+    """Fallback serve command when click is not available."""
+    import argparse as _ap
+
+    p = _ap.ArgumentParser(prog="llm-relay serve", description="Start proxy server with dashboard.")
+    p.add_argument("--host", default="0.0.0.0", help="Bind address (default: 0.0.0.0)")
+    p.add_argument("--port", "-p", type=int, default=8083, help="Listen port (default: 8083)")
+    args = p.parse_args(sys.argv[2:])  # skip "llm-relay serve"
+
+    try:
+        import uvicorn
+    except ImportError:
+        print("Error: uvicorn not installed. Run: pip install llm-relay[proxy]", file=sys.stderr)
+        raise SystemExit(1)
+
+    print(f"llm-relay v{__version__} -- starting on http://{args.host}:{args.port}")
+    print("  /dashboard/  -- CLI status, cost, delegation history")
+    print("  /display/    -- turn counter with CC/Codex/Gemini sessions")
+    print(f"  Proxy:       ANTHROPIC_BASE_URL=http://localhost:{args.port}")
+    print()
+    uvicorn.run("llm_relay.proxy.proxy:app", host=args.host, port=args.port, log_level="info")
+
+
 def main() -> None:
     """Entry point for zero-dep CLI."""
+    # Handle "serve" subcommand before argparse (which doesn't support subcommands well)
+    if len(sys.argv) > 1 and sys.argv[1] == "serve":
+        _serve_fallback()
+        return
+
     valid_providers = [*list_provider_ids(), "all", "auto"]
 
     parser = argparse.ArgumentParser(
