@@ -6,11 +6,11 @@ services:
     container_name: llm-relay
     restart: unless-stopped
     ports:
-      - "127.0.0.1:8080:8080"  # llm-relay 대체 (Claude Code ANTHROPIC_BASE_URL)
+      - "127.0.0.1:8080:8080"  # llm-relay (Claude Code ANTHROPIC_BASE_URL)
       - "127.0.0.1:8082:8080"  # 기존 호환
       # - "<YOUR_TAILSCALE_IP>:8080:8080"  # Optional: bind to Tailscale IP for remote access
     volumes:
-      - ${HOME}/.llm-relay:/data/legacy  # llm-relay DB 이어쓰기
+      - ${HOME}/.llm-relay:/data/legacy  # llm-relay DB
       # Claude Code session transcripts (read-only, for display page last-user-prompt)
       - ${HOME}/.claude/projects:/data/claude-projects:ro
       - /proc:/host/proc:ro  # 호스트 프로세스 확인 (display page liveness check)

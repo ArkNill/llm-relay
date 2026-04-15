@@ -71,7 +71,7 @@ class OrphanDetector(BaseDetector):
                 ),
                 recommendation=(
                     "Orphan tool_use blocks can cause 400 errors on --resume. "
-                    "Consider running llm-relay-detect doctor --fix to clean them up."
+                    "Consider running llm-relay doctor --fix to clean them up."
                 ),
                 evidence=[f"tool_use id={tid[:16]} name={name}" for tid, name, _ in orphan_uses[:5]],
             ))

@@ -68,7 +68,7 @@ def main() -> None:
     )
     parser.add_argument("--json", "-j", action="store_true", dest="json_output", help="JSON output")
     parser.add_argument("--verbose", "-v", action="store_true", help="Show all sessions including healthy")
-    parser.add_argument("--version", action="version", version=f"llm-relay-detect {__version__}")
+    parser.add_argument("--version", action="version", version=f"llm-relay {__version__}")
 
     args = parser.parse_args()
 
