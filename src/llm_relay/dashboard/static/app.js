@@ -83,7 +83,7 @@
       return;
     }
 
-    // Diff check — skip DOM update if data unchanged (workstation GPU load mitigation)
+    // Diff check — skip DOM update if data unchanged (performance optimization)
     var hash = data.sessions.map(function (s) {
       return s.session_id + ":" + s.turns + ":" + s.zone;
     }).join("|");
