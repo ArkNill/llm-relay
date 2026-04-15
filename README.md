@@ -11,7 +11,7 @@ This project started from a need to escape deep vendor lock-in with a single AI 
 ## Features
 
 - **Proxy**: Transparent API proxy with cache/token monitoring and 12-strategy pruning
-- **Detect**: 8 detectors (orphan, stuck, inflation, synthetic, bloat, cache, resume, microcompact)
+- **Detect**: 7 detectors (orphan, stuck, synthetic, bloat, cache, resume, microcompact)
 - **Recover**: Session recovery and doctor (7 health checks)
 - **Guard**: 4-tier threshold daemon with dual-zone classification
 - **Cost**: Per-1% cost calculation and rate-limit header analysis
@@ -40,7 +40,7 @@ pip install llm-relay[all]
 ### CLI diagnostics (no server needed)
 
 ```bash
-llm-relay scan              # Session health check (8 detectors)
+llm-relay scan              # Session health check (7 detectors)
 llm-relay doctor            # Configuration health check (7 checks)
 llm-relay recover           # Extract session context for resumption
 ```

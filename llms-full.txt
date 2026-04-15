@@ -9,7 +9,7 @@ Extras: `[proxy]` httpx+uvicorn+starlette | `[mcp]` FastMCP | `[cli]` click+rich
 ```
 src/llm_relay/
 ├── proxy       — Transparent API proxy (cache/token monitoring, 12-strategy pruning, Starlette app)
-├── detect      — 8 session health detectors
+├── detect      — 7 session health detectors
 ├── recover     — Session recovery + doctor (7 health checks)
 ├── guard       — 4-tier threshold daemon
 ├── cost        — Per-1% cost calculation, rate-limit header analysis
@@ -37,7 +37,6 @@ llm-relay recover [--session-id ID]
 |----------|----------|
 | orphan | tool_use without matching tool_result |
 | stuck | repeated identical assistant responses |
-| inflation | context size growing faster than expected |
 | synthetic | machine-generated user messages |
 | bloat | oversized tool results (>50K chars) |
 | cache | prompt cache miss patterns |
