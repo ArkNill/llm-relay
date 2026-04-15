@@ -26,3 +26,28 @@ td { padding: 0.5rem; border-bottom: 1px solid #161b22; }
 tr:hover td { background: #161b22; }
 .success { color: #3fb950; }
 .failure { color: #da3633; }
+
+/* Turn Monitor */
+.updated-ts { font-size: 0.7rem; color: #6e7681; margin-left: 0.5rem; font-weight: normal; }
+.turn-cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: 0.8rem; }
+.turn-card { background: #161b22; border: 1px solid #21262d; border-radius: 8px; padding: 1rem; border-left: 4px solid #3fb950; transition: border-color 0.3s; }
+.turn-card.zone-green { border-left-color: #3fb950; }
+.turn-card.zone-yellow { border-left-color: #d29922; }
+.turn-card.zone-orange { border-left-color: #f0883e; }
+.turn-card.zone-red { border-left-color: #da3633; animation: pulse-red 3s ease-in-out infinite; }
+/* Lightweight: opacity transition only (no box-shadow → no GPU compositor overhead) */
+@keyframes pulse-red { 0%, 100% { opacity: 1; } 50% { opacity: 0.75; } }
+/* Pause animation when tab hidden — respects Page Visibility state */
+body.tab-hidden .turn-card.zone-red { animation-play-state: paused; }
+.turn-card .sid { font-family: ui-monospace, "SF Mono", Menlo, monospace; font-size: 0.75rem; color: #8b949e; }
+.turn-card .turn-count { font-size: 1.8rem; font-weight: 700; margin: 0.3rem 0; }
+.turn-card .turn-count .label { font-size: 0.8rem; color: #8b949e; font-weight: 400; margin-left: 0.3rem; }
+.turn-card .meta { display: flex; justify-content: space-between; font-size: 0.75rem; color: #8b949e; margin-top: 0.3rem; }
+.turn-card .message { font-size: 0.75rem; color: #f0883e; margin-top: 0.5rem; padding-top: 0.5rem; border-top: 1px solid #21262d; }
+.turn-card.zone-red .message { color: #ff7b72; }
+.turn-card .bar { height: 4px; background: #21262d; border-radius: 2px; margin-top: 0.5rem; overflow: hidden; }
+.turn-card .bar-fill { height: 100%; background: #3fb950; transition: width 0.5s, background 0.3s; }
+.turn-card.zone-yellow .bar-fill { background: #d29922; }
+.turn-card.zone-orange .bar-fill { background: #f0883e; }
+.turn-card.zone-red .bar-fill { background: #da3633; }
+.turn-monitor-empty { color: #6e7681; font-size: 0.9rem; padding: 1rem; text-align: center; }

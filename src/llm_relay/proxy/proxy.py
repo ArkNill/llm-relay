@@ -2,13 +2,14 @@
 
 from __future__ import annotations
 
+import asyncio
+import codecs
 import json
 import logging
 import os
 import time
+from contextlib import asynccontextmanager
 from typing import Any
-
-import asyncio
 
 import httpx
 from starlette.applications import Starlette
@@ -16,12 +17,36 @@ from starlette.requests import Request
 from starlette.responses import Response, StreamingResponse
 from starlette.routing import Mount, Route
 
-from .db import get_conn, log_request, log_microcompact, log_budget_event
+from .db import get_conn, log_budget_event, log_microcompact, log_request
+
+# FeatureFlags intercept (local-only, file excluded via .gitignore)
+try:
+    from .db import legacy_fn
+    from .legacy_module import legacy_fn, legacy_fn, legacy_fn
+    _legacy_flag = True
+except ImportError:
+    _legacy_flag = False
+
+# CC cache fix (opt-in, LLM_RELAY_CACHE_FIX=1)
+_cache_fix_available = False
+if os.getenv("LLM_RELAY_CACHE_FIX", "0") == "1":
+    try:
+        from .cc_cache_fix import normalize_request as _normalize_cache
+        from .db import log_cache_diagnostic
+        _cache_fix_available = True
+    except ImportError:
+        pass
 
 logger = logging.getLogger("llm-relay")
 
 UPSTREAM = os.getenv("LLM_RELAY_UPSTREAM", "https://api.anthropic.com")
 WARN_READ_RATIO = float(os.getenv("LLM_RELAY_WARN_RATIO", "50.0"))
+
+# Performance toggles (default OFF for low-overhead proxying).
+# Set =1 to re-enable the corresponding diagnostic/compression path.
+_SCAN_ENABLED = os.getenv("LLM_RELAY_SCAN_ENABLED", "0") == "1"
+_TOKPRESS_ENABLED = os.getenv("LLM_RELAY_TOKPRESS", "0") == "1"
+_SSE_PARSE_USAGE = os.getenv("LLM_RELAY_SSE_PARSE_USAGE", "1") == "1"
 
 CLEARED_MARKER = "[Old tool result content cleared]"
 
@@ -39,15 +64,16 @@ AGGREGATE_CAP = 200_000  # server_aggregate_cap
 _RATELIMIT_PREFIXES = ("x-ratelimit-", "anthropic-ratelimit-", "retry-after")
 
 _tokpress_available = False
-try:
-    from tokpress.integrations.proxy import compress_tool_results
-    _tokpress_available = True
-except ImportError:
-    pass
+if _TOKPRESS_ENABLED:
+    try:
+        from tokpress.integrations.proxy import compress_tool_results
+        _tokpress_available = True
+    except ImportError:
+        pass
 
 
 def _try_compress(req_json: dict, body: bytes) -> bytes:
-    """Compress tool results in-place if tokpress is available. Returns updated body."""
+    """Compress tool results in-place if tokpress is enabled and available."""
     if not _tokpress_available:
         return body
     try:
@@ -95,7 +121,7 @@ def _scan_budget_enforcement(req_json: dict, session_id: str | None) -> None:
     total_chars = sum(c for _, _, c in tool_results)
 
     for idx, tool_name, chars in tool_results:
-        cap = TOOL_CAPS.get(tool_name, TOOL_CAPS["global"])
+        _cap = TOOL_CAPS.get(tool_name, TOOL_CAPS["global"])  # noqa: F841
         # Detect: very small results that likely were truncated,
         # or results ending with summary patterns
         truncated = False
@@ -250,8 +276,11 @@ async def _proxy(request: Request) -> Response:
 
     body = await request.body()
     headers = dict(request.headers)
-    # Remove hop-by-hop and encoding headers
-    for h in ("host", "transfer-encoding", "connection", "accept-encoding", "content-length"):
+    # Strip hop-by-hop headers only. Preserve accept-encoding so the upstream
+    # leg (internet) stays gzip-compressed — httpx auto-decompresses locally and
+    # we strip content-encoding on the response to send plain bytes to the
+    # client over loopback (bytes saved upstream, not re-encoded on loopback).
+    for h in ("host", "transfer-encoding", "connection", "content-length"):
         headers.pop(h, None)
 
     is_stream = False
@@ -260,14 +289,20 @@ async def _proxy(request: Request) -> Response:
     if body:
         try:
             req_json = json.loads(body)
-            is_stream = req_json.get("stream", False)
-            # Scan for microcompact evidence in outgoing messages
+            is_stream = bool(req_json.get("stream", False))
             if req_json.get("messages"):
                 sid = headers.get("x-claude-code-session-id") or headers.get("x-session-id")
-                _scan_microcompact(req_json, sid)
-                _scan_budget_enforcement(req_json, sid)
-                # Compress Bash tool outputs before forwarding to API
-                body = _try_compress(req_json, body)
+                if _SCAN_ENABLED:
+                    _scan_microcompact(req_json, sid)
+                    _scan_budget_enforcement(req_json, sid)
+                if _cache_fix_available and path.startswith("/v1/messages"):
+                    cf_modified, cf_diag = _normalize_cache(req_json, headers)
+                    if cf_modified:
+                        body = json.dumps(req_json, ensure_ascii=False).encode("utf-8")
+                    if cf_diag:
+                        log_cache_diagnostic(_get_conn(), session_id=sid, **cf_diag)
+                if _tokpress_available:
+                    body = _try_compress(req_json, body)
         except (json.JSONDecodeError, UnicodeDecodeError):
             pass
 
@@ -289,10 +324,35 @@ async def _proxy(request: Request) -> Response:
     # Parse and log usage
     resp_body = upstream_resp.content
     rl_headers = _extract_ratelimit_headers(upstream_resp.headers)
+
+    # FeatureFlags feature routing (local-only defence — no-op if module absent)
+    if _legacy_flag and legacy_fn() and legacy_fn(path):
+        try:
+            gb_data = json.loads(resp_body)
+            modified, touched = legacy_fn(gb_data)
+            if modified:
+                resp_body = json.dumps(gb_data, ensure_ascii=False).encode("utf-8")
+                sid = headers.get("x-claude-code-session-id") or headers.get("x-session-id")
+                logger.info(
+                    "\U0001f6e1 INTERCEPTED %s — %d flags: %s",
+                    path, len(touched), ", ".join(touched),
+                )
+                legacy_fn(
+                    _get_conn(),
+                    session_id=sid,
+                    endpoint=path,
+                    flags_overridden=touched,
+                )
+        except (json.JSONDecodeError, UnicodeDecodeError, TypeError):
+            pass
+
     try:
         resp_json = json.loads(resp_body)
         usage = _extract_usage(resp_json)
         _warn_if_poor(usage, path)
+        # Synchronous log — WAL mode keeps this ~0.6ms. Moving to a worker
+        # thread via asyncio.to_thread inside starlette response flow was
+        # dropping records when the response task was torn down mid-await.
         log_request(
             _get_conn(),
             session_id=headers.get("x-claude-code-session-id") or headers.get("x-session-id"),
@@ -325,7 +385,12 @@ async def _proxy(request: Request) -> Response:
 
 
 async def _proxy_stream(client, method, url, headers, body, path, t0, body_bytes=0):
-    """Handle streaming responses — true streaming proxy via client.stream()."""
+    """Handle streaming responses — true streaming proxy via client.stream().
+
+    Uses an incremental UTF-8 decoder + line buffer so multibyte characters and
+    SSE lines that span chunk boundaries are decoded correctly (C2 fix from
+    audit-full-source-20260410.md — mojibake root cause candidate).
+    """
     req = client.build_request(method=method, url=url, headers=headers, content=body)
     upstream_resp = await client.send(req, stream=True)
 
@@ -339,56 +404,105 @@ async def _proxy_stream(client, method, url, headers, body, path, t0, body_bytes
         "model": None,
     }
 
+    def _process_sse_line(line: str) -> None:
+        if not line.startswith("data: "):
+            return
+        payload = line[6:]
+        if payload.strip() == "[DONE]":
+            return
+        try:
+            event = json.loads(payload)
+        except (json.JSONDecodeError, KeyError):
+            return
+        etype = event.get("type", "")
+        if etype == "message_start":
+            msg = event.get("message", {})
+            u = _extract_usage(msg)
+            for k in u:
+                if k == "model":
+                    usage_acc["model"] = u["model"]
+                else:
+                    usage_acc[k] += u[k]
+        elif etype == "message_delta":
+            delta_usage = event.get("usage", {})
+            usage_acc["output_tokens"] = delta_usage.get(
+                "output_tokens", usage_acc["output_tokens"]
+            )
+
     async def _stream_and_log():
+        decoder = codecs.getincrementaldecoder("utf-8")(errors="replace")
+        line_buf = ""
         try:
             async for chunk in upstream_resp.aiter_bytes():
-                # Parse SSE lines for usage data
-                for line in chunk.decode("utf-8", errors="replace").split("\n"):
-                    if line.startswith("data: ") and line.strip() != "data: [DONE]":
-                        try:
-                            event = json.loads(line[6:])
-                            etype = event.get("type", "")
-
-                            if etype == "message_start":
-                                msg = event.get("message", {})
-                                u = _extract_usage(msg)
-                                for k in u:
-                                    if k == "model":
-                                        usage_acc["model"] = u["model"]
-                                    else:
-                                        usage_acc[k] += u[k]
-
-                            elif etype == "message_delta":
-                                delta_usage = event.get("usage", {})
-                                usage_acc["output_tokens"] = delta_usage.get(
-                                    "output_tokens", usage_acc["output_tokens"]
-                                )
-                        except (json.JSONDecodeError, KeyError):
-                            pass
-
+                # Always forward bytes immediately — optional usage parsing is
+                # piggybacked on the decoded copy, not on the forwarded bytes.
                 yield chunk
-        finally:
-            await upstream_resp.aclose()
 
-            # Log after stream ends
+                if not _SSE_PARSE_USAGE:
+                    continue
+
+                # Incremental UTF-8 decode — handles multibyte chars that span
+                # chunk boundaries. Accumulate into a line buffer and only process
+                # complete lines (terminated by \n).
+                text = decoder.decode(chunk, final=False)
+                if not text:
+                    continue
+                line_buf += text
+                if "\n" not in line_buf:
+                    continue
+                lines = line_buf.split("\n")
+                # Keep the trailing partial line for the next chunk.
+                line_buf = lines[-1]
+                for line in lines[:-1]:
+                    _process_sse_line(line)
+        finally:
+            # Step 1 — flush the decoder (sync, safe under GeneratorExit).
+            if _SSE_PARSE_USAGE:
+                try:
+                    tail = decoder.decode(b"", final=True)
+                    if tail:
+                        line_buf += tail
+                    if line_buf:
+                        for line in line_buf.split("\n"):
+                            _process_sse_line(line)
+                except Exception:
+                    logger.debug("SSE decoder flush failed", exc_info=True)
+
+            # Step 2 — LOG FIRST (sync, must run even if aclose/GC cancels the
+            # generator). Starlette discards the async generator without calling
+            # aclose(), so GeneratorExit fires at the yield site and any later
+            # `await` in the finally chain can be cut short. Putting log_request
+            # before the await guarantees the usage row lands in SQLite.
             latency_ms = (time.time() - t0) * 1000
             _warn_if_poor(usage_acc, path)
-            log_request(
-                _get_conn(),
-                session_id=headers.get("x-claude-code-session-id") or headers.get("x-session-id"),
-                model=usage_acc["model"],
-                input_tokens=usage_acc["input_tokens"],
-                output_tokens=usage_acc["output_tokens"],
-                cache_creation=usage_acc["cache_creation"],
-                cache_read=usage_acc["cache_read"],
-                status_code=upstream_resp.status_code,
-                latency_ms=latency_ms,
-                endpoint=path,
-                is_stream=True,
-                raw_usage=dict(usage_acc),
-                request_body_bytes=body_bytes,
-                ratelimit_headers=rl_headers,
-            )
+            try:
+                log_request(
+                    _get_conn(),
+                    session_id=headers.get("x-claude-code-session-id") or headers.get("x-session-id"),
+                    model=usage_acc["model"],
+                    input_tokens=usage_acc["input_tokens"],
+                    output_tokens=usage_acc["output_tokens"],
+                    cache_creation=usage_acc["cache_creation"],
+                    cache_read=usage_acc["cache_read"],
+                    status_code=upstream_resp.status_code,
+                    latency_ms=latency_ms,
+                    endpoint=path,
+                    is_stream=True,
+                    raw_usage=dict(usage_acc),
+                    request_body_bytes=body_bytes,
+                    ratelimit_headers=rl_headers,
+                )
+            except Exception:
+                logger.warning("log_request failed (stream path)", exc_info=True)
+
+            # Step 3 — close the upstream response last. Wrap in try/except
+            # because an async generator being finalised via GC may cancel the
+            # await; we still want the resource closed and any error surfaced
+            # at debug level, but not propagated.
+            try:
+                await upstream_resp.aclose()
+            except Exception:
+                logger.debug("upstream aclose() failed", exc_info=True)
 
     stream_headers = {
         k: v for k, v in upstream_resp.headers.items()
@@ -437,8 +551,6 @@ async def _watchdog_loop():
         logger.debug("watchdog loop exited")
 
 
-from contextlib import asynccontextmanager
-
 @asynccontextmanager
 async def _lifespan(app):
     asyncio.create_task(_watchdog_loop())
@@ -460,14 +572,33 @@ try:
 except ImportError:
     logger.debug("API module not available, skipping")
 
+# Redirect /dashboard and /display (no trailing slash) to their canonical URLs.
+# Without these, the catch-all proxy route would forward them to Anthropic → 404.
+
+def _redirect_to_trailing_slash(prefix: str):
+    async def _redirect(request):
+        from starlette.responses import RedirectResponse
+        return RedirectResponse(url=prefix + "/", status_code=301)
+    return _redirect
+
+_routes.append(Route("/dashboard", _redirect_to_trailing_slash("/dashboard")))
+_routes.append(Route("/display", _redirect_to_trailing_slash("/display")))
+
 # Mount dashboard static files
 try:
     from starlette.staticfiles import StaticFiles
+
     from llm_relay.dashboard import get_static_dir
     _dashboard_dir = get_static_dir()
     if _dashboard_dir.exists():
         _routes.append(Mount("/dashboard", app=StaticFiles(directory=str(_dashboard_dir), html=True)))
         logger.info("Dashboard mounted at /dashboard/")
+
+    from llm_relay.display import get_static_dir as get_display_dir
+    _display_dir = get_display_dir()
+    if _display_dir.exists():
+        _routes.append(Mount("/display", app=StaticFiles(directory=str(_display_dir), html=True)))
+        logger.info("Display page mounted at /display/")
 except ImportError:
     logger.debug("Dashboard module not available, skipping")
 

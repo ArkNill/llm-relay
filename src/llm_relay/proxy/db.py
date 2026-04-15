@@ -3,12 +3,11 @@
 from __future__ import annotations
 
 import json
+import os
 import sqlite3
 import time
 from pathlib import Path
-from typing import Any
-
-import os
+from typing import Any, Optional
 
 DEFAULT_DB = Path(os.getenv("LLM_RELAY_DB", str(Path.home() / ".llm-relay" / "usage.db")))
 
@@ -86,12 +85,56 @@ _MIGRATIONS = [
         detail TEXT,
         session_id TEXT
     )""",
+    """CREATE TABLE IF NOT EXISTS legacy_table (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        ts REAL NOT NULL,
+        session_id TEXT,
+        endpoint TEXT,
+        flags_count INTEGER DEFAULT 0,
+        flags_overridden TEXT
+    )""",
+    "CREATE INDEX IF NOT EXISTS idx_legacy_ts ON legacy_table(ts)",
+    """CREATE TABLE IF NOT EXISTS session_terminals (
+        session_id TEXT PRIMARY KEY,
+        tty TEXT,
+        cc_pid INTEGER,
+        term_pid INTEGER,
+        term_name TEXT,
+        updated_ts REAL NOT NULL
+    )""",
+    """CREATE TABLE IF NOT EXISTS cache_diagnostics (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        ts REAL NOT NULL,
+        session_id TEXT,
+        cc_version TEXT,
+        fingerprint TEXT,
+        system_block_count INTEGER DEFAULT 0,
+        system_preview TEXT,
+        msg0_block_count INTEGER DEFAULT 0,
+        msg0_preview TEXT,
+        drifted_blocks TEXT,
+        tools_count INTEGER DEFAULT 0,
+        tools_reordered INTEGER DEFAULT 0,
+        ttl_injected INTEGER DEFAULT 0
+    )""",
+    "CREATE INDEX IF NOT EXISTS idx_cache_diag_ts ON cache_diagnostics(ts)",
+    "CREATE INDEX IF NOT EXISTS idx_cache_diag_session ON cache_diagnostics(session_id)",
 ]
 
 
 def get_conn(db_path: Path = DEFAULT_DB) -> sqlite3.Connection:
     db_path.parent.mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(str(db_path), check_same_thread=False)
+    # WAL mode — allows concurrent reads during writes and replaces the
+    # per-commit fsync chain with a single wal checkpoint, cutting hot-path
+    # latency for the proxy logger. synchronous=NORMAL is the standard WAL
+    # companion (loss-window ≤ 1 tx on crash, acceptable for a usage log).
+    try:
+        conn.execute("PRAGMA journal_mode=WAL")
+        conn.execute("PRAGMA synchronous=NORMAL")
+    except sqlite3.OperationalError:
+        # Some filesystems (e.g. network mounts) reject WAL — fall back quietly.
+        pass
     conn.executescript(_SCHEMA)
     # Run migrations for existing databases
     for sql in _MIGRATIONS:
@@ -198,6 +241,68 @@ def log_budget_event(
     conn.commit()
 
 
+def legacy_fn(
+    conn: sqlite3.Connection,
+    *,
+    session_id: str | None = None,
+    endpoint: str = "",
+    flags_overridden: list[str] | None = None,
+) -> None:
+    conn.execute(
+        """INSERT INTO legacy_table
+           (ts, session_id, endpoint, flags_count, flags_overridden)
+           VALUES (?, ?, ?, ?, ?)""",
+        (
+            time.time(),
+            session_id,
+            endpoint,
+            len(flags_overridden) if flags_overridden else 0,
+            json.dumps(flags_overridden) if flags_overridden else None,
+        ),
+    )
+    conn.commit()
+
+
+def log_cache_diagnostic(
+    conn: sqlite3.Connection,
+    *,
+    session_id: Optional[str] = None,
+    cc_version: Optional[str] = None,
+    fingerprint: Optional[str] = None,
+    system_block_count: int = 0,
+    system_preview: Optional[str] = None,
+    msg0_block_count: int = 0,
+    msg0_preview: Optional[str] = None,
+    drifted_blocks: Optional[str] = None,
+    tools_count: int = 0,
+    tools_reordered: int = 0,
+    ttl_injected: int = 0,
+) -> None:
+    conn.execute(
+        """INSERT INTO cache_diagnostics
+           (ts, session_id, cc_version, fingerprint,
+            system_block_count, system_preview,
+            msg0_block_count, msg0_preview,
+            drifted_blocks, tools_count, tools_reordered, ttl_injected)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+        (
+            time.time(),
+            session_id,
+            cc_version,
+            fingerprint,
+            system_block_count,
+            system_preview,
+            msg0_block_count,
+            msg0_preview,
+            drifted_blocks,
+            tools_count,
+            tools_reordered,
+            ttl_injected,
+        ),
+    )
+    conn.commit()
+
+
 def get_budget_events(
     conn: sqlite3.Connection, limit: int = 50
 ) -> list[dict[str, Any]]:
@@ -235,6 +340,146 @@ def get_session_summary(
            WHERE ts > ?
            GROUP BY session_id
            ORDER BY last_ts DESC""",
+        (cutoff,),
+    ).fetchall()
+    return [dict(r) for r in rows]
+
+
+def get_turn_count(
+    conn: sqlite3.Connection, session_id: str
+) -> dict[str, Any]:
+    """Return turn count + 4 token metrics for a specific session (/v1/messages only).
+
+    Returns dict with keys:
+      turns, first_ts, last_ts,
+      current_ctx  — latest request's cache_read + cache_creation + input_tokens
+      peak_ctx     — MAX over session of (cache_read + cache_creation + input_tokens)
+      recent_peak  — MAX over last 5 requests of the same
+      cumul_unique — SUM over session of (input_tokens + cache_creation + output_tokens)
+    """
+    row = conn.execute(
+        """WITH ranked AS (
+             SELECT ts,
+                    cache_read + cache_creation + input_tokens AS ctx,
+                    input_tokens + cache_creation + output_tokens AS unique_tokens,
+                    ROW_NUMBER() OVER (ORDER BY ts DESC) AS rn_desc
+             FROM requests
+             WHERE session_id = ?
+               AND endpoint = '/v1/messages'
+           )
+           SELECT COUNT(*) AS turns,
+                  MIN(ts) AS first_ts,
+                  MAX(ts) AS last_ts,
+                  COALESCE(MAX(ctx), 0) AS peak_ctx,
+                  COALESCE(SUM(unique_tokens), 0) AS cumul_unique,
+                  COALESCE(MAX(CASE WHEN rn_desc = 1 THEN ctx END), 0) AS current_ctx,
+                  COALESCE(MAX(CASE WHEN rn_desc <= 5 THEN ctx END), 0) AS recent_peak
+           FROM ranked""",
+        (session_id,),
+    ).fetchone()
+    if row is None or row["turns"] == 0:
+        return {
+            "turns": 0,
+            "first_ts": None,
+            "last_ts": None,
+            "peak_ctx": 0,
+            "cumul_unique": 0,
+            "current_ctx": 0,
+            "recent_peak": 0,
+        }
+    return dict(row)
+
+
+def upsert_session_terminal(
+    conn: sqlite3.Connection,
+    session_id: str,
+    tty: Optional[str] = None,
+    cc_pid: Optional[int] = None,
+    term_pid: Optional[int] = None,
+    term_name: Optional[str] = None,
+) -> None:
+    """Insert or update terminal info for a session.
+
+    When a new session registers the same cc_pid as an older session
+    (terminal reuse), the old session's terminal record is cleared so it
+    no longer appears alive on the display page.
+    """
+    now = time.time()
+    # Clear stale sessions that had the same cc_pid (terminal reuse)
+    if cc_pid:
+        conn.execute(
+            """UPDATE session_terminals
+               SET cc_pid = NULL, tty = NULL
+               WHERE cc_pid = ? AND session_id != ?""",
+            (cc_pid, session_id),
+        )
+    conn.execute(
+        """INSERT INTO session_terminals (session_id, tty, cc_pid, term_pid, term_name, updated_ts)
+           VALUES (?, ?, ?, ?, ?, ?)
+           ON CONFLICT(session_id) DO UPDATE SET
+               tty = excluded.tty,
+               cc_pid = excluded.cc_pid,
+               term_pid = excluded.term_pid,
+               term_name = excluded.term_name,
+               updated_ts = excluded.updated_ts""",
+        (session_id, tty, cc_pid, term_pid, term_name, now),
+    )
+    conn.commit()
+
+
+def get_session_terminal(
+    conn: sqlite3.Connection, session_id: str
+) -> Optional[dict[str, Any]]:
+    """Return terminal info for a session, or None if not recorded."""
+    row = conn.execute(
+        "SELECT session_id, tty, cc_pid, term_pid, term_name, updated_ts FROM session_terminals WHERE session_id = ?",
+        (session_id,),
+    ).fetchone()
+    return dict(row) if row else None
+
+
+def get_all_session_terminals(
+    conn: sqlite3.Connection,
+) -> dict[str, dict[str, Any]]:
+    """Return all session terminal info as a dict keyed by session_id."""
+    rows = conn.execute(
+        "SELECT session_id, tty, cc_pid, term_pid, term_name, updated_ts FROM session_terminals"
+    ).fetchall()
+    return {r["session_id"]: dict(r) for r in rows}
+
+
+def get_all_turn_counts(
+    conn: sqlite3.Connection, window_hours: float = 4
+) -> list[dict[str, Any]]:
+    """Return turn counts + 4 token metrics for all recent sessions.
+
+    Each row contains the same keys as get_turn_count() plus session_id.
+    Uses a single window-function CTE to compute per-session aggregates and
+    rank-based "latest / recent-5" snapshots in one scan.
+    """
+    cutoff = time.time() - window_hours * 3600
+    rows = conn.execute(
+        """WITH ranked AS (
+             SELECT session_id, ts,
+                    cache_read + cache_creation + input_tokens AS ctx,
+                    input_tokens + cache_creation + output_tokens AS unique_tokens,
+                    ROW_NUMBER() OVER (PARTITION BY session_id ORDER BY ts DESC) AS rn_desc
+             FROM requests
+             WHERE ts > ?
+               AND endpoint = '/v1/messages'
+               AND session_id IS NOT NULL
+           )
+           SELECT session_id,
+                  COUNT(*) AS turns,
+                  MIN(ts) AS first_ts,
+                  MAX(ts) AS last_ts,
+                  COALESCE(MAX(ctx), 0) AS peak_ctx,
+                  COALESCE(SUM(unique_tokens), 0) AS cumul_unique,
+                  COALESCE(MAX(CASE WHEN rn_desc = 1 THEN ctx END), 0) AS current_ctx,
+                  COALESCE(MAX(CASE WHEN rn_desc <= 5 THEN ctx END), 0) AS recent_peak
+           FROM ranked
+           GROUP BY session_id
+           ORDER BY turns DESC""",
         (cutoff,),
     ).fetchall()
     return [dict(r) for r in rows]

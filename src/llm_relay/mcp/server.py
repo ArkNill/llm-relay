@@ -268,3 +268,53 @@ def relay_stats(window_hours: float = 8) -> str:
         return _json(stats)
     except Exception as e:
         return _json({"error": str(e)})
+
+
+# ── Tool 7: session_turns ──
+
+
+@mcp.tool()
+def session_turns(session_id: str = "") -> str:
+    """Get turn count for a specific session or all active sessions.
+
+    Args:
+        session_id: Session ID to query. If empty, returns all active sessions (last 8h)
+    """
+    from llm_relay.proxy.db import get_conn, get_session_summary, get_turn_count
+
+    try:
+        conn = get_conn()
+        if session_id:
+            data = get_turn_count(conn, session_id)
+            turns = data["turns"]
+            # Zone classification
+            if turns >= 300:
+                zone, zone_label = "red", "위험"
+            elif turns >= 250:
+                zone, zone_label = "orange", "경고"
+            elif turns >= 200:
+                zone, zone_label = "yellow", "주의"
+            else:
+                zone, zone_label = "green", "안전"
+            duration_h = 0.0
+            if data["first_ts"] and data["last_ts"]:
+                duration_h = (data["last_ts"] - data["first_ts"]) / 3600
+            return _json({
+                "session_id": session_id,
+                "turns": turns,
+                "zone": zone,
+                "zone_label": zone_label,
+                "duration_h": round(duration_h, 2),
+                "avg_turns_per_hour": round(turns / max(duration_h, 0.01), 1),
+            })
+        else:
+            summaries = get_session_summary(conn, window_hours=8)
+            return _json({
+                "count": len(summaries),
+                "sessions": [
+                    {"session_id": s["session_id"], "turns": s["turns"]}
+                    for s in summaries
+                ],
+            })
+    except Exception as e:
+        return _json({"error": str(e)})

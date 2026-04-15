@@ -9,7 +9,7 @@ description = "Unified LLM usage management — API proxy, session diagnostics, 
 readme = "README.md"
 license = "MIT"
 requires-python = ">=3.9"
-authors = [{ name = "hmj", email = "hmj@quartzunit.com" }]
+authors = [{ name = "QuartzUnit" }]
 keywords = [
     "llm",
     "proxy",
