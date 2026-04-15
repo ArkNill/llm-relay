@@ -11,12 +11,8 @@ services:
       # - "<YOUR_TAILSCALE_IP>:8080:8080"  # Optional: bind to Tailscale IP for remote access
     volumes:
       - ${HOME}/.llm-relay:/data/legacy  # llm-relay DB 이어쓰기
-      # transcript JSONL 읽기 전용 (display page last-user-prompt 검색).
-      # 4/10 23:xx: ~/.claude/projects → ~/.claude-gt/projects 변경.
-      # 이유: claudeGt 가 주력 운영 (defence layer 풀세트), llm-relay 프록시 경유 request 는
-      # 전부 claudeGt 세션이라 DB vs transcript mount 일관성 맞춤. stock claude 는
-      # fallback only 로 proxy 안 타므로 어차피 llm-relay 집계 밖.
-      - ${HOME}/.claude-gt/projects:/data/claude-projects:ro
+      # Claude Code session transcripts (read-only, for display page last-user-prompt)
+      - ${HOME}/.claude/projects:/data/claude-projects:ro
       - /proc:/host/proc:ro  # 호스트 프로세스 확인 (display page liveness check)
     environment:
       - LLM_RELAY_UPSTREAM=https://api.anthropic.com
@@ -25,9 +21,7 @@ services:
       - LLM_RELAY_WARN_RATIO=50.0
       - CC_CLAUDE_PROJECTS_DIR=/data/claude-projects
       - CC_HOST_PROC=/host/proc
-      # GB intercept toggle — set in .env, not here (local-only)
-      - LEGACY_TOGGLE=${LEGACY_TOGGLE:-0}
-      # CC cache fix — request body normalization for stable prompt caching
+      # CC cache fix -- request body normalization for stable prompt caching
       - LLM_RELAY_CACHE_FIX=${LLM_RELAY_CACHE_FIX:-0}
       # Performance toggles — scan/tokpress OFF by default (save 100-350ms/req),
       # SSE usage parsing stays ON for dashboard token tracking.
