@@ -4,6 +4,10 @@ Unified LLM usage management — API proxy, session diagnostics, multi-CLI orche
 
 [한국어](README.ko.md) | [llms.txt](llms.txt)
 
+## Why
+
+This project started from a need to escape deep vendor lock-in with a single AI coding tool. After [investigating hidden behaviors in Claude Code](https://github.com/ArkNill/claude-code-hidden-problem-analysis) — silent token inflation, false rate limits, context stripping, and opaque feature flags — it became clear that relying on one vendor's black box was a risk. llm-relay was built to take back visibility and control: monitor what's actually happening, diagnose problems independently, and orchestrate across multiple CLI tools (Claude Code, Codex, Gemini) so no single provider becomes a single point of failure.
+
 ## Features
 
 - **Proxy**: Transparent API proxy with cache/token monitoring and 12-strategy pruning
