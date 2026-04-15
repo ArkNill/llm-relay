@@ -61,6 +61,58 @@
     }).join("");
   }
 
+  function formatDuration(seconds) {
+    if (!seconds || seconds < 60) return Math.round(seconds || 0) + "s";
+    var m = Math.floor(seconds / 60);
+    if (m < 60) return m + "m";
+    var h = Math.floor(m / 60);
+    return h + "h" + (m % 60) + "m";
+  }
+
+  var lastTurnHash = "";
+
+  async function loadTurnMonitor() {
+    var container = document.getElementById("turn-cards");
+    var updated = document.getElementById("turn-updated");
+    var data = await fetchJSON("/turns?window=4");
+    if (!data || !data.sessions || data.sessions.length === 0) {
+      if (lastTurnHash !== "EMPTY") {
+        container.innerHTML = '<div class="turn-monitor-empty">활성 세션 없음</div>';
+        lastTurnHash = "EMPTY";
+      }
+      return;
+    }
+
+    // Diff check — skip DOM update if data unchanged (workstation GPU load mitigation)
+    var hash = data.sessions.map(function (s) {
+      return s.session_id + ":" + s.turns + ":" + s.zone;
+    }).join("|");
+    if (hash === lastTurnHash) return;
+    lastTurnHash = hash;
+
+    var now = Date.now() / 1000;
+    container.innerHTML = data.sessions.map(function (s) {
+      var sidShort = s.session_id.substring(0, 8);
+      var duration = s.duration_s || 0;
+      var idleS = now - (s.last_ts || now);
+      var pct = Math.min(100, (s.turns / 300) * 100);
+      var msg = s.message ? '<div class="message">' + s.message + '</div>' : '';
+      return '<div class="turn-card zone-' + s.zone + '">' +
+        '<div class="sid">' + sidShort + '</div>' +
+        '<div class="turn-count">' + s.turns + '<span class="label">/ 300</span></div>' +
+        '<div class="meta">' +
+          '<span>' + formatDuration(duration) + ' elapsed</span>' +
+          '<span>idle ' + formatDuration(idleS) + '</span>' +
+        '</div>' +
+        '<div class="bar"><div class="bar-fill" style="width:' + pct + '%"></div></div>' +
+        msg +
+      '</div>';
+    }).join("");
+
+    var ts = new Date();
+    updated.textContent = "updated " + ts.toLocaleTimeString();
+  }
+
   async function loadHistory() {
     var tbody = document.querySelector("#history-table tbody");
     var data = await fetchJSON("/delegations?limit=20");
@@ -83,7 +135,39 @@
   loadCLIStatus();
   loadStats();
   loadHistory();
+  loadTurnMonitor();
 
-  // Auto-refresh every 30s
-  setInterval(function () { loadHealth(); loadStats(); loadHistory(); }, 30000);
+  // Polling intervals — pause when tab is hidden (Page Visibility API)
+  // Reduces GPU/CPU load when user isn't actively viewing
+  var turnInterval = null;
+  var otherInterval = null;
+
+  function startPolling() {
+    if (turnInterval === null) {
+      turnInterval = setInterval(loadTurnMonitor, 2000);  // 2s (was 1s, GPU mitigation)
+    }
+    if (otherInterval === null) {
+      otherInterval = setInterval(function () {
+        loadHealth(); loadStats(); loadHistory();
+      }, 30000);
+    }
+  }
+
+  function stopPolling() {
+    if (turnInterval !== null) { clearInterval(turnInterval); turnInterval = null; }
+    if (otherInterval !== null) { clearInterval(otherInterval); otherInterval = null; }
+  }
+
+  document.addEventListener("visibilitychange", function () {
+    if (document.hidden) {
+      stopPolling();
+      document.body.classList.add("tab-hidden");
+    } else {
+      document.body.classList.remove("tab-hidden");
+      loadTurnMonitor();  // immediate refresh on return
+      startPolling();
+    }
+  });
+
+  startPolling();
 })();
