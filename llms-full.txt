@@ -1,0 +1,108 @@
+# llm-relay
+> Unified LLM usage management — API proxy, session diagnostics, multi-CLI orchestration
+
+Python >=3.9 | MCP >=3.10 | zero-dep core
+Extras: `[proxy]` httpx+uvicorn+starlette | `[mcp]` FastMCP | `[cli]` click+rich | `[all]`
+
+## Module Structure
+
+```
+src/llm_relay/
+├── proxy       — Transparent API proxy (cache/token monitoring, 12-strategy pruning, Starlette app)
+├── detect      — 8 session health detectors
+├── recover     — Session recovery + doctor (7 health checks)
+├── guard       — 4-tier threshold daemon
+├── cost        — Per-1% cost calculation, rate-limit header analysis
+├── orch        — Multi-CLI orchestration (models/discovery/executor/db/router) — stdlib only
+├── mcp         — FastMCP server, 7 tools (stdio transport)
+├── api         — HTTP API endpoints (/api/v1/...) + display helper
+├── dashboard   — Static SPA dashboard (vanilla JS)
+├── display     — Turn counter page with multi-CLI provider badges
+├── providers   — Session parsers (Claude Code JSONL, Codex JSONL, Gemini JSON)
+├── strategies  — Pruning strategies (gentle/standard/aggressive)
+└── formatters  — Output formatters (plain, JSON, rich)
+```
+
+## CLI Commands
+
+```bash
+llm-relay scan [--provider claude-code|openai-codex|gemini-cli] [--format json|plain|rich]
+llm-relay doctor [--fix]
+llm-relay recover [--session-id ID]
+```
+
+## Detectors
+
+| Detector | Triggers |
+|----------|----------|
+| orphan | tool_use without matching tool_result |
+| stuck | repeated identical assistant responses |
+| inflation | context size growing faster than expected |
+| synthetic | machine-generated user messages |
+| bloat | oversized tool results (>50K chars) |
+| cache | prompt cache miss patterns |
+| resume | incomplete session resumption |
+| microcompact | aggressive context clearing artifacts |
+
+## Pruning Strategies (12 total)
+
+**Gentle** (4): pre-compaction removal, progress ticks, duplicate snapshots, billing metadata
+**Standard** (4): thinking blocks, oversized tool output, stale tool results, duplicate system reminders
+**Aggressive** (4): HTTP spam runs, error-retry loops, mega blocks, base64 images
+
+## API Endpoints
+
+| Method | Path | Description |
+|--------|------|-------------|
+| GET | /api/v1/cli/status | CLI installation and auth status |
+| GET | /api/v1/sessions | Session summaries from proxy DB |
+| GET | /api/v1/sessions/turns | Turn counts with token metrics |
+| GET | /api/v1/display | Multi-CLI sessions with liveness detection |
+| GET | /api/v1/cost | Cost breakdown |
+| GET | /api/v1/delegations | CLI delegation history |
+| GET | /api/v1/delegations/stats | Delegation statistics |
+| POST | /api/v1/session-terminal | Register terminal metadata |
+| GET | /api/v1/health | Health check |
+
+## MCP Tools
+
+| Tool | Description |
+|------|-------------|
+| cli_status | Check installed/authenticated CLIs |
+| cli_probe | Deep probe a specific CLI |
+| cli_delegate | Delegate task to a CLI |
+| orch_delegate | Smart delegation with routing strategy |
+| orch_history | Recent delegation history |
+| relay_stats | Token usage and error rate stats |
+| session_turns | Turn count for sessions |
+
+## Web Pages
+
+- `/dashboard/` — CLI status, cost, delegation history
+- `/display/` — Turn counter with CC/Codex/Gemini session cards, provider badges, liveness detection
+
+## Docker
+
+```yaml
+# docker-compose.yml
+services:
+  llm-relay:
+    build: .
+    ports:
+      - "127.0.0.1:8080:8080"
+    volumes:
+      - ${HOME}/.llm-relay:/data/legacy
+    environment:
+      - LLM_RELAY_UPSTREAM=https://api.anthropic.com
+      - LLM_RELAY_DB=/data/legacy/usage.db
+```
+
+Claude Code proxy: `ANTHROPIC_BASE_URL=http://localhost:8080`
+
+## Provider Session Formats
+
+| Provider | Path | Format |
+|----------|------|--------|
+| Claude Code | ~/.claude/projects/*/*.jsonl | JSONL (type/message/timestamp) |
+| Codex | ~/.codex/sessions/YYYY/MM/DD/*.jsonl | JSONL (type/payload with role) |
+| Gemini | ~/.gemini/tmp/*/chats/*.json | JSON ({sessionId, messages}) |

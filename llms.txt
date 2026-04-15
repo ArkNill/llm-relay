@@ -1,0 +1,17 @@
+# llm-relay
+> Unified LLM usage management — API proxy, session diagnostics, multi-CLI orchestration
+- `pip install llm-relay` / `llm-relay[proxy]` / `llm-relay[mcp]` / `llm-relay[all]`
+- Python >=3.9 | MCP requires >=3.10 | zero-dep core (detect/recover/guard/cost)
+- 8 session detectors: orphan, stuck, inflation, synthetic, bloat, cache, resume, microcompact
+- 12-strategy pruning (gentle/standard/aggressive tiers)
+- Multi-CLI orchestration: Claude Code, Codex CLI, Gemini CLI
+- Web display: `/dashboard/` + `/display/` with provider badges (CC/Codex/Gemini)
+- MCP: 7 tools (cli_delegate, cli_status, cli_probe, orch_delegate, orch_history, relay_stats, session_turns)
+```bash
+llm-relay scan          # 8-detector session health check
+llm-relay doctor        # 7-check configuration health
+llm-relay recover       # extract session context for resumption
+uvicorn llm_relay.proxy.proxy:app --port 8083  # web dashboard
+llm-relay-mcp           # MCP server (stdio)
+```
+- [Docs](https://github.com/QuartzUnit/llm-relay) | [PyPI](https://pypi.org/project/llm-relay/) | [Full API](/llms-full.txt)
