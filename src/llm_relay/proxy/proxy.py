@@ -42,7 +42,7 @@ _SSE_PARSE_USAGE = os.getenv("LLM_RELAY_SSE_PARSE_USAGE", "1") == "1"
 
 CLEARED_MARKER = "[Old tool result content cleared]"
 
-# FeatureFlags per-tool caps (from server_tool_caps)
+# Per-tool result size caps (server-side configuration)
 TOOL_CAPS = {
     "global": 50_000,
     "Bash": 30_000,
@@ -51,7 +51,7 @@ TOOL_CAPS = {
     "Glob": 20_000,
     "Snip": 1_000,
 }
-AGGREGATE_CAP = 200_000  # server_aggregate_cap
+AGGREGATE_CAP = 200_000  # aggregate tool result cap
 
 _RATELIMIT_PREFIXES = ("x-ratelimit-", "anthropic-ratelimit-", "retry-after")
 
