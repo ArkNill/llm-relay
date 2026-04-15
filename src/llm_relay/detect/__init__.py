@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-__version__ = "0.1.0"
+__version__ = "0.3.0"
 __all__ = ["__version__", "get_all_detectors", "get_detectors_for_provider"]
 
 if TYPE_CHECKING:
