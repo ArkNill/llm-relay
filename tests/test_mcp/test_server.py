@@ -1,7 +1,13 @@
 """Tests for mcp/server.py — MCP tool functions (unit tests, no actual CLI calls)."""
 
 import json
+import sys
 from unittest.mock import MagicMock, patch
+
+import pytest
+
+if sys.version_info < (3, 10):
+    pytest.skip("mcp requires Python 3.10+", allow_module_level=True)
 
 from llm_relay.orch.models import AuthMethod, CLIStatus, DelegationResult
 
