@@ -1,4 +1,4 @@
-"""llm-relay detect — Diagnostic health-check for LLM CLI sessions."""
+"""llm-relay detect -- Diagnostic health-check for LLM CLI sessions."""
 
 from __future__ import annotations
 

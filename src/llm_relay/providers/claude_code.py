@@ -1,4 +1,4 @@
-"""Claude Code session provider — wraps existing scanner + parser."""
+"""Claude Code session provider -- wraps existing scanner + parser."""
 
 from __future__ import annotations
 

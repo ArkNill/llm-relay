@@ -1,4 +1,4 @@
-"""Detector: Orphan tool calls — tool_use without matching tool_result and vice versa.
+"""Detector: Orphan tool calls -- tool_use without matching tool_result and vice versa.
 
 Absorbs the two-pass correlation algorithm from kolkov/ccdiag.
 """

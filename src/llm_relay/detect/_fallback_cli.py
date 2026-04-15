@@ -1,4 +1,4 @@
-"""Argparse-based CLI fallback — zero dependencies."""
+"""Argparse-based CLI fallback -- zero dependencies."""
 
 from __future__ import annotations
 
@@ -27,7 +27,7 @@ def main() -> None:
 
     parser = argparse.ArgumentParser(
         prog="llm-relay",
-        description="AI CLI Session Health Check — read-only diagnostics.",
+        description="AI CLI Session Health Check -- read-only diagnostics.",
     )
     parser.add_argument("--all", "-a", action="store_true", dest="scan_all", help="Scan all sessions")
     parser.add_argument("--last", "-n", type=int, default=None, dest="last_n", help="Scan last N sessions")
@@ -100,7 +100,7 @@ def main() -> None:
     provider_label = "/".join(p.display_name for p in providers)
 
     if not args.json_output:
-        print(f"llm-relay v{__version__} [{provider_label}] — scanning {_format_size(scan_size)} ...")
+        print(f"llm-relay v{__version__} [{provider_label}] -- scanning {_format_size(scan_size)} ...")
 
     # Parse sessions
     parsed_sessions = [prov.parse_session(sf.path) for prov, sf in all_session_files]

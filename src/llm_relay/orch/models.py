@@ -1,4 +1,4 @@
-"""Domain models for CLI orchestration — stdlib only."""
+"""Domain models for CLI orchestration -- stdlib only."""
 
 from __future__ import annotations
 

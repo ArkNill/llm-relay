@@ -1,4 +1,4 @@
-"""CLI binary discovery and authentication probing — stdlib only."""
+"""CLI binary discovery and authentication probing -- stdlib only."""
 
 from __future__ import annotations
 

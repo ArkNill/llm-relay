@@ -1,4 +1,4 @@
-"""Pruning orchestrator — compose strategies, execute pipeline, relink UUIDs.
+"""Pruning orchestrator -- compose strategies, execute pipeline, relink UUIDs.
 
 Usage:
     from llm_relay.proxy.pruner import prune
@@ -130,7 +130,7 @@ def _relink_parent_uuids(
         if cursor and cursor in surviving:
             msg["parentUuid"] = cursor
         else:
-            # No surviving ancestor found — make it a root
+            # No surviving ancestor found -- make it a root
             msg["parentUuid"] = ""
 
 

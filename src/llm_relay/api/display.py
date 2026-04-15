@@ -1,4 +1,4 @@
-"""Display page helper — extracts last user prompts from session transcripts.
+"""Display page helper -- extracts last user prompts from session transcripts.
 
 Lightweight tail-based JSONL parsing for real-time dashboard display.
 Supports Claude Code, OpenAI Codex, and Gemini CLI sessions.
@@ -84,21 +84,21 @@ def _get_projects_dirs(projects_dir: Optional[Path] = None) -> list:
     env_path = os.getenv("CC_CLAUDE_PROJECTS_DIR")
     if env_path:
         dirs.append(Path(env_path))
-    # Claude Code — stock
+    # Claude Code -- stock
     stock = find_projects_dir()
     if stock.is_dir() and stock not in dirs:
         dirs.append(stock)
-    # Claude Code — claudeGt isolated
+    # Claude Code -- claudeGt isolated
     gt = Path.home() / ".claude-gt" / "projects"
     if gt.is_dir() and gt not in dirs:
         dirs.append(gt)
-    # Codex — sessions dir
+    # Codex -- sessions dir
     codex_env = os.environ.get("LLM_RELAY_CODEX_HOME")
     codex_base = Path(codex_env) if codex_env else Path.home() / ".codex"
     codex_sessions = codex_base / "sessions"
     if codex_sessions.is_dir() and codex_sessions not in dirs:
         dirs.append(codex_sessions)
-    # Gemini — tmp/*/chats dirs
+    # Gemini -- tmp/*/chats dirs
     gemini_env = os.environ.get("LLM_RELAY_GEMINI_HOME")
     gemini_home = Path(gemini_env) if gemini_env else Path.home() / ".gemini"
     gemini_tmp = gemini_home / "tmp"

@@ -1,4 +1,4 @@
-"""Turn counter display page — static file serving helper."""
+"""Turn counter display page -- static file serving helper."""
 
 from __future__ import annotations
 

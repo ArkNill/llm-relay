@@ -1,4 +1,4 @@
-"""Click-based CLI — requires [cli] extra (click + rich)."""
+"""Click-based CLI -- requires [cli] extra (click + rich)."""
 
 from __future__ import annotations
 
@@ -25,7 +25,7 @@ def _format_size(size_bytes: int) -> str:
 @click.group(invoke_without_command=True)
 @click.pass_context
 def cli(ctx: click.Context) -> None:
-    """AI CLI Session Health Check — read-only diagnostics."""
+    """AI CLI Session Health Check -- read-only diagnostics."""
     if ctx.invoked_subcommand is None:
         ctx.invoke(scan)
 
@@ -55,7 +55,7 @@ def scan(
     verbose: bool,
     no_color: bool,
 ) -> None:
-    """AI CLI Session Health Check — read-only diagnostics."""
+    """AI CLI Session Health Check -- read-only diagnostics."""
     # Determine limit
     limit = None
     if session_id:
@@ -119,10 +119,10 @@ def scan(
             console = Console()
             console.print(
                 f"\n[bold]llm-relay v{__version__}[/bold] [{provider_label}] "
-                f"— scanning {_format_size(scan_size)} ..."
+                f"-- scanning {_format_size(scan_size)} ..."
             )
         except ImportError:
-            click.echo(f"llm-relay v{__version__} [{provider_label}] — scanning {_format_size(scan_size)} ...")
+            click.echo(f"llm-relay v{__version__} [{provider_label}] -- scanning {_format_size(scan_size)} ...")
 
     # Parse sessions
     parsed_sessions = [prov.parse_session(sf.path) for prov, sf in all_session_files]
@@ -208,7 +208,7 @@ def doctor(fix: bool) -> None:
                 r.name,
                 f"[{status_style.get(r.status, '')}]{r.status}[/]",
                 r.detail,
-                r.recommendation or "—",
+                r.recommendation or "--",
             )
 
         console.print(table)

@@ -1,4 +1,4 @@
-"""Detector: Context Stripping — microcompact + tool result clearing (Bug B4, #42542)."""
+"""Detector: Context Stripping -- microcompact + tool result clearing (Bug B4, #42542)."""
 
 from __future__ import annotations
 

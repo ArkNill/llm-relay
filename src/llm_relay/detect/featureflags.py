@@ -1,4 +1,4 @@
-"""Detector: FeatureFlags Feature Flag Analysis — global (not per-session)."""
+"""Detector: FeatureFlags Feature Flag Analysis -- global (not per-session)."""
 
 from __future__ import annotations
 

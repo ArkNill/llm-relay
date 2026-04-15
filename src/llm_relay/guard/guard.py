@@ -1,4 +1,4 @@
-"""Guard daemon — context size monitoring with threshold-based intervention.
+"""Guard daemon -- context size monitoring with threshold-based intervention.
 
 Absorbs the guard concept from cozempic: continuous monitoring of session
 context growth with 4-tier thresholds for automated response.
@@ -116,7 +116,7 @@ class Guard:
                 with open(jsonl_path, encoding="utf-8") as f:
                     first_line = f.readline()
                     if session_id in first_line:
-                        # Found it — checkpoint
+                        # Found it -- checkpoint
                         self.config.checkpoint_dir.mkdir(parents=True, exist_ok=True)
                         ts = int(time.time())
                         dest = self.config.checkpoint_dir / f"{session_id[:12]}_{ts}.jsonl"
@@ -170,19 +170,19 @@ async def guard_loop(guard: Guard) -> None:
 
             if tier == "checkpoint":
                 logger.info(
-                    "Session %s at %.0f%% context — checkpointing",
+                    "Session %s at %.0f%% context -- checkpointing",
                     sid[:12], pct,
                 )
                 guard.checkpoint_session(sid)
             elif guard.config.mode == "passive":
                 logger.warning(
-                    "Session %s at %.0f%% context — recommend %s prune",
+                    "Session %s at %.0f%% context -- recommend %s prune",
                     sid[:12], pct, tier,
                 )
             else:
                 # Active mode: trigger prune
                 logger.warning(
-                    "Session %s at %.0f%% context — triggering %s prune",
+                    "Session %s at %.0f%% context -- triggering %s prune",
                     sid[:12], pct, tier,
                 )
                 # In active mode, we would call the pruner here.

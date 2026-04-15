@@ -1,4 +1,4 @@
-"""Provider registry — auto-detect and load session providers."""
+"""Provider registry -- auto-detect and load session providers."""
 
 from __future__ import annotations
 

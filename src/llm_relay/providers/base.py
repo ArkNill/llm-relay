@@ -1,4 +1,4 @@
-"""Base provider interface — all providers must be stdlib-only."""
+"""Base provider interface -- all providers must be stdlib-only."""
 
 from __future__ import annotations
 

@@ -1,4 +1,4 @@
-"""Data models for llm-relay — all stdlib, zero dependencies."""
+"""Data models for llm-relay -- all stdlib, zero dependencies."""
 
 from __future__ import annotations
 

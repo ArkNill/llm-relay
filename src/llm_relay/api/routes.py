@@ -1,4 +1,4 @@
-"""Starlette API routes for dashboard data — reuses existing proxy dependencies."""
+"""Starlette API routes for dashboard data -- reuses existing proxy dependencies."""
 
 from __future__ import annotations
 
@@ -101,15 +101,15 @@ async def _api_sessions(request: Request) -> Response:
 
 # Turn count is display-only and no longer drives zone judgment.
 # Zones are computed from current_ctx (token-based) via two independent scales:
-#   A) absolute thresholds  — env CC_TOKEN_A_YELLOW/ORANGE/RED/HARD
-#   B) ratio-of-ceiling     — env CC_TOKEN_CEILING (50/70/90/100 %)
+#   A) absolute thresholds  -- env CC_TOKEN_A_YELLOW/ORANGE/RED/HARD
+#   B) ratio-of-ceiling     -- env CC_TOKEN_CEILING (50/70/90/100 %)
 # Overall zone = worst of A and B (max).
 
 _ZONE_ORDER = {"green": 0, "yellow": 1, "orange": 2, "red": 3, "hard": 4}
 
 
 def _classify_zone(turns: int) -> tuple:
-    """Legacy turn-based classification — kept only for backward compatibility.
+    """Legacy turn-based classification -- kept only for backward compatibility.
 
     Not used by any endpoint anymore. Turn counts are display-only now.
     """
@@ -127,7 +127,7 @@ def _classify_zone(turns: int) -> tuple:
 
 
 def _classify_zone_absolute(tokens: int) -> tuple:
-    """Zone A — absolute token threshold classification.
+    """Zone A -- absolute token threshold classification.
 
     Env: CC_TOKEN_A_YELLOW / _A_ORANGE / _A_RED / _A_HARD
     Returns (zone, zone_label, next_threshold, message).
@@ -149,7 +149,7 @@ def _classify_zone_absolute(tokens: int) -> tuple:
 
 
 def _classify_zone_ratio(tokens: int, ceiling: Optional[int] = None) -> tuple:
-    """Zone B — ratio-of-ceiling classification (50/70/90/100%).
+    """Zone B -- ratio-of-ceiling classification (50/70/90/100%).
 
     Env: CC_TOKEN_CEILING (default 1,000,000 for local / 500,000 recommended for public)
     Returns (zone, zone_label, next_threshold, message).
@@ -487,7 +487,7 @@ async def _api_cost(request: Request) -> Response:
 # ── GET /api/v1/health ──
 
 async def _api_health(request: Request) -> Response:
-    """Combined health check — CLI status + proxy status."""
+    """Combined health check -- CLI status + proxy status."""
     from llm_relay.orch.discovery import discover_all
 
     statuses = discover_all()

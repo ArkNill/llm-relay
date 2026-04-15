@@ -1,4 +1,4 @@
-"""Doctor — 7 health checks for Claude Code configuration and session integrity.
+"""Doctor -- 7 health checks for Claude Code configuration and session integrity.
 
 Absorbs health check patterns from cozempic's doctor module, adapted for
 llm-relay's zero-dep core philosophy.
@@ -56,14 +56,14 @@ def check_trust_dialog_hang() -> HealthResult:
     except (json.JSONDecodeError, OSError):
         return HealthResult(
             "trust-dialog-hang", "issue",
-            ".claude.json is corrupted — cannot check trust dialog",
+            ".claude.json is corrupted -- cannot check trust dialog",
             fixable=False,
         )
 
     if data.get("hasTrustDialogAccepted") is True:
         return HealthResult(
             "trust-dialog-hang", "warning",
-            "hasTrustDialogAccepted=true — can cause resume hangs on some setups",
+            "hasTrustDialogAccepted=true -- can cause resume hangs on some setups",
             recommendation="Set to false: jq '.hasTrustDialogAccepted = false' ~/.claude.json | sponge ~/.claude.json",
             fixable=True,
         )
@@ -84,7 +84,7 @@ def check_hooks_trust_flag() -> HealthResult:
     if "hasTrustDialogHooksAccepted" not in data:
         return HealthResult(
             "hooks-trust-flag", "warning",
-            "hasTrustDialogHooksAccepted missing — hooks may be silently blocked",
+            "hasTrustDialogHooksAccepted missing -- hooks may be silently blocked",
             recommendation="Add: jq '.hasTrustDialogHooksAccepted = true' ~/.claude.json | sponge ~/.claude.json",
             fixable=True,
         )
@@ -290,7 +290,7 @@ def check_relay_health() -> HealthResult:
     elif not db_exists:
         return HealthResult(
             "relay-health", "warning",
-            "llm-relay DB not found — proxy may not have been set up",
+            "llm-relay DB not found -- proxy may not have been set up",
             recommendation="Set up with: pip install llm-relay && llm-relay serve",
         )
     return HealthResult("relay-health", "ok", "No issues")

@@ -1,4 +1,4 @@
-"""Session recovery — extract context from JSONL for resumption in a new session.
+"""Session recovery -- extract context from JSONL for resumption in a new session.
 
 Absorbs the recover algorithm from kolkov/ccdiag: walk the session JSONL
 and extract files modified, git commands, GitHub actions, URLs, and issue

@@ -53,7 +53,7 @@ def analyze_all(
         report = analyze_session(session, featureflags=featureflags)
         reports.append(report)
 
-    # FeatureFlags findings are global — extract from the first session report and deduplicate
+    # FeatureFlags findings are global -- extract from the first session report and deduplicate
     gb_finding_ids: set = set()
     for report in reports:
         for finding in list(report.findings):
