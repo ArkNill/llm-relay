@@ -12,3 +12,18 @@ build/
 .ruff_cache/
 .mypy_cache/
 vendor/
+
+# FeatureFlags intercept (LOCAL-ONLY — DO NOT COMMIT)
+src/llm_relay/proxy/legacy_module.py
+
+# Investigation/evidence files (local-only analysis)
+docs/investigation-*
+docs/evidence-*/
+
+# Backup files
+docker-compose.yml.bak*
+
+# Credential files
+*.key
+*.pem
+oauth_creds.json
