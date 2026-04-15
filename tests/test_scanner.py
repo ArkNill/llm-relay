@@ -84,8 +84,8 @@ class TestLoadFeatureFlags:
             json.dumps(
                 {
                     "cachedFeatureFlagsFeatures": {
-                        "server_aggregate_cap": 200000,
-                        "server_tool_caps": {"global": 50000, "Bash": 30000},
+                        "config_budget_window_window": 200000,
+                        "config_per_tool_caps": {"global": 50000, "Bash": 30000},
                         "config_time_compact": True,
                         "config_ctx_gate": False,
                     }

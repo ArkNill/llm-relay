@@ -21,7 +21,7 @@ class TestFeatureFlagsDetector:
         parsed = self._make_session(tmp_path)
         gb = FeatureFlagsConfig(
             budget_window_window=200000,
-            raw_flags={"server_aggregate_cap": 200000},
+            raw_flags={"config_budget_window_window": 200000},
         )
         findings = FeatureFlagsDetector().check(parsed, featureflags=gb)
         budget_findings = [f for f in findings if "Budget" in f.title]
@@ -32,7 +32,7 @@ class TestFeatureFlagsDetector:
         parsed = self._make_session(tmp_path)
         gb = FeatureFlagsConfig(
             budget_window_window=300000,  # above threshold
-            raw_flags={"server_aggregate_cap": 300000, "config_ctx_gate": True},
+            raw_flags={"config_budget_window_window": 300000, "config_ctx_gate": True},
         )
         findings = FeatureFlagsDetector().check(parsed, featureflags=gb)
         info_findings = [f for f in findings if f.severity == Severity.INFO]
