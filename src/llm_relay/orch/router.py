@@ -1,4 +1,4 @@
-"""Request routing — select the best CLI based on strategy and auth priority."""
+"""Request routing -- select the best CLI based on strategy and auth priority."""
 
 from __future__ import annotations
 

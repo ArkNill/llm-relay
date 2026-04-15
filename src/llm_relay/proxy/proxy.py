@@ -1,4 +1,4 @@
-"""Transparent reverse proxy — forwards all requests to Anthropic API, logs usage."""
+"""Transparent reverse proxy -- forwards all requests to Anthropic API, logs usage."""
 
 from __future__ import annotations
 
@@ -147,7 +147,7 @@ def _scan_budget_enforcement(req_json: dict, session_id: str | None) -> None:
 
     if total_chars > 0:
         logger.debug(
-            "📊 TOOL RESULT BUDGET: %d results, %d total chars (cap=%d) — session %s",
+            "📊 TOOL RESULT BUDGET: %d results, %d total chars (cap=%d) -- session %s",
             len(tool_results),
             total_chars,
             AGGREGATE_CAP,
@@ -155,7 +155,7 @@ def _scan_budget_enforcement(req_json: dict, session_id: str | None) -> None:
         )
         if total_chars > AGGREGATE_CAP:
             logger.warning(
-                "⚠ BUDGET EXCEEDED: %d chars > %d cap — budget enforcement likely active",
+                "⚠ BUDGET EXCEEDED: %d chars > %d cap -- budget enforcement likely active",
                 total_chars,
                 AGGREGATE_CAP,
             )
@@ -198,7 +198,7 @@ def _scan_microcompact(req_json: dict, session_id: str | None) -> None:
 
     if cleared_indices:
         logger.warning(
-            "🔴 MICROCOMPACT DETECTED: %d/%d tool results cleared (msg indices: %s) — session %s",
+            "🔴 MICROCOMPACT DETECTED: %d/%d tool results cleared (msg indices: %s) -- session %s",
             len(cleared_indices),
             total_tool_results,
             cleared_indices[:10],
@@ -259,7 +259,7 @@ def _warn_if_poor(usage: dict, endpoint: str) -> None:
         ratio = usage["cache_read"] / total * 100
         if ratio < WARN_READ_RATIO:
             logger.warning(
-                "⚠ LOW CACHE HIT: %.1f%% (read=%d, creation=%d) — %s",
+                "⚠ LOW CACHE HIT: %.1f%% (read=%d, creation=%d) -- %s",
                 ratio,
                 usage["cache_read"],
                 usage["cache_creation"],
@@ -277,7 +277,7 @@ async def _proxy(request: Request) -> Response:
     body = await request.body()
     headers = dict(request.headers)
     # Strip hop-by-hop headers only. Preserve accept-encoding so the upstream
-    # leg (internet) stays gzip-compressed — httpx auto-decompresses locally and
+    # leg (internet) stays gzip-compressed -- httpx auto-decompresses locally and
     # we strip content-encoding on the response to send plain bytes to the
     # client over loopback (bytes saved upstream, not re-encoded on loopback).
     for h in ("host", "transfer-encoding", "connection", "content-length"):
@@ -325,7 +325,7 @@ async def _proxy(request: Request) -> Response:
     resp_body = upstream_resp.content
     rl_headers = _extract_ratelimit_headers(upstream_resp.headers)
 
-    # FeatureFlags feature routing (local-only defence — no-op if module absent)
+    # FeatureFlags feature routing (local-only defence -- no-op if module absent)
     if _legacy_flag and legacy_fn() and legacy_fn(path):
         try:
             gb_data = json.loads(resp_body)
@@ -334,7 +334,7 @@ async def _proxy(request: Request) -> Response:
                 resp_body = json.dumps(gb_data, ensure_ascii=False).encode("utf-8")
                 sid = headers.get("x-claude-code-session-id") or headers.get("x-session-id")
                 logger.info(
-                    "\U0001f6e1 INTERCEPTED %s — %d flags: %s",
+                    "\U0001f6e1 INTERCEPTED %s -- %d flags: %s",
                     path, len(touched), ", ".join(touched),
                 )
                 legacy_fn(
@@ -350,7 +350,7 @@ async def _proxy(request: Request) -> Response:
         resp_json = json.loads(resp_body)
         usage = _extract_usage(resp_json)
         _warn_if_poor(usage, path)
-        # Synchronous log — WAL mode keeps this ~0.6ms. Moving to a worker
+        # Synchronous log -- WAL mode keeps this ~0.6ms. Moving to a worker
         # thread via asyncio.to_thread inside starlette response flow was
         # dropping records when the response task was torn down mid-await.
         log_request(
@@ -385,11 +385,11 @@ async def _proxy(request: Request) -> Response:
 
 
 async def _proxy_stream(client, method, url, headers, body, path, t0, body_bytes=0):
-    """Handle streaming responses — true streaming proxy via client.stream().
+    """Handle streaming responses -- true streaming proxy via client.stream().
 
     Uses an incremental UTF-8 decoder + line buffer so multibyte characters and
     SSE lines that span chunk boundaries are decoded correctly (C2 fix from
-    audit-full-source-20260410.md — mojibake root cause candidate).
+    audit-full-source-20260410.md -- mojibake root cause candidate).
     """
     req = client.build_request(method=method, url=url, headers=headers, content=body)
     upstream_resp = await client.send(req, stream=True)
@@ -434,14 +434,14 @@ async def _proxy_stream(client, method, url, headers, body, path, t0, body_bytes
         line_buf = ""
         try:
             async for chunk in upstream_resp.aiter_bytes():
-                # Always forward bytes immediately — optional usage parsing is
+                # Always forward bytes immediately -- optional usage parsing is
                 # piggybacked on the decoded copy, not on the forwarded bytes.
                 yield chunk
 
                 if not _SSE_PARSE_USAGE:
                     continue
 
-                # Incremental UTF-8 decode — handles multibyte chars that span
+                # Incremental UTF-8 decode -- handles multibyte chars that span
                 # chunk boundaries. Accumulate into a line buffer and only process
                 # complete lines (terminated by \n).
                 text = decoder.decode(chunk, final=False)
@@ -456,7 +456,7 @@ async def _proxy_stream(client, method, url, headers, body, path, t0, body_bytes
                 for line in lines[:-1]:
                     _process_sse_line(line)
         finally:
-            # Step 1 — flush the decoder (sync, safe under GeneratorExit).
+            # Step 1 -- flush the decoder (sync, safe under GeneratorExit).
             if _SSE_PARSE_USAGE:
                 try:
                     tail = decoder.decode(b"", final=True)
@@ -468,7 +468,7 @@ async def _proxy_stream(client, method, url, headers, body, path, t0, body_bytes
                 except Exception:
                     logger.debug("SSE decoder flush failed", exc_info=True)
 
-            # Step 2 — LOG FIRST (sync, must run even if aclose/GC cancels the
+            # Step 2 -- LOG FIRST (sync, must run even if aclose/GC cancels the
             # generator). Starlette discards the async generator without calling
             # aclose(), so GeneratorExit fires at the yield site and any later
             # `await` in the finally chain can be cut short. Putting log_request
@@ -495,7 +495,7 @@ async def _proxy_stream(client, method, url, headers, body, path, t0, body_bytes
             except Exception:
                 logger.warning("log_request failed (stream path)", exc_info=True)
 
-            # Step 3 — close the upstream response last. Wrap in try/except
+            # Step 3 -- close the upstream response last. Wrap in try/except
             # because an async generator being finalised via GC may cancel the
             # await; we still want the resource closed and any error surfaced
             # at debug level, but not propagated.
@@ -557,7 +557,7 @@ async def _lifespan(app):
     yield
 
 
-# Build unified route list — API and dashboard before catch-all proxy
+# Build unified route list -- API and dashboard before catch-all proxy
 _routes = [
     Route("/_health", _health, methods=["GET"]),
     Route("/_stats", _stats, methods=["GET"]),

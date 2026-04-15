@@ -187,7 +187,7 @@ def cmd_prune(args):
     console.print(report.summary())
 
     if dry_run:
-        console.print("\n[dim]Dry run — no changes written. Use --execute to apply.[/]")
+        console.print("\n[dim]Dry run -- no changes written. Use --execute to apply.[/]")
     elif output_path:
         console.print(f"\n[green]Written to {output_path}[/]")
     else:
@@ -212,7 +212,7 @@ def cmd_strategies(args):
                 f"[{tier_style.get(tier, '')}]{tier}[/]",
                 s.name,
                 s.description,
-                s.estimated_savings or "—",
+                s.estimated_savings or "--",
             )
 
     console.print(table)
@@ -304,7 +304,7 @@ def cmd_guard(args):
 
     guard = Guard(GuardConfig(enabled=True, mode=args.mode))
     console = Console()
-    console.print("[bold]llm-relay guard[/] — context monitor")
+    console.print("[bold]llm-relay guard[/] -- context monitor")
     console.print(f"  mode: {args.mode}")
     console.print("  thresholds: 25% checkpoint / 55% gentle / 80% standard / 90% aggressive")
     console.print("\n[dim]Guard runs automatically when proxy is started with LLM_RELAY_GUARD=1[/]")
@@ -335,7 +335,7 @@ def cmd_watch(args):
     if row and row["max_id"]:
         last_id = row["max_id"]
 
-    console.print("[bold]llm-relay watch[/] — Ctrl+C to stop\n")
+    console.print("[bold]llm-relay watch[/] -- Ctrl+C to stop\n")
 
     try:
         while True:
@@ -366,7 +366,7 @@ def cmd_watch(args):
 def main():
     parser = argparse.ArgumentParser(
         prog="llm-relay",
-        description="Transparent API proxy for Claude Code — cache monitoring + cost tracking",
+        description="Transparent API proxy for Claude Code -- cache monitoring + cost tracking",
     )
     sub = parser.add_subparsers(dest="command")
 

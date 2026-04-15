@@ -1,4 +1,4 @@
-"""Plain text formatter — stdlib only."""
+"""Plain text formatter -- stdlib only."""
 
 from __future__ import annotations
 

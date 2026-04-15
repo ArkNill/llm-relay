@@ -1,4 +1,4 @@
-"""Standard pruning strategies — moderate trade-offs.
+"""Standard pruning strategies -- moderate trade-offs.
 
 These trim content that is unlikely to affect ongoing reasoning:
 thinking blocks (already consumed), oversized tool output, stale
@@ -234,7 +234,7 @@ def tool_result_age(
             content = block.get("content", "")
             if isinstance(content, str) and len(content) > 100:
                 tool_id = block.get("tool_use_id", "?")[:12]
-                block["content"] = f"[old tool result condensed — tool_use_id={tool_id}]"
+                block["content"] = f"[old tool result condensed -- tool_use_id={tool_id}]"
                 changed = True
 
         if changed:

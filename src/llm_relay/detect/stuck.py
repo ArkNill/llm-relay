@@ -1,4 +1,4 @@
-"""Detector: Stuck tool calls — tool_use followed by session continuation but no result.
+"""Detector: Stuck tool calls -- tool_use followed by session continuation but no result.
 
 Absorbs stuck-call detection and per-tool duration analysis from kolkov/ccdiag.
 """

@@ -1,4 +1,4 @@
-"""Rich console formatter — requires click+rich (optional [cli] extra)."""
+"""Rich console formatter -- requires click+rich (optional [cli] extra)."""
 
 from __future__ import annotations
 
@@ -29,7 +29,7 @@ class RichFormatter(BaseFormatter):
         self.verbose = verbose
 
     def format(self, report: FullReport) -> str:
-        """Return empty string — use print_report() for rich output."""
+        """Return empty string -- use print_report() for rich output."""
         return ""
 
     def print_report(self, report: FullReport) -> None:
@@ -40,7 +40,7 @@ class RichFormatter(BaseFormatter):
         console = Console()
 
         # Header
-        console.print(f"\n[bold]llm-relay v{report.relay_version}[/bold] — AI CLI Session Health Check")
+        console.print(f"\n[bold]llm-relay v{report.relay_version}[/bold] -- AI CLI Session Health Check")
         console.print(f"Scanned {report.sessions_scanned} of {report.total_sessions} sessions.\n")
 
         # Summary
@@ -80,7 +80,7 @@ class RichFormatter(BaseFormatter):
                     console.print(label)
                     ratio = sr.cache_read_ratio
                     if ratio is not None:
-                        console.print(f"   Cache read ratio: {ratio:.0%} — No issues detected.\n")
+                        console.print(f"   Cache read ratio: {ratio:.0%} -- No issues detected.\n")
                     continue
 
                 tree = Tree(label)
@@ -108,7 +108,7 @@ class RichFormatter(BaseFormatter):
 
         # Global findings
         if report.global_findings:
-            console.print("[bold]— Global —[/bold]")
+            console.print("[bold]-- Global --[/bold]")
             for f in report.global_findings:
                 sev_color = SEVERITY_COLORS.get(f.severity, "white")
                 console.print(f"  [{sev_color}]{f.severity.value.upper()}[/{sev_color}]  {f.title}")

@@ -1,4 +1,4 @@
-"""File safety utilities — atomic writes, advisory locks, change detection.
+"""File safety utilities -- atomic writes, advisory locks, change detection.
 
 Absorbs the FileSnapshot pattern from cozempic for safe concurrent writes
 when Claude may be appending to the same JSONL file.
@@ -22,7 +22,7 @@ class FileSnapshot:
 
     Used to detect what happened to a file between load and write:
     - unchanged: nothing happened
-    - appended: Claude added lines (safe — merge the delta)
+    - appended: Claude added lines (safe -- merge the delta)
     - conflict: file was replaced, truncated, or inode changed (unsafe)
     """
 
@@ -50,13 +50,13 @@ class FileSnapshot:
             return "conflict"
 
         if stat.st_size == self.size:
-            # Quick check — same size, verify hash
+            # Quick check -- same size, verify hash
             data = self.path.read_bytes()
             h = hashlib.md5(data, usedforsecurity=False).hexdigest()
             return "unchanged" if h == self.content_hash else "conflict"
 
         if stat.st_size > self.size:
-            # File grew — check if prefix is intact
+            # File grew -- check if prefix is intact
             data = self.path.read_bytes()
             prefix_hash = hashlib.md5(
                 data[: self.size], usedforsecurity=False

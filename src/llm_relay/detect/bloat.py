@@ -1,4 +1,4 @@
-"""Detector: Session Bloat — PRELIM/FINAL duplication ratio."""
+"""Detector: Session Bloat -- PRELIM/FINAL duplication ratio."""
 
 from __future__ import annotations
 

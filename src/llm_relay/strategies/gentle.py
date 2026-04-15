@@ -1,4 +1,4 @@
-"""Gentle pruning strategies — safe, high-confidence removals.
+"""Gentle pruning strategies -- safe, high-confidence removals.
 
 These remove data that is definitively redundant: already-summarised
 pre-compaction history, progress ticks, duplicate file snapshots,

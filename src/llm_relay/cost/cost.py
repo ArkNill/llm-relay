@@ -1,4 +1,4 @@
-"""Cost estimation — per-model pricing for Anthropic API calls.
+"""Cost estimation -- per-model pricing for Anthropic API calls.
 
 Absorbs the pricing model from kolkov/ccdiag.
 """

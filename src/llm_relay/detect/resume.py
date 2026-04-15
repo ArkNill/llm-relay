@@ -1,4 +1,4 @@
-"""Detector: Resume Corruption — timestamp anomalies, null bytes, version mismatch, DAG breaks (#43044)."""
+"""Detector: Resume Corruption -- timestamp anomalies, null bytes, version mismatch, DAG breaks (#43044)."""
 
 from __future__ import annotations
 
@@ -20,7 +20,7 @@ class ResumeDetector(BaseDetector):
                     detector_id=self.detector_id,
                     severity=Severity.WARN,
                     title="Null Byte Corruption",
-                    detail="Session file contains null bytes or replacement characters — possible data corruption.",
+                    detail="Session file contains null bytes or replacement characters -- possible data corruption.",
                     recommendation=(
                         "This session may have been corrupted during a resume or crash. "
                         "Start a new session."
@@ -46,7 +46,7 @@ class ResumeDetector(BaseDetector):
                     severity=Severity.WARN,
                     title="Timestamp Reversal",
                     detail=(
-                        f"{reversals} timestamp reversal{'s' if reversals != 1 else ''} detected — "
+                        f"{reversals} timestamp reversal{'s' if reversals != 1 else ''} detected -- "
                         f"entries appear out of chronological order."
                     ),
                     recommendation=(
@@ -91,7 +91,7 @@ class ResumeDetector(BaseDetector):
                     severity=Severity.WARN,
                     title="DAG Breaks",
                     detail=(
-                        f"{dag_breaks} message{'s' if dag_breaks != 1 else ''} with null parentUuid mid-session — "
+                        f"{dag_breaks} message{'s' if dag_breaks != 1 else ''} with null parentUuid mid-session -- "
                         f"conversation threading is broken."
                     ),
                     recommendation="Broken message chains can cause context loss on resume.",

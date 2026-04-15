@@ -1,4 +1,4 @@
-"""JSON formatter — stdlib only."""
+"""JSON formatter -- stdlib only."""
 
 from __future__ import annotations
 

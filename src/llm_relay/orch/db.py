@@ -1,4 +1,4 @@
-"""Orchestration database — extends the existing proxy SQLite DB with delegation tracking."""
+"""Orchestration database -- extends the existing proxy SQLite DB with delegation tracking."""
 
 from __future__ import annotations
 

@@ -1,4 +1,4 @@
-"""Subprocess execution wrapper for CLI tools — stdlib only."""
+"""Subprocess execution wrapper for CLI tools -- stdlib only."""
 
 from __future__ import annotations
 

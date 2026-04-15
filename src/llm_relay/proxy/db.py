@@ -125,7 +125,7 @@ _MIGRATIONS = [
 def get_conn(db_path: Path = DEFAULT_DB) -> sqlite3.Connection:
     db_path.parent.mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(str(db_path), check_same_thread=False)
-    # WAL mode — allows concurrent reads during writes and replaces the
+    # WAL mode -- allows concurrent reads during writes and replaces the
     # per-commit fsync chain with a single wal checkpoint, cutting hot-path
     # latency for the proxy logger. synchronous=NORMAL is the standard WAL
     # companion (loss-window ≤ 1 tx on crash, acceptable for a usage log).
@@ -133,7 +133,7 @@ def get_conn(db_path: Path = DEFAULT_DB) -> sqlite3.Connection:
         conn.execute("PRAGMA journal_mode=WAL")
         conn.execute("PRAGMA synchronous=NORMAL")
     except sqlite3.OperationalError:
-        # Some filesystems (e.g. network mounts) reject WAL — fall back quietly.
+        # Some filesystems (e.g. network mounts) reject WAL -- fall back quietly.
         pass
     conn.executescript(_SCHEMA)
     # Run migrations for existing databases
@@ -352,10 +352,10 @@ def get_turn_count(
 
     Returns dict with keys:
       turns, first_ts, last_ts,
-      current_ctx  — latest request's cache_read + cache_creation + input_tokens
-      peak_ctx     — MAX over session of (cache_read + cache_creation + input_tokens)
-      recent_peak  — MAX over last 5 requests of the same
-      cumul_unique — SUM over session of (input_tokens + cache_creation + output_tokens)
+      current_ctx  -- latest request's cache_read + cache_creation + input_tokens
+      peak_ctx     -- MAX over session of (cache_read + cache_creation + input_tokens)
+      recent_peak  -- MAX over last 5 requests of the same
+      cumul_unique -- SUM over session of (input_tokens + cache_creation + output_tokens)
     """
     row = conn.execute(
         """WITH ranked AS (

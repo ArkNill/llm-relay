@@ -1,4 +1,4 @@
-"""CC cache fix — normalize request body for stable prompt caching.
+"""CC cache fix -- normalize request body for stable prompt caching.
 
 Fixes two classes of cache invalidation that FeatureFlags override cannot address:
   - Type 1: Tool ordering jitter (MCP tools register async → non-deterministic order)
@@ -26,7 +26,7 @@ _SORT_TOOLS_ENABLED = os.getenv("LLM_RELAY_CACHE_FIX_SORT_TOOLS", "1") == "1"
 _CAPTURE_ENABLED = os.getenv("LLM_RELAY_CACHE_FIX_CAPTURE", "1") == "1"
 
 # --------------------------------------------------------------------------
-# Block detection (Phase 2 prep — used in Phase 1 for diagnostics only)
+# Block detection (Phase 2 prep -- used in Phase 1 for diagnostics only)
 # --------------------------------------------------------------------------
 
 _SR_PREFIX = "<system-reminder>"

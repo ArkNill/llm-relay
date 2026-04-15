@@ -177,7 +177,7 @@ def orch_delegate(
     strategy: str = "auto",
     preferred_cli: str = "",
 ) -> str:
-    """Smart delegation — automatically picks the best available CLI based on strategy.
+    """Smart delegation -- automatically picks the best available CLI based on strategy.
 
     Strategies:
     - auto: Smart selection (strongest model first)

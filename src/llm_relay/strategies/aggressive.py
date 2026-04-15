@@ -1,4 +1,4 @@
-"""Aggressive pruning strategies — higher savings, higher risk.
+"""Aggressive pruning strategies -- higher savings, higher risk.
 
 These remove content that *might* still be useful but is unlikely to
 affect the current reasoning path: HTTP spam runs, error-retry loops,
