@@ -15,9 +15,9 @@ src/llm_relay/
 ├── cost        — Per-1% cost calculation, rate-limit header analysis
 ├── orch        — Multi-CLI orchestration (models/discovery/executor/db/router) — stdlib only
 ├── mcp         — FastMCP server, 7 tools (stdio transport)
-├── api         — HTTP API endpoints (/api/v1/...) + display helper
-├── dashboard   — Static SPA dashboard (vanilla JS)
-├── display     — Turn counter page with multi-CLI provider badges
+├── api         — HTTP API endpoints (/api/v1/...) + display helper (multi-CLI session discovery, JSONL tail, /proc liveness via cc_pid + fd-open)
+├── dashboard   — Static SPA dashboard (vanilla JS) + Turn Monitor (alive sessions only)
+├── display     — Turn counter page with multi-CLI provider badges + alive filter
 ├── providers   — Session parsers (Claude Code JSONL, Codex JSONL, Gemini JSON)
 ├── strategies  — Pruning strategies (gentle/standard/aggressive)
 └── formatters  — Output formatters (plain, JSON, rich)
@@ -55,8 +55,8 @@ llm-relay recover [--session-id ID]
 |--------|------|-------------|
 | GET | /api/v1/cli/status | CLI installation and auth status |
 | GET | /api/v1/sessions | Session summaries from proxy DB |
-| GET | /api/v1/sessions/turns | Turn counts with token metrics |
-| GET | /api/v1/display | Multi-CLI sessions with liveness detection |
+| GET | /api/v1/sessions/turns | Turn counts with token metrics — alive sessions only (`?include_dead=1` to bypass) |
+| GET | /api/v1/display | Multi-CLI sessions with alive filter (CC: cc_pid + TTY fallback / Codex+Gemini: fd-open) |
 | GET | /api/v1/cost | Cost breakdown |
 | GET | /api/v1/delegations | CLI delegation history |
 | GET | /api/v1/delegations/stats | Delegation statistics |
@@ -77,8 +77,8 @@ llm-relay recover [--session-id ID]
 
 ## Web Pages
 
-- `/dashboard/` — CLI status, cost, delegation history
-- `/display/` — Turn counter with CC/Codex/Gemini session cards, provider badges, liveness detection
+- `/dashboard/` — CLI status, cost, delegation history, Turn Monitor (alive sessions only; `?include_dead=1` to bypass)
+- `/display/` — Turn counter with CC/Codex/Gemini session cards, provider badges, alive filter (CC via cc_pid+TTY fallback; Codex/Gemini via fd-open — exited CLI sessions drop out as the kernel closes the transcript fd)
 
 ## Docker
 

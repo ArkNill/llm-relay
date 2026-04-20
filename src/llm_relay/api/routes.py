@@ -261,17 +261,32 @@ async def _api_turns(request: Request) -> Response:
 # ── GET /api/v1/turns (all sessions) ──
 
 async def _api_turns_all(request: Request) -> Response:
-    """Return turn counts + token metrics + dual-zone classification for all recent sessions."""
+    """Return turn counts + token metrics + dual-zone classification for active sessions.
+
+    Filters out dead sessions (CC process exited) using the same liveness logic
+    as /api/v1/display so the dashboard Turn Monitor doesn't accumulate zombies.
+    Use ?include_dead=1 to bypass the filter.
+    """
     try:
-        from llm_relay.proxy.db import get_all_turn_counts, get_conn
+        from llm_relay.api.display import check_cc_session_alive, collect_owned_cc_pids
+        from llm_relay.proxy.db import get_all_session_terminals, get_all_turn_counts, get_conn
 
         window = float(request.query_params.get("window", "4"))
+        include_dead = request.query_params.get("include_dead", "0") == "1"
         conn = get_conn()
         rows = get_all_turn_counts(conn, window_hours=window)
+        terminals = get_all_session_terminals(conn)
         ceiling = int(os.getenv("CC_TOKEN_CEILING", "1000000"))
+
+        owned_cc_pids = collect_owned_cc_pids(terminals)
+        now_ts = time.time()
 
         sessions = []
         for r in rows:
+            term = terminals.get(r["session_id"]) or {}
+            alive = check_cc_session_alive(term, r["last_ts"], owned_cc_pids, now_ts)
+            if not alive and not include_dead:
+                continue
             duration_s = 0.0
             if r["first_ts"] and r["last_ts"]:
                 duration_s = r["last_ts"] - r["first_ts"]
@@ -287,6 +302,7 @@ async def _api_turns_all(request: Request) -> Response:
                 "recent_peak": r["recent_peak"],
                 "cumul_unique": r["cumul_unique"],
                 "ceiling": ceiling,
+                "alive": alive,
                 **zones,
             })
 
@@ -344,10 +360,10 @@ async def _api_display(request: Request) -> Response:
     """
     try:
         from llm_relay.api.display import (
+            check_cc_session_alive,
+            collect_owned_cc_pids,
             discover_external_cli_sessions,
-            find_claude_pid_by_tty,
             get_last_user_prompt,
-            is_cc_process_alive,
         )
         from llm_relay.proxy.db import get_all_session_terminals, get_all_turn_counts, get_conn
 
@@ -358,44 +374,13 @@ async def _api_display(request: Request) -> Response:
         terminals = get_all_session_terminals(conn)
         ceiling = int(os.getenv("CC_TOKEN_CEILING", "1000000"))
 
-        # Pre-compute PIDs owned by other registered live sessions.
-        # Used to reject TTY fallback when the claude process on a TTY
-        # actually belongs to a different session (TTY reuse protection).
-        owned_cc_pids = set()
-        for _term in terminals.values():
-            _pid = _term.get("cc_pid")
-            if _pid and is_cc_process_alive(_pid):
-                owned_cc_pids.add(_pid)
-
-        # Time window for TTY fallback: a session's stored cc_pid is dead,
-        # but we'll still consider it alive via TTY lookup only if the session
-        # had recent activity. Long-dead sessions must not be resurrected
-        # when a brand-new CC session happens to reuse the same /dev/pts/N.
-        _now_ts = time.time()
-        STALE_TTY_WINDOW_S = 600  # 10 minutes
+        owned_cc_pids = collect_owned_cc_pids(terminals)
+        now_ts = time.time()
 
         sessions = []
         for r in rows:
             term = terminals.get(r["session_id"]) or {}
-            cc_pid = term.get("cc_pid")
-            tty = term.get("tty")
-
-            # Liveness check (process-based):
-            # 1. cc_pid registered and alive → alive (source of truth)
-            # 2. cc_pid dead (or missing) BUT session was active recently AND
-            #    a claude process exists on its TTY whose PID is not already
-            #    claimed by another registered session → alive
-            #    (handles stale PIDs from intermediate shell processes)
-            # 3. No terminal entry → hidden (hook hasn't run yet, can't verify)
-            #    First real Stop event will register and make it visible.
-            alive = False
-            if cc_pid and is_cc_process_alive(cc_pid):
-                alive = True
-            elif tty and r["last_ts"] and (_now_ts - r["last_ts"]) < STALE_TTY_WINDOW_S:
-                real_pid = find_claude_pid_by_tty(tty)
-                if real_pid and real_pid not in owned_cc_pids:
-                    alive = True
-
+            alive = check_cc_session_alive(term, r["last_ts"], owned_cc_pids, now_ts)
             if not alive and not include_dead:
                 continue
 
@@ -424,7 +409,7 @@ async def _api_display(request: Request) -> Response:
                 "last_prompt": prompt_info["text"],
                 "last_prompt_ts": prompt_info["timestamp"],
                 "tty": term.get("tty"),
-                "cc_pid": cc_pid,
+                "cc_pid": term.get("cc_pid"),
                 "term_pid": term.get("term_pid"),
                 "term_name": term.get("term_name"),
                 "alive": alive,
@@ -432,7 +417,9 @@ async def _api_display(request: Request) -> Response:
 
         # Merge Codex/Gemini sessions discovered from session files
         try:
-            external = discover_external_cli_sessions(window_hours=window)
+            external = discover_external_cli_sessions(
+                window_hours=window, include_dead=include_dead,
+            )
             sessions.extend(external)
         except Exception as exc:
             logger.debug("External CLI session discovery failed: %s", exc)

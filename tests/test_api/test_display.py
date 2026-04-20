@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from unittest.mock import MagicMock
 
 from llm_relay.api.display import (
     _extract_prompt_from_cc,
@@ -261,3 +262,186 @@ class TestFindCliPidByTty:
 
     def test_dev_only(self):
         assert find_cli_pid_by_tty("/dev/") is None
+
+
+# ── collect_owned_cc_pids ──
+
+class TestCollectOwnedCcPids:
+    def test_empty_terminals(self):
+        from llm_relay.api.display import collect_owned_cc_pids
+        assert collect_owned_cc_pids({}) == set()
+
+    def test_skips_terminals_without_cc_pid(self):
+        from llm_relay.api.display import collect_owned_cc_pids
+        terms = {"sid": {"tty": "/dev/pts/1"}}
+        assert collect_owned_cc_pids(terms) == set()
+
+    def test_includes_only_alive_pids(self, monkeypatch):
+        import llm_relay.api.display as disp
+        monkeypatch.setattr(disp, "is_cc_process_alive", lambda pid: pid == 1000)
+        terms = {
+            "alive-sid": {"cc_pid": 1000, "tty": "/dev/pts/1"},
+            "dead-sid":  {"cc_pid": 2000, "tty": "/dev/pts/2"},
+        }
+        assert disp.collect_owned_cc_pids(terms) == {1000}
+
+
+# ── check_cc_session_alive ──
+
+class TestCheckCcSessionAlive:
+    def test_empty_term_returns_false(self):
+        from llm_relay.api.display import check_cc_session_alive
+        assert check_cc_session_alive({}, 100.0, set(), 200.0) is False
+
+    def test_alive_pid_wins(self, monkeypatch):
+        import llm_relay.api.display as disp
+        monkeypatch.setattr(disp, "is_cc_process_alive", lambda pid: pid == 1000)
+        term = {"cc_pid": 1000, "tty": "/dev/pts/1"}
+        assert disp.check_cc_session_alive(term, 100.0, set(), 200.0) is True
+
+    def test_tty_fallback_when_pid_dead(self, monkeypatch):
+        import llm_relay.api.display as disp
+        monkeypatch.setattr(disp, "is_cc_process_alive", lambda pid: False)
+        monkeypatch.setattr(disp, "find_claude_pid_by_tty", lambda tty: 9999)
+        term = {"cc_pid": 1000, "tty": "/dev/pts/1"}
+        assert disp.check_cc_session_alive(term, 195.0, set(), 200.0) is True
+
+    def test_tty_fallback_rejects_owned_pid(self, monkeypatch):
+        """A dead session must not resurrect via TTY when that PID belongs
+        to another live registered session."""
+        import llm_relay.api.display as disp
+        monkeypatch.setattr(disp, "is_cc_process_alive", lambda pid: False)
+        monkeypatch.setattr(disp, "find_claude_pid_by_tty", lambda tty: 8000)
+        term = {"cc_pid": 7000, "tty": "/dev/pts/1"}
+        assert disp.check_cc_session_alive(term, 195.0, {8000}, 200.0) is False
+
+    def test_tty_fallback_skipped_for_stale_last_ts(self, monkeypatch):
+        import llm_relay.api.display as disp
+        monkeypatch.setattr(disp, "is_cc_process_alive", lambda pid: False)
+        monkeypatch.setattr(disp, "find_claude_pid_by_tty", lambda tty: 9999)
+        term = {"cc_pid": 1000, "tty": "/dev/pts/1"}
+        # last_ts is 1200s old — well past default 600s window
+        assert disp.check_cc_session_alive(term, 100.0, set(), 1300.0) is False
+
+
+# ── _collect_open_session_paths ──
+
+class TestCollectOpenSessionPaths:
+    def _make_proc_with_fd(self, tmp_path, pid, target_path):
+        """Build a fake /proc/<pid>/fd/<n> -> target_path symlink layout."""
+        import os
+        proc_dir = tmp_path / "proc"
+        fd_dir = proc_dir / str(pid) / "fd"
+        fd_dir.mkdir(parents=True)
+        os.symlink(str(target_path), str(fd_dir / "5"))
+        return proc_dir
+
+    def test_finds_jsonl_fd(self, tmp_path):
+        from llm_relay.api.display import _collect_open_session_paths
+        target = tmp_path / "session.jsonl"
+        target.write_text("")
+        proc_dir = self._make_proc_with_fd(tmp_path, 12345, target)
+        paths = _collect_open_session_paths(proc_dir)
+        assert str(target.resolve()) in paths
+
+    def test_ignores_non_session_files(self, tmp_path):
+        from llm_relay.api.display import _collect_open_session_paths
+        target = tmp_path / "log.txt"
+        target.write_text("")
+        proc_dir = self._make_proc_with_fd(tmp_path, 12345, target)
+        paths = _collect_open_session_paths(proc_dir)
+        assert str(target.resolve()) not in paths
+
+    def test_skips_non_pid_entries(self, tmp_path):
+        from llm_relay.api.display import _collect_open_session_paths
+        proc_dir = tmp_path / "proc"
+        (proc_dir / "self").mkdir(parents=True)
+        (proc_dir / "stat").write_text("")
+        # Should not raise
+        assert _collect_open_session_paths(proc_dir) == set()
+
+    def test_finds_json_fd(self, tmp_path):
+        from llm_relay.api.display import _collect_open_session_paths
+        target = tmp_path / "gemini-chat.json"
+        target.write_text("")
+        proc_dir = self._make_proc_with_fd(tmp_path, 12345, target)
+        paths = _collect_open_session_paths(proc_dir)
+        assert str(target.resolve()) in paths
+
+
+# ── discover_external_cli_sessions alive filter ──
+
+class TestDiscoverExternalAliveFilter:
+    def _make_provider(self, provider_id, sessions):
+        """Build a minimal mock provider that returns the given SessionFile list."""
+        provider = MagicMock()
+        provider.provider_id = provider_id
+        provider.display_name = provider_id
+        provider.discover_sessions = MagicMock(return_value=sessions)
+        return provider
+
+    def _make_session_file(self, tmp_path, name, content):
+        path = tmp_path / name
+        path.write_text(content)
+        sf = MagicMock()
+        sf.path = path
+        sf.session_id = name.replace(".jsonl", "")
+        sf.mtime = path.stat().st_mtime
+        return sf
+
+    def test_dead_session_filtered_by_default(self, tmp_path, monkeypatch):
+        """A Codex session whose file is NOT held open by any process should be
+        filtered out unless include_dead=True."""
+        import llm_relay.api.display as disp
+        # One Codex session with at least one user turn
+        codex_jsonl = (
+            '{"type":"response_item","timestamp":"2026-04-16T13:00:00Z",'
+            '"payload":{"role":"user","content":[{"text":"hi"}]}}\n'
+        )
+        sf = self._make_session_file(tmp_path, "rollout-dead.jsonl", codex_jsonl)
+        provider = self._make_provider("openai-codex", [sf])
+        monkeypatch.setattr(disp, "_collect_open_session_paths", lambda *a, **kw: set())
+        monkeypatch.setattr(
+            "llm_relay.providers.get_all_providers", lambda: [provider], raising=False,
+        )
+
+        results = disp.discover_external_cli_sessions(window_hours=24)
+        assert results == []
+
+    def test_dead_session_included_when_flag_set(self, tmp_path, monkeypatch):
+        import llm_relay.api.display as disp
+        codex_jsonl = (
+            '{"type":"response_item","timestamp":"2026-04-16T13:00:00Z",'
+            '"payload":{"role":"user","content":[{"text":"hi"}]}}\n'
+        )
+        sf = self._make_session_file(tmp_path, "rollout-dead.jsonl", codex_jsonl)
+        provider = self._make_provider("openai-codex", [sf])
+        monkeypatch.setattr(disp, "_collect_open_session_paths", lambda *a, **kw: set())
+        monkeypatch.setattr(
+            "llm_relay.providers.get_all_providers", lambda: [provider], raising=False,
+        )
+
+        results = disp.discover_external_cli_sessions(window_hours=24, include_dead=True)
+        assert len(results) == 1
+        assert results[0]["alive"] is False
+
+    def test_alive_session_when_fd_open(self, tmp_path, monkeypatch):
+        import llm_relay.api.display as disp
+        codex_jsonl = (
+            '{"type":"response_item","timestamp":"2026-04-16T13:00:00Z",'
+            '"payload":{"role":"user","content":[{"text":"hi"}]}}\n'
+        )
+        sf = self._make_session_file(tmp_path, "rollout-live.jsonl", codex_jsonl)
+        provider = self._make_provider("openai-codex", [sf])
+        monkeypatch.setattr(
+            disp, "_collect_open_session_paths",
+            lambda *a, **kw: {str(sf.path.resolve())},
+        )
+        monkeypatch.setattr(
+            "llm_relay.providers.get_all_providers", lambda: [provider], raising=False,
+        )
+
+        results = disp.discover_external_cli_sessions(window_hours=24)
+        assert len(results) == 1
+        assert results[0]["alive"] is True
+        assert results[0]["provider"] == "openai-codex"

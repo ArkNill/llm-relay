@@ -386,6 +386,93 @@ find_claude_pid_by_tty = find_cli_pid_by_tty
 is_cc_process_alive = is_cli_process_alive
 
 
+# ── CC session liveness helpers (shared by /display and /turns endpoints) ──
+
+def collect_owned_cc_pids(terminals: dict) -> set:
+    """Return the set of cc_pids from terminals whose process is currently alive.
+
+    Used as the "claimed PID" set when deciding whether to fall back to TTY
+    lookup for a session whose registered cc_pid is dead — a TTY-discovered
+    PID is only valid if it isn't already claimed by another live session.
+    """
+    owned: set = set()
+    for term in terminals.values():
+        pid = term.get("cc_pid")
+        if pid and is_cc_process_alive(pid):
+            owned.add(pid)
+    return owned
+
+
+def check_cc_session_alive(
+    term: dict,
+    last_ts: Optional[float],
+    owned_cc_pids: set,
+    now_ts: float,
+    stale_tty_window_s: int = 600,
+) -> bool:
+    """Decide whether a CC session is alive given its terminal record.
+
+    Two-tier check:
+    1. Registered cc_pid is alive -> alive (source of truth).
+    2. cc_pid dead/missing, but the session was active within
+       stale_tty_window_s AND a claude process exists on its TTY whose PID
+       is not already claimed by another live registered session -> alive
+       (handles intermediate shell-process PID drift without resurrecting
+       long-dead sessions when a new CC reuses the same /dev/pts/N).
+    """
+    if not term:
+        return False
+    cc_pid = term.get("cc_pid")
+    tty = term.get("tty")
+    if cc_pid and is_cc_process_alive(cc_pid):
+        return True
+    if tty and last_ts and (now_ts - last_ts) < stale_tty_window_s:
+        real_pid = find_claude_pid_by_tty(tty)
+        if real_pid and real_pid not in owned_cc_pids:
+            return True
+    return False
+
+
+# ── External CLI (Codex/Gemini) liveness via open file descriptors ──
+
+def _collect_open_session_paths(proc_dir: Optional[Path] = None) -> set:
+    """Return resolved paths of session JSONL/JSON files held open by any process.
+
+    Codex/Gemini transcripts persist on disk after the CLI exits, so file
+    mtime is not a reliable liveness signal. Instead we check whether any
+    process currently has the transcript open as a file descriptor — when
+    the CLI exits the kernel closes the fd and the path drops out of /proc.
+    """
+    if proc_dir is None:
+        proc_dir = _get_proc_dir()
+    open_paths: set = set()
+    try:
+        entries = list(proc_dir.iterdir())
+    except OSError:
+        return open_paths
+    for entry in entries:
+        if not entry.name.isdigit():
+            continue
+        fd_dir = entry / "fd"
+        try:
+            fds = list(fd_dir.iterdir())
+        except (OSError, PermissionError):
+            continue
+        for fd in fds:
+            try:
+                target = os.readlink(str(fd))
+            except OSError:
+                continue
+            if not (target.endswith(".jsonl") or target.endswith(".json")):
+                continue
+            try:
+                resolved = str(Path(target).resolve())
+            except OSError:
+                resolved = target
+            open_paths.add(resolved)
+    return open_paths
+
+
 def _parse_codex_session_raw(path: Path) -> dict:
     """Parse a Codex JSONL session file directly.
 
@@ -510,17 +597,21 @@ def _parse_gemini_session_raw(path: Path) -> dict:
     }
 
 
-def discover_external_cli_sessions(window_hours: float = 4.0) -> list:
+def discover_external_cli_sessions(
+    window_hours: float = 4.0,
+    include_dead: bool = False,
+) -> list:
     """Discover active Codex/Gemini sessions not tracked by the proxy DB.
 
     Directly parses session files (not using provider parsers, which may not
-    match the actual on-disk format for display purposes).
+    match the actual on-disk format for display purposes). A session is
+    considered alive only if its transcript file is currently held open by
+    some process — after the CLI exits the kernel releases the fd and the
+    session is filtered out unless include_dead=True.
 
     Args:
         window_hours: Only include sessions modified within this time window.
-
-    Returns:
-        List of session dicts with provider, session_id, turns, timestamps, etc.
+        include_dead: When True, return dead sessions too with alive=False.
     """
     import time
 
@@ -531,6 +622,8 @@ def discover_external_cli_sessions(window_hours: float = 4.0) -> list:
         from llm_relay.providers import get_all_providers
     except ImportError:
         return results
+
+    open_paths = _collect_open_session_paths()
 
     for provider in get_all_providers():
         if provider.provider_id == "claude-code":
@@ -543,6 +636,14 @@ def discover_external_cli_sessions(window_hours: float = 4.0) -> list:
 
         for sf in sessions:
             if sf.mtime < cutoff:
+                continue
+
+            try:
+                resolved = str(sf.path.resolve())
+            except OSError:
+                resolved = str(sf.path)
+            alive = resolved in open_paths
+            if not alive and not include_dead:
                 continue
 
             # Parse directly based on provider type
@@ -587,7 +688,7 @@ def discover_external_cli_sessions(window_hours: float = 4.0) -> list:
                 "cc_pid": None,
                 "term_pid": None,
                 "term_name": None,
-                "alive": True,
+                "alive": alive,
             })
 
     return results

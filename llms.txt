@@ -5,7 +5,7 @@
 - 7 session detectors: orphan, stuck, synthetic, bloat, cache, resume, microcompact
 - 12-strategy pruning (gentle/standard/aggressive tiers)
 - Multi-CLI orchestration: Claude Code, Codex CLI, Gemini CLI
-- Web display: `/dashboard/` + `/display/` with provider badges (CC/Codex/Gemini)
+- Web display: `/dashboard/` + `/display/` with provider badges (CC/Codex/Gemini), alive-only by default (`?include_dead=1` to override)
 - MCP: 7 tools (cli_delegate, cli_status, cli_probe, orch_delegate, orch_history, relay_stats, session_turns)
 ```bash
 llm-relay scan          # 7-detector session health check

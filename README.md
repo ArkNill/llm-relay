@@ -58,8 +58,8 @@ docker compose up -d
 ```
 
 Then open:
-- `/dashboard/` — CLI status, cost, delegation history
-- `/display/` — Turn counter with CC/Codex/Gemini session cards
+- `/dashboard/` — CLI status, cost, delegation history, Turn Monitor (alive sessions only; `?include_dead=1` to bypass)
+- `/display/` — Turn counter with CC/Codex/Gemini session cards (alive filter: CC via cc_pid+TTY fallback, Codex/Gemini via fd-open)
 
 ### MCP server
 

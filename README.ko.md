@@ -58,8 +58,8 @@ docker compose up -d
 ```
 
 접속 주소:
-- `/dashboard/` — CLI 상태, 비용, 위임 히스토리
-- `/display/` — 턴 카운터 + CC/Codex/Gemini 세션 카드
+- `/dashboard/` — CLI 상태, 비용, 위임 히스토리, Turn Monitor (alive 세션만; `?include_dead=1` 로 우회)
+- `/display/` — 턴 카운터 + CC/Codex/Gemini 세션 카드 (alive 필터: CC=cc_pid+TTY fallback, Codex/Gemini=fd-open)
 
 ### MCP 서버
 

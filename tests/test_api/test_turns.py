@@ -357,7 +357,10 @@ class TestTurnsEndpoint:
 class TestTurnsAllEndpoint:
     @patch("llm_relay.proxy.db.get_conn")
     @patch("llm_relay.proxy.db.get_all_turn_counts")
-    def test_returns_all_sessions(self, mock_all, mock_conn):
+    @patch("llm_relay.proxy.db.get_all_session_terminals")
+    @patch("llm_relay.api.display.is_cc_process_alive", return_value=True)
+    def test_returns_alive_sessions(self, _mock_alive, mock_terms, mock_all, mock_conn):
+        """Sessions whose CC process is alive are returned with metrics + alive flag."""
         mock_conn.return_value = MagicMock()
         mock_all.return_value = [
             _empty_metrics(turns=42, first_ts=1000.0, last_ts=2000.0,
@@ -365,6 +368,10 @@ class TestTurnsAllEndpoint:
             _empty_metrics(turns=100, first_ts=500.0, last_ts=3000.0,
                            current_ctx=820_000, peak_ctx=850_000) | {"session_id": "sid-2"},
         ]
+        mock_terms.return_value = {
+            "sid-1": {"cc_pid": 1000, "tty": "/dev/pts/1"},
+            "sid-2": {"cc_pid": 2000, "tty": "/dev/pts/2"},
+        }
         client = TestClient(_make_app())
         resp = client.get("/api/v1/turns?window=4")
         assert resp.status_code == 200
@@ -374,13 +381,14 @@ class TestTurnsAllEndpoint:
         assert data["sessions"][1]["zone"] == "red"  # 820K → Zone A red
         assert data["sessions"][1]["zone_a"] == "red"
         assert data["sessions"][1]["message"] is not None
-        # New fields propagated
         assert data["sessions"][0]["current_ctx"] == 50_000
         assert data["sessions"][1]["peak_ctx"] == 850_000
+        assert data["sessions"][0]["alive"] is True
 
     @patch("llm_relay.proxy.db.get_conn")
     @patch("llm_relay.proxy.db.get_all_turn_counts")
-    def test_empty(self, mock_all, mock_conn):
+    @patch("llm_relay.proxy.db.get_all_session_terminals", return_value={})
+    def test_empty(self, _mock_terms, mock_all, mock_conn):
         mock_conn.return_value = MagicMock()
         mock_all.return_value = []
         client = TestClient(_make_app())
@@ -388,6 +396,55 @@ class TestTurnsAllEndpoint:
         data = resp.json()
         assert data["count"] == 0
         assert data["sessions"] == []
+
+    @patch("llm_relay.proxy.db.get_conn")
+    @patch("llm_relay.proxy.db.get_all_turn_counts")
+    @patch("llm_relay.proxy.db.get_all_session_terminals")
+    @patch("llm_relay.api.display.find_claude_pid_by_tty", return_value=None)
+    @patch("llm_relay.api.display.is_cc_process_alive", return_value=False)
+    def test_filters_dead_by_default(
+        self, _mock_alive, _mock_find_tty, mock_terms, mock_all, mock_conn,
+    ):
+        """Dashboard regression: dead CC sessions must drop out of /turns by default."""
+        mock_conn.return_value = MagicMock()
+        now = time.time()
+        mock_all.return_value = [
+            _empty_metrics(turns=10, first_ts=now - 1000, last_ts=now - 800)
+            | {"session_id": "dead-sid"},
+        ]
+        mock_terms.return_value = {
+            "dead-sid": {"cc_pid": 9999, "tty": "/dev/pts/1"},
+        }
+        client = TestClient(_make_app())
+        resp = client.get("/api/v1/turns?window=4")
+        data = resp.json()
+        assert data["count"] == 0
+        assert data["sessions"] == []
+
+    @patch("llm_relay.proxy.db.get_conn")
+    @patch("llm_relay.proxy.db.get_all_turn_counts")
+    @patch("llm_relay.proxy.db.get_all_session_terminals")
+    @patch("llm_relay.api.display.find_claude_pid_by_tty", return_value=None)
+    @patch("llm_relay.api.display.is_cc_process_alive", return_value=False)
+    def test_include_dead_param(
+        self, _mock_alive, _mock_find_tty, mock_terms, mock_all, mock_conn,
+    ):
+        """include_dead=1 keeps dead sessions in the response (with alive=False)."""
+        mock_conn.return_value = MagicMock()
+        now = time.time()
+        mock_all.return_value = [
+            _empty_metrics(turns=10, first_ts=now - 1000, last_ts=now - 800)
+            | {"session_id": "dead-sid"},
+        ]
+        mock_terms.return_value = {
+            "dead-sid": {"cc_pid": 9999, "tty": "/dev/pts/1"},
+        }
+        client = TestClient(_make_app())
+        resp = client.get("/api/v1/turns?window=4&include_dead=1")
+        data = resp.json()
+        assert data["count"] == 1
+        assert data["sessions"][0]["session_id"] == "dead-sid"
+        assert data["sessions"][0]["alive"] is False
 
 
 # ── Session Terminal Tests ──
