@@ -1,9 +1,11 @@
-"""FastMCP server exposing 6 CLI orchestration tools over stdio transport."""
+"""FastMCP server exposing CLI orchestration tools over stdio transport."""
 
 from __future__ import annotations
 
 import json
 import logging
+import os
+import time
 
 from mcp.server.fastmcp import FastMCP
 
@@ -96,6 +98,24 @@ def cli_delegate(
         conn.close()
     except Exception:
         logger.debug("Failed to log cli_delegate", exc_info=True)
+
+    # Session history capture (opt-in)
+    if os.getenv("LLM_RELAY_HISTORY", "0") == "1":
+        try:
+            from llm_relay.proxy.db import get_conn as get_proxy_conn
+            from llm_relay.proxy.history import capture_delegation_turn
+            hconn = get_proxy_conn()
+            capture_delegation_turn(
+                hconn,
+                session_id="delegation-{}".format(int(time.time() * 1000)),
+                cli_id=result.cli_id,
+                prompt=prompt,
+                output=result.output,
+                model=model or None,
+                duration_ms=result.duration_ms,
+            )
+        except Exception:
+            logger.debug("Failed to capture delegation history", exc_info=True)
 
     return _json({
         "success": result.success,
@@ -316,5 +336,49 @@ def session_turns(session_id: str = "") -> str:
                     for s in summaries
                 ],
             })
+    except Exception as e:
+        return _json({"error": str(e)})
+
+
+# ── Tool 8: session_history ──
+
+
+@mcp.tool()
+def session_history(
+    session_id: str,
+    turn_start: int = 0,
+    turn_end: int = -1,
+    include_thinking: bool = False,
+) -> str:
+    """Retrieve conversation history for a session.
+
+    Returns the full conversation replay with messages, tool calls,
+    and model responses. Supports turn range filtering.
+    Requires LLM_RELAY_HISTORY=1 to be enabled for recording.
+
+    Args:
+        session_id: Session ID to query
+        turn_start: Start turn number (0-indexed, default: first)
+        turn_end: End turn number (-1 = last, default: all)
+        include_thinking: Include extended thinking blocks (default: false)
+    """
+    from llm_relay.proxy.db import get_conn, get_session_compactions, get_session_history
+
+    try:
+        conn = get_conn()
+        turns = get_session_history(
+            conn, session_id,
+            turn_start=turn_start,
+            turn_end=turn_end,
+            include_thinking=include_thinking,
+        )
+        compactions = get_session_compactions(conn, session_id)
+        return _json({
+            "session_id": session_id,
+            "total_turns": len(turns),
+            "compaction_count": len(compactions),
+            "turns": turns,
+            "compactions": compactions,
+        })
     except Exception as e:
         return _json({"error": str(e)})
