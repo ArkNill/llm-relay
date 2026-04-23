@@ -57,7 +57,7 @@
       $sessionCount.textContent = "(" + data.count + ")";
 
       if (!data.sessions || data.sessions.length === 0) {
-        $sessionList.innerHTML = '<div class="empty">No session history recorded yet.<br>Enable with CC_RELAY_HISTORY=1</div>';
+        $sessionList.innerHTML = '<div class="empty">No session history recorded yet.<br>Enable with LLM_RELAY_HISTORY=1</div>';
         return;
       }
 
