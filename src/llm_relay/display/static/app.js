@@ -102,7 +102,7 @@
 
     if (!data || !data.sessions || data.sessions.length === 0) {
       if (lastHash !== "EMPTY") {
-        container.innerHTML = '<div class="empty-state">활성 세션 없음</div>';
+        container.innerHTML = '<div class="empty-state">No active sessions</div>';
         countEl.textContent = "0 sessions";
         lastHash = "EMPTY";
       }
@@ -137,7 +137,7 @@
 
       var promptText = s.last_prompt || "";
       var promptClass = promptText ? "prompt-block" : "prompt-block empty";
-      var promptDisplay = promptText ? escapeHtml(promptText) : "(프롬프트 없음)";
+      var promptDisplay = promptText ? escapeHtml(promptText) : "(no prompt)";
       var warn = s.message ? '<div class="warning">' + escapeHtml(s.message) + '</div>' : '';
 
       // Terminal badge

@@ -77,7 +77,7 @@
     var data = await fetchJSON("/turns?window=4");
     if (!data || !data.sessions || data.sessions.length === 0) {
       if (lastTurnHash !== "EMPTY") {
-        container.innerHTML = '<div class="turn-monitor-empty">활성 세션 없음</div>';
+        container.innerHTML = '<div class="turn-monitor-empty">No active sessions</div>';
         lastTurnHash = "EMPTY";
       }
       return;
