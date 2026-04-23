@@ -40,6 +40,10 @@ _SCAN_ENABLED = os.getenv("LLM_RELAY_SCAN_ENABLED", "0") == "1"
 _TOKPRESS_ENABLED = os.getenv("LLM_RELAY_TOKPRESS", "0") == "1"
 _SSE_PARSE_USAGE = os.getenv("LLM_RELAY_SSE_PARSE_USAGE", "1") == "1"
 
+# Session history (opt-in, LLM_RELAY_HISTORY=1)
+_HISTORY_ENABLED = os.getenv("LLM_RELAY_HISTORY", "0") == "1"
+_HISTORY_RAW = os.getenv("LLM_RELAY_HISTORY_RAW", "0") == "1"
+
 CLEARED_MARKER = "[Old tool result content cleared]"
 
 # Per-tool result size caps (server-side configuration)
@@ -324,9 +328,10 @@ async def _proxy(request: Request) -> Response:
         # Synchronous log -- WAL mode keeps this ~0.6ms. Moving to a worker
         # thread via asyncio.to_thread inside starlette response flow was
         # dropping records when the response task was torn down mid-await.
+        sid = headers.get("x-claude-code-session-id") or headers.get("x-session-id")
         log_request(
             _get_conn(),
-            session_id=headers.get("x-claude-code-session-id") or headers.get("x-session-id"),
+            session_id=sid,
             model=usage["model"],
             input_tokens=usage["input_tokens"],
             output_tokens=usage["output_tokens"],
@@ -340,6 +345,22 @@ async def _proxy(request: Request) -> Response:
             request_body_bytes=body_bytes,
             ratelimit_headers=rl_headers,
         )
+        # Session history capture (opt-in)
+        if _HISTORY_ENABLED and req_json and path.startswith("/v1/messages"):
+            try:
+                from .history import capture_turn
+                capture_turn(
+                    _get_conn(),
+                    session_id=sid,
+                    req_json=req_json,
+                    resp_json=resp_json,
+                    input_tokens=usage["input_tokens"],
+                    request_size=body_bytes,
+                    response_size=len(resp_body),
+                    raw_mode=_HISTORY_RAW,
+                )
+            except Exception:
+                logger.debug("history capture failed (non-stream)", exc_info=True)
     except (json.JSONDecodeError, UnicodeDecodeError):
         pass
 
@@ -375,7 +396,21 @@ async def _proxy_stream(client, method, url, headers, body, path, t0, body_bytes
         "model": None,
     }
 
+    # History: accumulate response content blocks from SSE events
+    _history_content = []  # list of completed content blocks
+    _history_current_block = {}  # block being accumulated
+    _history_active = _HISTORY_ENABLED and path.startswith("/v1/messages")
+
+    # Parse request JSON for history (already parsed upstream, reuse ref)
+    _history_req_json = None
+    if _history_active and body:
+        try:
+            _history_req_json = json.loads(body)
+        except (json.JSONDecodeError, UnicodeDecodeError):
+            _history_active = False
+
     def _process_sse_line(line: str) -> None:
+        nonlocal _history_current_block
         if not line.startswith("data: "):
             return
         payload = line[6:]
@@ -399,6 +434,40 @@ async def _proxy_stream(client, method, url, headers, body, path, t0, body_bytes
             usage_acc["output_tokens"] = delta_usage.get(
                 "output_tokens", usage_acc["output_tokens"]
             )
+        # History: accumulate content blocks
+        elif _history_active and etype == "content_block_start":
+            cb = event.get("content_block", {})
+            block_type = cb.get("type", "text")
+            _history_current_block = {"type": block_type}
+            if block_type == "text":
+                _history_current_block["text"] = ""
+            elif block_type == "thinking":
+                _history_current_block["thinking"] = ""
+            elif block_type == "tool_use":
+                _history_current_block["id"] = cb.get("id", "")
+                _history_current_block["name"] = cb.get("name", "")
+                _history_current_block["input"] = {}
+                _history_current_block["_input_json"] = ""
+        elif _history_active and etype == "content_block_delta":
+            delta = event.get("delta", {})
+            delta_type = delta.get("type", "")
+            if delta_type == "text_delta" and "text" in _history_current_block:
+                _history_current_block["text"] += delta.get("text", "")
+            elif delta_type == "thinking_delta" and "thinking" in _history_current_block:
+                _history_current_block["thinking"] += delta.get("thinking", "")
+            elif delta_type == "input_json_delta" and "_input_json" in _history_current_block:
+                _history_current_block["_input_json"] += delta.get("partial_json", "")
+        elif _history_active and etype == "content_block_stop":
+            if _history_current_block:
+                # Finalize tool_use input JSON
+                if _history_current_block.get("type") == "tool_use" and "_input_json" in _history_current_block:
+                    raw = _history_current_block.pop("_input_json", "")
+                    try:
+                        _history_current_block["input"] = json.loads(raw) if raw else {}
+                    except (json.JSONDecodeError, ValueError):
+                        _history_current_block["input"] = raw
+                _history_content.append(_history_current_block)
+                _history_current_block = {}
 
     async def _stream_and_log():
         decoder = codecs.getincrementaldecoder("utf-8")(errors="replace")
@@ -446,10 +515,11 @@ async def _proxy_stream(client, method, url, headers, body, path, t0, body_bytes
             # before the await guarantees the usage row lands in SQLite.
             latency_ms = (time.time() - t0) * 1000
             _warn_if_poor(usage_acc, path)
+            sid = headers.get("x-claude-code-session-id") or headers.get("x-session-id")
             try:
                 log_request(
                     _get_conn(),
-                    session_id=headers.get("x-claude-code-session-id") or headers.get("x-session-id"),
+                    session_id=sid,
                     model=usage_acc["model"],
                     input_tokens=usage_acc["input_tokens"],
                     output_tokens=usage_acc["output_tokens"],
@@ -465,6 +535,24 @@ async def _proxy_stream(client, method, url, headers, body, path, t0, body_bytes
                 )
             except Exception:
                 logger.warning("log_request failed (stream path)", exc_info=True)
+
+            # Step 2b -- session history capture (sync, same safety as log_request)
+            if _history_active and _history_req_json:
+                try:
+                    from .history import capture_turn_streamed
+                    capture_turn_streamed(
+                        _get_conn(),
+                        session_id=sid,
+                        req_json=_history_req_json,
+                        accumulated_content=_history_content,
+                        model=usage_acc["model"],
+                        input_tokens=usage_acc["input_tokens"],
+                        request_size=body_bytes,
+                        response_size=0,
+                        raw_mode=_HISTORY_RAW,
+                    )
+                except Exception:
+                    logger.debug("history capture failed (stream)", exc_info=True)
 
             # Step 3 -- close the upstream response last. Wrap in try/except
             # because an async generator being finalised via GC may cancel the
@@ -554,8 +642,9 @@ def _redirect_to_trailing_slash(prefix: str):
 
 _routes.append(Route("/dashboard", _redirect_to_trailing_slash("/dashboard")))
 _routes.append(Route("/display", _redirect_to_trailing_slash("/display")))
+_routes.append(Route("/history", _redirect_to_trailing_slash("/history")))
 
-# Mount dashboard static files
+# Mount dashboard, display, and history static files
 try:
     from starlette.staticfiles import StaticFiles
 
@@ -570,6 +659,12 @@ try:
     if _display_dir.exists():
         _routes.append(Mount("/display", app=StaticFiles(directory=str(_display_dir), html=True)))
         logger.info("Display page mounted at /display/")
+
+    from llm_relay.history import get_static_dir as get_history_dir
+    _history_dir = get_history_dir()
+    if _history_dir.exists():
+        _routes.append(Mount("/history", app=StaticFiles(directory=str(_history_dir), html=True)))
+        logger.info("History page mounted at /history/")
 except ImportError:
     logger.debug("Dashboard module not available, skipping")
 

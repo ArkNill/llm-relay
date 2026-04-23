@@ -18,6 +18,9 @@ header {
   border-bottom: 1px solid #21262d;
 }
 h1 { font-size: 1.3rem; color: #58a6ff; font-weight: 600; }
+.nav-links { display: flex; gap: 0.6rem; }
+.nav-links a { font-size: 0.8rem; color: #8b949e; text-decoration: none; padding: 0.25rem 0.6rem; border: 1px solid #30363d; border-radius: 6px; transition: all 0.15s; }
+.nav-links a:hover { color: #58a6ff; border-color: #58a6ff; }
 .updated-ts { font-size: 0.75rem; color: #6e7681; }
 
 main { margin-bottom: 2rem; }

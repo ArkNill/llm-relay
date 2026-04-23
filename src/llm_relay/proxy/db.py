@@ -110,6 +110,41 @@ _MIGRATIONS = [
     )""",
     "CREATE INDEX IF NOT EXISTS idx_cache_diag_ts ON cache_diagnostics(ts)",
     "CREATE INDEX IF NOT EXISTS idx_cache_diag_session ON cache_diagnostics(session_id)",
+    # ── Session history tables (LLM_RELAY_HISTORY=1) ──
+    """CREATE TABLE IF NOT EXISTS conversation_turns (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        ts REAL NOT NULL,
+        session_id TEXT NOT NULL,
+        request_id INTEGER,
+        turn_number INTEGER NOT NULL,
+        storage_mode TEXT NOT NULL DEFAULT 'delta',
+        request_messages TEXT,
+        response_message TEXT,
+        thinking_blocks TEXT,
+        model TEXT,
+        temperature REAL,
+        max_tokens INTEGER,
+        total_message_count INTEGER,
+        previous_message_count INTEGER,
+        request_size_bytes INTEGER DEFAULT 0,
+        response_size_bytes INTEGER DEFAULT 0,
+        provider TEXT DEFAULT 'anthropic'
+    )""",
+    "CREATE INDEX IF NOT EXISTS idx_conv_turns_session ON conversation_turns(session_id, turn_number)",
+    """CREATE TABLE IF NOT EXISTS compaction_events (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        ts REAL NOT NULL,
+        session_id TEXT NOT NULL,
+        turn_number INTEGER NOT NULL,
+        previous_count INTEGER,
+        current_count INTEGER,
+        dropped_count INTEGER,
+        previous_tokens INTEGER,
+        current_tokens INTEGER,
+        token_drop_pct REAL,
+        dropped_roles TEXT
+    )""",
+    "CREATE INDEX IF NOT EXISTS idx_compaction_session ON compaction_events(session_id)",
 ]
 
 
@@ -459,5 +494,166 @@ def get_recent(
 ) -> list[dict[str, Any]]:
     rows = conn.execute(
         "SELECT * FROM requests ORDER BY ts DESC LIMIT ?", (limit,)
+    ).fetchall()
+    return [dict(r) for r in rows]
+
+
+# ── Session history storage & query functions ──
+
+
+def log_conversation_turn(
+    conn: sqlite3.Connection,
+    *,
+    session_id: str,
+    turn_number: int,
+    storage_mode: str = "delta",
+    request_messages: Optional[str] = None,
+    response_message: Optional[str] = None,
+    thinking_blocks: Optional[str] = None,
+    model: Optional[str] = None,
+    temperature: Optional[float] = None,
+    max_tokens: Optional[int] = None,
+    total_message_count: int = 0,
+    previous_message_count: int = 0,
+    request_size_bytes: int = 0,
+    response_size_bytes: int = 0,
+    provider: str = "anthropic",
+    request_id: Optional[int] = None,
+) -> int:
+    """Insert a conversation turn record. Returns the row id."""
+    cursor = conn.execute(
+        """INSERT INTO conversation_turns
+           (ts, session_id, request_id, turn_number, storage_mode,
+            request_messages, response_message, thinking_blocks,
+            model, temperature, max_tokens,
+            total_message_count, previous_message_count,
+            request_size_bytes, response_size_bytes, provider)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+        (
+            time.time(),
+            session_id,
+            request_id,
+            turn_number,
+            storage_mode,
+            request_messages,
+            response_message,
+            thinking_blocks,
+            model,
+            temperature,
+            max_tokens,
+            total_message_count,
+            previous_message_count,
+            request_size_bytes,
+            response_size_bytes,
+            provider,
+        ),
+    )
+    conn.commit()
+    return cursor.lastrowid or 0
+
+
+def log_compaction_event(
+    conn: sqlite3.Connection,
+    *,
+    session_id: str,
+    turn_number: int,
+    previous_count: int = 0,
+    current_count: int = 0,
+    dropped_count: int = 0,
+    previous_tokens: int = 0,
+    current_tokens: int = 0,
+    token_drop_pct: float = 0.0,
+    dropped_roles: Optional[str] = None,
+) -> None:
+    """Insert a compaction detection event."""
+    conn.execute(
+        """INSERT INTO compaction_events
+           (ts, session_id, turn_number,
+            previous_count, current_count, dropped_count,
+            previous_tokens, current_tokens, token_drop_pct,
+            dropped_roles)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+        (
+            time.time(),
+            session_id,
+            turn_number,
+            previous_count,
+            current_count,
+            dropped_count,
+            previous_tokens,
+            current_tokens,
+            token_drop_pct,
+            dropped_roles,
+        ),
+    )
+    conn.commit()
+
+
+def get_session_history(
+    conn: sqlite3.Connection,
+    session_id: str,
+    turn_start: int = 0,
+    turn_end: int = -1,
+    include_thinking: bool = False,
+) -> list[dict[str, Any]]:
+    """Return conversation turns for a session, optionally filtering by turn range.
+
+    When include_thinking is False, the thinking_blocks field is excluded.
+    Turn range is inclusive on both ends. turn_end=-1 means no upper limit.
+    """
+    params: list[Any] = [session_id, turn_start]
+    sql = """SELECT id, ts, session_id, request_id, turn_number, storage_mode,
+                    request_messages, response_message, thinking_blocks,
+                    model, temperature, max_tokens,
+                    total_message_count, previous_message_count,
+                    request_size_bytes, response_size_bytes, provider
+             FROM conversation_turns
+             WHERE session_id = ? AND turn_number >= ?"""
+    if turn_end >= 0:
+        sql += " AND turn_number <= ?"
+        params.append(turn_end)
+    sql += " ORDER BY turn_number ASC"
+
+    rows = conn.execute(sql, params).fetchall()
+    result = []
+    for r in rows:
+        d = dict(r)
+        if not include_thinking:
+            d.pop("thinking_blocks", None)
+        result.append(d)
+    return result
+
+
+def get_session_compactions(
+    conn: sqlite3.Connection,
+    session_id: str,
+) -> list[dict[str, Any]]:
+    """Return compaction events for a session."""
+    rows = conn.execute(
+        "SELECT * FROM compaction_events WHERE session_id = ? ORDER BY turn_number ASC",
+        (session_id,),
+    ).fetchall()
+    return [dict(r) for r in rows]
+
+
+def get_history_sessions(
+    conn: sqlite3.Connection,
+    window_hours: float = 24,
+) -> list[dict[str, Any]]:
+    """Return sessions that have conversation history, with summary stats."""
+    cutoff = time.time() - window_hours * 3600
+    rows = conn.execute(
+        """SELECT session_id,
+                  COUNT(*) as total_turns,
+                  MIN(ts) as first_ts,
+                  MAX(ts) as last_ts,
+                  SUM(request_size_bytes) as total_request_bytes,
+                  SUM(response_size_bytes) as total_response_bytes,
+                  provider
+           FROM conversation_turns
+           WHERE ts > ?
+           GROUP BY session_id
+           ORDER BY last_ts DESC""",
+        (cutoff,),
     ).fetchall()
     return [dict(r) for r in rows]

@@ -1,0 +1,36 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Session History — llm-relay</title>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <header>
+    <h1>Session History</h1>
+    <nav class="nav-links">
+      <a href="/display/">Turn Monitor</a>
+      <a href="/dashboard/">Dashboard</a>
+    </nav>
+  </header>
+
+  <main>
+    <section id="sessions">
+      <h2>Sessions <span id="session-count" class="count-badge"></span></h2>
+      <div id="session-list" class="session-list"></div>
+    </section>
+
+    <section id="detail" style="display:none;">
+      <div class="detail-header">
+        <h2>Conversation <span id="detail-session-id" class="mono"></span></h2>
+        <button id="back-btn" class="btn-back">Back</button>
+      </div>
+      <div id="compaction-bar" class="compaction-bar" style="display:none;"></div>
+      <div id="turns" class="turns"></div>
+    </section>
+  </main>
+
+  <script src="app.js"></script>
+</body>
+</html>

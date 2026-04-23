@@ -512,6 +512,84 @@ async def _api_health(request: Request) -> Response:
     })
 
 
+# ── GET /api/v1/history ──
+
+async def _api_history_sessions(request: Request) -> Response:
+    """Return sessions that have conversation history recorded."""
+    try:
+        from llm_relay.proxy.db import get_conn, get_history_sessions
+
+        window = float(request.query_params.get("window", "24"))
+        conn = get_conn()
+        sessions = get_history_sessions(conn, window_hours=window)
+        return _json_response({"count": len(sessions), "sessions": sessions})
+    except ImportError:
+        return _json_response({"error": "Proxy module not available"}, status=501)
+    except Exception as e:
+        logger.error("Failed to get history sessions: %s", e)
+        return _json_response({"error": str(e)}, status=500)
+
+
+# ── GET /api/v1/history/{session_id} ──
+
+async def _api_history_detail(request: Request) -> Response:
+    """Return conversation history for a specific session.
+
+    Query params:
+      turn_start (int): Start turn number (default 0)
+      turn_end (int): End turn number (-1 = all, default -1)
+      include_thinking (0|1): Include thinking blocks (default 0)
+      raw (0|1): Return raw stored data without diff reconstruction (default 0)
+    """
+    try:
+        from llm_relay.proxy.db import get_conn, get_session_history
+
+        session_id = request.path_params["session_id"]
+        turn_start = int(request.query_params.get("turn_start", "0"))
+        turn_end = int(request.query_params.get("turn_end", "-1"))
+        include_thinking = request.query_params.get("include_thinking", "0") == "1"
+
+        conn = get_conn()
+        turns = get_session_history(
+            conn, session_id,
+            turn_start=turn_start,
+            turn_end=turn_end,
+            include_thinking=include_thinking,
+        )
+        return _json_response({
+            "session_id": session_id,
+            "total_turns": len(turns),
+            "turns": turns,
+        })
+    except ImportError:
+        return _json_response({"error": "Proxy module not available"}, status=501)
+    except Exception as e:
+        logger.error("Failed to get session history: %s", e)
+        return _json_response({"error": str(e)}, status=500)
+
+
+# ── GET /api/v1/history/{session_id}/compactions ──
+
+async def _api_history_compactions(request: Request) -> Response:
+    """Return compaction events for a specific session."""
+    try:
+        from llm_relay.proxy.db import get_conn, get_session_compactions
+
+        session_id = request.path_params["session_id"]
+        conn = get_conn()
+        compactions = get_session_compactions(conn, session_id)
+        return _json_response({
+            "session_id": session_id,
+            "compaction_count": len(compactions),
+            "compactions": compactions,
+        })
+    except ImportError:
+        return _json_response({"error": "Proxy module not available"}, status=501)
+    except Exception as e:
+        logger.error("Failed to get compaction events: %s", e)
+        return _json_response({"error": str(e)}, status=500)
+
+
 def get_api_routes() -> List[Route]:
     """Return all API routes for mounting into the main Starlette app."""
     return [
@@ -525,4 +603,8 @@ def get_api_routes() -> List[Route]:
         Route("/api/v1/display", _api_display, methods=["GET"]),
         Route("/api/v1/session-terminal", _api_session_terminal, methods=["POST"]),
         Route("/api/v1/health", _api_health, methods=["GET"]),
+        # Session history
+        Route("/api/v1/history", _api_history_sessions, methods=["GET"]),
+        Route("/api/v1/history/{session_id}", _api_history_detail, methods=["GET"]),
+        Route("/api/v1/history/{session_id}/compactions", _api_history_compactions, methods=["GET"]),
     ]
