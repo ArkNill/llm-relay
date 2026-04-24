@@ -141,9 +141,6 @@ def _build_claude_cmd(
     return cmd
 
 
-_CODEX_SANDBOX = os.environ.get("LLM_RELAY_CODEX_SANDBOX", "workspace-write")
-
-
 def _build_codex_cmd(
     cli: CLIStatus,
     prompt: str,
@@ -154,7 +151,10 @@ def _build_codex_cmd(
 ) -> List[str]:
     """Build Codex CLI headless command.
 
-    Sandbox mode is controlled by LLM_RELAY_CODEX_SANDBOX env var:
+    Sandbox mode is controlled by LLM_RELAY_CODEX_SANDBOX env var, read on
+    every invocation so operators can change the setting without restarting
+    the orchestrator process (e.g. when cli_delegate runs inside a long-lived
+    MCP subprocess and the env is updated mid-session):
       - "workspace-write" (default): sandboxed, no shell access beyond workspace
       - "danger-full-access": full filesystem access, shell commands work
       - "none": --dangerously-bypass-approvals-and-sandbox (no sandbox at all)
@@ -162,11 +162,12 @@ def _build_codex_cmd(
     Users who need Codex to run gh, git, or read files outside the workspace
     should set LLM_RELAY_CODEX_SANDBOX=none.
     """
+    sandbox = os.environ.get("LLM_RELAY_CODEX_SANDBOX", "workspace-write")
     cmd = [cli.binary_path, "exec", prompt, "--json", "--skip-git-repo-check"]
-    if _CODEX_SANDBOX == "none":
+    if sandbox == "none":
         cmd.append("--dangerously-bypass-approvals-and-sandbox")
     else:
-        cmd.extend(["--full-auto", "--sandbox", _CODEX_SANDBOX])
+        cmd.extend(["--full-auto", "--sandbox", sandbox])
     if model:
         cmd.extend(["--model", model])
     if working_dir:
