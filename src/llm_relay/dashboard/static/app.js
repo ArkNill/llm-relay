@@ -30,15 +30,60 @@
 
   async function loadCLIStatus() {
     const container = document.getElementById("cli-cards");
-    const data = await fetchJSON("/cli/status");
-    if (!data) { container.innerHTML = "<p>Failed to load</p>"; return; }
-    container.innerHTML = data.map(function (s) {
+    var cliData = await fetchJSON("/cli/status");
+    if (!cliData) { container.innerHTML = "<p>Failed to load</p>"; return; }
+
+    // Fetch active sessions and recent delegations for activity counts
+    var sessionsData = await fetchJSON("/sessions?window=1");
+    var delegData = await fetchJSON("/delegations?limit=50");
+
+    var now = Date.now() / 1000;
+    var activeSessions = 0;
+    if (sessionsData && sessionsData.sessions) {
+      activeSessions = sessionsData.sessions.filter(function (s) {
+        return (now - s.last_ts) < 300; // active within 5 minutes
+      }).length;
+    }
+
+    // Count recent delegations per CLI (last 2 hours)
+    var delegCounts = {};
+    if (delegData && delegData.delegations) {
+      delegData.delegations.forEach(function (d) {
+        if ((now - d.ts) < 7200) {
+          var cli = d.cli_id || "unknown";
+          delegCounts[cli] = (delegCounts[cli] || 0) + 1;
+        }
+      });
+    }
+
+    // Map CLI IDs to display names
+    var cliIdMap = { "claude-code": "claude", "openai-codex": "codex", "gemini-cli": "gemini" };
+
+    container.innerHTML = cliData.map(function (s) {
       var statusClass = s.usable ? "status-ok" : (s.installed ? "status-warn" : "status-off");
       var authLabel = s.usable ? s.preferred_auth : "none";
-      return '<div class="card">' +
-        '<h3><span class="status ' + statusClass + '"></span>' + s.binary_name + '</h3>' +
+
+      // Activity: sessions for claude, delegations for codex/gemini
+      var activityHtml = "";
+      var isActive = false;
+      if (s.cli_id === "claude-code") {
+        activityHtml = '<div class="detail activity">' + activeSessions + ' active session' + (activeSessions !== 1 ? 's' : '') + '</div>';
+        isActive = activeSessions > 0;
+      } else {
+        var count = delegCounts[s.cli_id] || 0;
+        activityHtml = '<div class="detail activity">' + count + ' delegation' + (count !== 1 ? 's' : '') + ' (2h)</div>';
+        isActive = count > 0;
+      }
+
+      var cardClass = "card" + (isActive ? " card-active" : "") + (!s.usable ? " card-inactive" : "");
+
+      return '<div class="' + cardClass + '">' +
+        '<h3><span class="status ' + statusClass + '"></span>' + s.binary_name +
+        (isActive ? '<span class="pulse"></span>' : '') +
+        '</h3>' +
         '<div class="detail">v' + (s.version || "?") + '</div>' +
         '<div class="detail">Auth: ' + authLabel + '</div>' +
+        activityHtml +
         '</div>';
     }).join("");
   }
