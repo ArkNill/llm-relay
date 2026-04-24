@@ -9,15 +9,20 @@ Extras: `[proxy]` httpx+uvicorn+starlette | `[mcp]` FastMCP | `[cli]` click+rich
 ```
 src/llm_relay/
 ├── proxy       — Transparent API proxy (cache/token monitoring, 12-strategy pruning, Starlette app)
+│   ├── composition.py — Context window composition analysis (6-category classification, SNR, duplicate detection)
+│   └── history.py     — Session history capture (delta/full storage, compaction detection)
 ├── detect      — 7 session health detectors
+│   └── tui.py  — Terminal UI renderer for `llm-relay top` (Rich Live panels)
 ├── recover     — Session recovery + doctor (7 health checks)
 ├── guard       — 4-tier threshold daemon
 ├── cost        — Per-1% cost calculation, rate-limit header analysis
 ├── orch        — Multi-CLI orchestration (models/discovery/executor/db/router) — stdlib only
-├── mcp         — FastMCP server, 7 tools (stdio transport)
-├── api         — HTTP API endpoints (/api/v1/...) + display helper (multi-CLI session discovery, JSONL tail, /proc liveness via cc_pid + fd-open)
+├── mcp         — FastMCP server, 8 tools (stdio transport)
+├── api         — HTTP API endpoints (/api/v1/...) + display helper (multi-CLI session discovery, JSONL tail, /proc liveness, connection type detection)
 ├── dashboard   — Static SPA dashboard (vanilla JS) + Turn Monitor (alive sessions only)
-├── display     — Turn counter page with multi-CLI provider badges + alive filter
+├── display     — Turn counter page with context composition pie chart, connection type badges, multi-CLI provider badges
+├── history     — Session conversation replay viewer with compaction timeline
+├── i18n.py     — Lightweight i18n (en/ko locales, browser detection, LLM_RELAY_LANG override)
 ├── providers   — Session parsers (Claude Code JSONL, Codex JSONL, Gemini JSON)
 ├── strategies  — Pruning strategies (gentle/standard/aggressive)
 └── formatters  — Output formatters (plain, JSON, rich)
@@ -29,6 +34,8 @@ src/llm_relay/
 llm-relay scan [--provider claude-code|openai-codex|gemini-cli] [--format json|plain|rich]
 llm-relay doctor [--fix]
 llm-relay recover [--session-id ID]
+llm-relay top [--host HOST] [--port PORT] [--refresh SECONDS]
+llm-relay serve [--host HOST] [--port PORT] [--workers N]
 ```
 
 ## Detectors
@@ -55,13 +62,17 @@ llm-relay recover [--session-id ID]
 |--------|------|-------------|
 | GET | /api/v1/cli/status | CLI installation and auth status |
 | GET | /api/v1/sessions | Session summaries from proxy DB |
-| GET | /api/v1/sessions/turns | Turn counts with token metrics — alive sessions only (`?include_dead=1` to bypass) |
-| GET | /api/v1/display | Multi-CLI sessions with alive filter (CC: cc_pid + TTY fallback / Codex+Gemini: fd-open) |
+| GET | /api/v1/turns | Turn counts with token metrics — alive sessions only (`?include_dead=1`) |
+| GET | /api/v1/display | Multi-CLI sessions with composition, connection type, alive filter |
 | GET | /api/v1/cost | Cost breakdown |
 | GET | /api/v1/delegations | CLI delegation history |
 | GET | /api/v1/delegations/stats | Delegation statistics |
 | POST | /api/v1/session-terminal | Register terminal metadata |
 | GET | /api/v1/health | Health check |
+| GET | /api/v1/history | Session history list with token metrics |
+| GET | /api/v1/history/{session_id} | Conversation turns for replay |
+| GET | /api/v1/history/{session_id}/compactions | Compaction events |
+| GET | /api/v1/i18n | i18n message dict for requested locale |
 
 ## MCP Tools
 
@@ -74,11 +85,43 @@ llm-relay recover [--session-id ID]
 | orch_history | Recent delegation history |
 | relay_stats | Token usage and error rate stats |
 | session_turns | Turn count for sessions |
+| session_history | Retrieve conversation history for a session |
+
+## Context Composition Analysis
+
+Classifies the context window into 6 categories with real-time metrics:
+
+| Category | Description |
+|----------|-------------|
+| user_text | User-entered prompt text |
+| assistant_text | Model-generated response text |
+| tool_use | Tool call definitions (Read, Bash, Edit, etc.) |
+| tool_result | Tool execution output (file contents, grep results, etc.) |
+| thinking_overhead | Model internal reasoning blocks + signatures |
+| system | System prompt |
+
+Metrics: SNR (signal-to-noise ratio), duplicate read count, per-category percentage.
+Displayed as SVG pie chart on `/display/` page and in `llm-relay top` TUI.
+
+## Connection Type Detection
+
+Detects session connection method from `/proc/PID/environ` + parent process tree:
+
+| Type | Detection |
+|------|-----------|
+| native | No SSH/multiplexer indicators |
+| ssh | SSH_CONNECTION env var or sshd in parent chain |
+| tailscale | SSH_CONNECTION from 100.x.x.x (CGNAT range) |
+| tmux | TMUX env var or tmux process in parent chain |
+| screen | STY env var or screen in parent chain |
+| mosh | MOSH_SESSION_ID env var |
+| ssh+tmux | SSH transport + tmux multiplexer (combined) |
 
 ## Web Pages
 
-- `/dashboard/` — CLI status, cost, delegation history, Turn Monitor (alive sessions only; `?include_dead=1` to bypass)
-- `/display/` — Turn counter with CC/Codex/Gemini session cards, provider badges, alive filter (CC via cc_pid+TTY fallback; Codex/Gemini via fd-open — exited CLI sessions drop out as the kernel closes the transcript fd)
+- `/dashboard/` — CLI status, cost, delegation history, Turn Monitor
+- `/display/` — Turn counter with context composition pie chart, connection type badges, CC/Codex/Gemini session cards
+- `/history/` — Session conversation replay with compaction timeline (requires LLM_RELAY_HISTORY=1)
 
 ## Docker
 

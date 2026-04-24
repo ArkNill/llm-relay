@@ -16,14 +16,21 @@ This project started from a need to escape deep vendor lock-in with a single AI 
 - **Guard**: 4-tier threshold daemon with dual-zone classification
 - **Cost**: Per-1% cost calculation and rate-limit header analysis
 - **Orch**: Multi-CLI orchestration (Claude Code, Codex CLI, Gemini CLI)
-- **Display**: Multi-CLI session monitor with provider badges and liveness detection
-- **MCP**: 7 tools via stdio transport (cli_delegate, cli_status, cli_probe, orch_delegate, orch_history, relay_stats, session_turns)
+- **Display**: Multi-CLI session monitor with context composition pie chart, connection type badges (SSH/tmux/tailscale/mosh), and provider liveness detection
+- **History**: Proxy-level conversation capture with delta/full storage, compaction detection, and web replay viewer
+- **Composition**: Real-time context window analysis — classifies content into 6 categories (user/assistant/tool_use/tool_result/thinking/system) with SNR metrics and duplicate read tracking
+- **TUI**: `llm-relay top` — btop-style terminal monitor with Rich Live (works over SSH, no browser needed)
+- **i18n**: Browser locale detection with en/ko support; server-side override via `LLM_RELAY_LANG`
+- **MCP**: 8 tools via stdio transport (cli_delegate, cli_status, cli_probe, orch_delegate, orch_history, relay_stats, session_turns, session_history)
 
 ## Install
 
 ```bash
 # CLI only (diagnostics, recovery, orchestration)
 pip install llm-relay
+
+# With Rich TUI (llm-relay top)
+pip install llm-relay[cli]
 
 # With proxy + web dashboard
 pip install llm-relay[proxy]
@@ -43,6 +50,7 @@ pip install llm-relay[all]
 llm-relay scan              # Session health check (7 detectors)
 llm-relay doctor            # Configuration health check (7 checks)
 llm-relay recover           # Extract session context for resumption
+llm-relay top               # Live terminal monitor (btop-style TUI)
 ```
 
 ### Web dashboard
@@ -59,12 +67,13 @@ docker compose up -d
 
 Then open:
 - `/dashboard/` — CLI status, cost, delegation history, Turn Monitor (alive sessions only; `?include_dead=1` to bypass)
-- `/display/` — Turn counter with CC/Codex/Gemini session cards (alive filter: CC via cc_pid+TTY fallback, Codex/Gemini via fd-open)
+- `/display/` — Turn counter with context composition pie chart, connection type badges, CC/Codex/Gemini session cards
+- `/history/` — Session conversation replay with compaction timeline
 
 ### MCP server
 
 ```bash
-llm-relay-mcp               # stdio transport, 7 tools
+llm-relay-mcp               # stdio transport, 8 tools
 ```
 
 ### API proxy for Claude Code
