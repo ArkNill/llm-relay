@@ -2,6 +2,14 @@
 (function () {
   const API = window.location.origin + "/api/v1";
 
+  // i18n — detect browser locale, fall back to English
+  var _lang = (navigator.language || "en").startsWith("ko") ? "ko" : "en";
+  var _msgs = {
+    en: { no_sessions: "No active sessions", no_prompt: "(no prompt)" },
+    ko: { no_sessions: "활성 세션 없음", no_prompt: "(프롬프트 없음)" },
+  };
+  function msg(key) { return (_msgs[_lang] || _msgs.en)[key] || key; }
+
   async function fetchJSON(path) {
     try {
       const resp = await fetch(API + path);
@@ -192,7 +200,7 @@
 
     if (!data || !data.sessions || data.sessions.length === 0) {
       if (lastHash !== "EMPTY") {
-        container.innerHTML = '<div class="empty-state">활성 세션 없음</div>';
+        container.innerHTML = '<div class="empty-state">' + msg("no_sessions") + '</div>';
         countEl.textContent = "0 sessions";
         lastHash = "EMPTY";
       }
@@ -234,7 +242,7 @@
 
       var promptText = s.last_prompt || "";
       var promptClass = promptText ? "prompt-block" : "prompt-block empty";
-      var promptDisplay = promptText ? escapeHtml(promptText) : "(프롬프트 없음)";
+      var promptDisplay = promptText ? escapeHtml(promptText) : msg("no_prompt");
       var warn = s.message ? '<div class="warning">' + escapeHtml(s.message) + '</div>' : '';
 
       // Terminal badge + connection type

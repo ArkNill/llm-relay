@@ -2,6 +2,14 @@
 (function () {
   const API = window.location.origin + "/api/v1";
 
+  // i18n
+  var _lang = (navigator.language || "en").startsWith("ko") ? "ko" : "en";
+  var _msgs = {
+    en: { no_sessions: "No active sessions" },
+    ko: { no_sessions: "활성 세션 없음" },
+  };
+  function msg(key) { return (_msgs[_lang] || _msgs.en)[key] || key; }
+
   async function fetchJSON(path) {
     try {
       const resp = await fetch(API + path);
@@ -77,7 +85,7 @@
     var data = await fetchJSON("/turns?window=4");
     if (!data || !data.sessions || data.sessions.length === 0) {
       if (lastTurnHash !== "EMPTY") {
-        container.innerHTML = '<div class="turn-monitor-empty">활성 세션 없음</div>';
+        container.innerHTML = '<div class="turn-monitor-empty">' + msg("no_sessions") + '</div>';
         lastTurnHash = "EMPTY";
       }
       return;
