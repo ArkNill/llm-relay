@@ -1,6 +1,7 @@
 """Tests for orch/executor.py — subprocess wrapper."""
 
 import json
+import os
 import subprocess
 from unittest.mock import MagicMock, patch
 
@@ -61,6 +62,33 @@ class TestBuildCommands:
         cmd = _build_codex_cmd(cli, "test", working_dir="/tmp/project")
         assert "-C" in cmd
         assert "/tmp/project" in cmd
+
+    def test_codex_sandbox_none(self):
+        cli = _make_cli("openai-codex", "codex", "/usr/bin/codex")
+        with patch.dict(os.environ, {"LLM_RELAY_CODEX_SANDBOX": "none"}):
+            cmd = _build_codex_cmd(cli, "fix bug")
+        assert "--dangerously-bypass-approvals-and-sandbox" in cmd
+        assert "--full-auto" not in cmd
+        assert "--sandbox" not in cmd
+
+    def test_codex_sandbox_danger_full_access(self):
+        cli = _make_cli("openai-codex", "codex", "/usr/bin/codex")
+        with patch.dict(os.environ, {"LLM_RELAY_CODEX_SANDBOX": "danger-full-access"}):
+            cmd = _build_codex_cmd(cli, "fix bug")
+        assert "--full-auto" in cmd
+        assert "--sandbox" in cmd
+        assert "danger-full-access" in cmd
+        assert "--dangerously-bypass-approvals-and-sandbox" not in cmd
+
+    def test_codex_sandbox_read_per_invocation(self):
+        """Sandbox env is re-read on each call, not cached at module load."""
+        cli = _make_cli("openai-codex", "codex", "/usr/bin/codex")
+        with patch.dict(os.environ, {"LLM_RELAY_CODEX_SANDBOX": "workspace-write"}):
+            cmd1 = _build_codex_cmd(cli, "first")
+        with patch.dict(os.environ, {"LLM_RELAY_CODEX_SANDBOX": "none"}):
+            cmd2 = _build_codex_cmd(cli, "second")
+        assert "workspace-write" in cmd1
+        assert "--dangerously-bypass-approvals-and-sandbox" in cmd2
 
     def test_gemini_basic(self):
         cli = _make_cli("gemini-cli", "gemini", "/usr/bin/gemini")
