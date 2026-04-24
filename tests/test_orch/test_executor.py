@@ -52,8 +52,8 @@ class TestBuildCommands:
         cli = _make_cli("openai-codex", "codex", "/usr/bin/codex")
         cmd = _build_codex_cmd(cli, "fix bug")
         assert cmd == [
-            "/usr/bin/codex", "exec", "fix bug", "--json", "--full-auto",
-            "--skip-git-repo-check", "--sandbox", "workspace-write",
+            "/usr/bin/codex", "exec", "fix bug", "--json", "--skip-git-repo-check",
+            "--full-auto", "--sandbox", "workspace-write",
         ]
 
     def test_codex_with_dir(self):
