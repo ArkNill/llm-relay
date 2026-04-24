@@ -19,6 +19,11 @@ section { margin-bottom: 2rem; }
 .status-ok { background: #3fb950; }
 .status-warn { background: #d29922; }
 .status-off { background: #484f58; }
+.card-inactive { opacity: 0.45; }
+.card-active { border-color: #3fb950; }
+.card .activity { color: #58a6ff; font-weight: 500; }
+.card .pulse { display: inline-block; width: 6px; height: 6px; border-radius: 50%; background: #3fb950; margin-left: 0.4rem; animation: pulse-dot 2s ease-in-out infinite; }
+@keyframes pulse-dot { 0%, 100% { opacity: 1; } 50% { opacity: 0.3; } }
 .stats-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); gap: 0.6rem; }
 .stat-box { background: #161b22; border: 1px solid #21262d; border-radius: 6px; padding: 0.8rem; text-align: center; }
 .stat-box .value { font-size: 1.4rem; font-weight: 700; color: #58a6ff; }
