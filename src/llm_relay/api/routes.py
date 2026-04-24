@@ -348,6 +348,22 @@ async def _api_session_terminal(request: Request) -> Response:
         return _json_response({"error": str(e)}, status=500)
 
 
+# ── Context composition helper ──
+
+
+def _get_composition_safe(conn: Any, session_id: str) -> Optional[dict]:
+    """Return composition analysis for a session, or None on any failure."""
+    if not os.getenv("CC_RELAY_HISTORY", "") == "1":
+        return None
+    try:
+        from llm_relay.proxy.composition import analyze_session_composition
+
+        return analyze_session_composition(conn, session_id)
+    except Exception as exc:
+        logger.debug("Composition analysis failed for %s: %s", session_id, exc)
+        return None
+
+
 # ── GET /api/v1/display ──
 
 async def _api_display(request: Request) -> Response:
@@ -362,6 +378,7 @@ async def _api_display(request: Request) -> Response:
         from llm_relay.api.display import (
             check_cc_session_alive,
             collect_owned_cc_pids,
+            detect_connection_type,
             discover_external_cli_sessions,
             get_last_user_prompt,
         )
@@ -412,6 +429,8 @@ async def _api_display(request: Request) -> Response:
                 "cc_pid": term.get("cc_pid"),
                 "term_pid": term.get("term_pid"),
                 "term_name": term.get("term_name"),
+                "connection_type": detect_connection_type(term.get("cc_pid") or 0),
+                "composition": _get_composition_safe(conn, r["session_id"]),
                 "alive": alive,
             })
 

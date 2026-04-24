@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import os
+import time as _time
 from pathlib import Path
 from typing import Optional
 
@@ -708,4 +709,112 @@ def _iso_to_epoch(ts: str) -> Optional[float]:
         return dt.timestamp()
     except (ValueError, OSError):
         return None
+
+
+# ── Connection type detection ──
+
+# Cache: pid -> (timestamp, result)
+_conn_type_cache: dict = {}
+_CONN_CACHE_TTL = 60.0  # seconds
+
+
+def _read_proc_environ(pid: int) -> dict:
+    """Read /proc/PID/environ and return as a dict."""
+    proc_dir = _get_proc_dir() / str(pid)
+    environ_path = proc_dir / "environ"
+    try:
+        raw = environ_path.read_bytes()
+        result = {}
+        for entry in raw.split(b"\x00"):
+            if b"=" in entry:
+                key, _, val = entry.partition(b"=")
+                result[key.decode("utf-8", errors="replace")] = val.decode("utf-8", errors="replace")
+        return result
+    except (OSError, PermissionError):
+        return {}
+
+
+def _get_parent_comm_chain(pid: int, max_depth: int = 10) -> list:
+    """Walk parent process chain and return list of (pid, comm) tuples."""
+    proc_dir = _get_proc_dir()
+    chain = []
+    current = pid
+    for _ in range(max_depth):
+        try:
+            status_path = proc_dir / str(current) / "status"
+            if not status_path.exists():
+                break
+            ppid = None
+            comm = ""
+            for line in status_path.read_text(errors="replace").splitlines():
+                if line.startswith("Name:\t"):
+                    comm = line[6:].strip()
+                elif line.startswith("PPid:\t"):
+                    ppid = int(line[6:].strip())
+            if ppid is None or ppid <= 1:
+                if comm:
+                    chain.append((current, comm))
+                break
+            chain.append((current, comm))
+            current = ppid
+        except (OSError, ValueError, PermissionError):
+            break
+    return chain
+
+
+def detect_connection_type(pid: int) -> str:
+    """Detect connection method for a process.
+
+    Checks /proc/PID/environ for env vars and walks parent process tree.
+    Returns combined transport+multiplexer label:
+      'native', 'ssh', 'tmux', 'ssh+tmux', 'tailscale+tmux',
+      'screen', 'ssh+screen', 'mosh', 'mosh+tmux', 'unknown'
+    """
+    if not pid or pid <= 0:
+        return "unknown"
+
+    # Cache check
+    now = _time.time()
+    cached = _conn_type_cache.get(pid)
+    if cached and (now - cached[0]) < _CONN_CACHE_TTL:
+        return cached[1]
+
+    env = _read_proc_environ(pid)
+    chain = _get_parent_comm_chain(pid)
+    parent_comms = {comm.lower() for _, comm in chain}
+
+    # Detect multiplexer
+    multiplexer = ""
+    if env.get("TMUX") or "tmux: server" in parent_comms or "tmux" in parent_comms:
+        multiplexer = "tmux"
+    elif env.get("STY") or "screen" in parent_comms:
+        multiplexer = "screen"
+
+    # Detect transport
+    transport = "native"
+    ssh_conn = env.get("SSH_CONNECTION", "")
+    if env.get("MOSH_SESSION_ID") or "mosh-server" in parent_comms:
+        transport = "mosh"
+    elif ssh_conn or "sshd" in parent_comms:
+        # Check for Tailscale (100.x.x.x CGNAT range)
+        if ssh_conn:
+            client_ip = ssh_conn.split()[0] if ssh_conn.split() else ""
+            if client_ip.startswith("100."):
+                transport = "tailscale"
+            else:
+                transport = "ssh"
+        else:
+            transport = "ssh"
+
+    # Combine
+    if multiplexer:
+        if transport == "native":
+            result = multiplexer
+        else:
+            result = transport + "+" + multiplexer
+    else:
+        result = transport
+
+    _conn_type_cache[pid] = (now, result)
+    return result
 
