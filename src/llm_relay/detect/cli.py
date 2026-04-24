@@ -248,6 +248,35 @@ def serve(host: str, port: int, workers: int) -> None:
     )
 
 
+@cli.command()
+@click.option("--host", default="127.0.0.1", help="Proxy host.")
+@click.option("--port", "-p", default=8083, type=int, help="Proxy port.")
+@click.option("--refresh", "-r", default=2.0, type=float, help="Refresh interval in seconds.")
+def top(host: str, port: int, refresh: float) -> None:
+    """Live terminal monitor -- btop-style session dashboard."""
+    try:
+        from rich.console import Console
+        from rich.live import Live
+    except ImportError:
+        click.echo("Error: rich not installed. Run: pip install llm-relay[cli]", err=True)
+        raise SystemExit(1)
+
+    import time
+
+    from llm_relay.detect.tui import render_top
+
+    console = Console()
+    console.clear()
+
+    try:
+        with Live(render_top(host, port), console=console, refresh_per_second=1, screen=False) as live:
+            while True:
+                time.sleep(refresh)
+                live.update(render_top(host, port))
+    except KeyboardInterrupt:
+        console.print("\n[grey62]  Stopped.[/grey62]")
+
+
 def main() -> None:
     """Entry point."""
     cli()
