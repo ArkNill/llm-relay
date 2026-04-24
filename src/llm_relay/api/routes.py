@@ -113,17 +113,19 @@ def _classify_zone(turns: int) -> tuple:
 
     Not used by any endpoint anymore. Turn counts are display-only now.
     """
+    from llm_relay.i18n import t
+
     yellow = int(os.getenv("CC_TURN_YELLOW", "200"))
     orange = int(os.getenv("CC_TURN_ORANGE", "250"))
     red = int(os.getenv("CC_TURN_RED", "300"))
 
     if turns >= red:
-        return "red", "위험", None, f"{red}턴 초과. 품질 저하 가능성이 높습니다. 새 세션으로 전환하세요."
+        return "red", t("zone.danger"), None, t("zone.turn.red", n=red)
     if turns >= orange:
-        return "orange", "경고", red, f"{orange}턴 도달. 품질 저하 구간 진입 임박. 로테이션을 권장합니다."
+        return "orange", t("zone.warning"), red, t("zone.turn.orange", n=orange)
     if turns >= yellow:
-        return "yellow", "주의", orange, f"{yellow}턴 도달. 새 세션 준비를 권장합니다."
-    return "green", "안전", yellow, None
+        return "yellow", t("zone.caution"), orange, t("zone.turn.yellow", n=yellow)
+    return "green", t("zone.safe"), yellow, None
 
 
 def _classify_zone_absolute(tokens: int) -> tuple:
@@ -132,20 +134,22 @@ def _classify_zone_absolute(tokens: int) -> tuple:
     Env: CC_TOKEN_A_YELLOW / _A_ORANGE / _A_RED / _A_HARD
     Returns (zone, zone_label, next_threshold, message).
     """
+    from llm_relay.i18n import t
+
     yellow = int(os.getenv("CC_TOKEN_A_YELLOW", "300000"))
     orange = int(os.getenv("CC_TOKEN_A_ORANGE", "500000"))
     red = int(os.getenv("CC_TOKEN_A_RED", "750000"))
     hard = int(os.getenv("CC_TOKEN_A_HARD", "900000"))
 
     if tokens >= hard:
-        return "hard", "차단", None, f"{hard // 1000}K 초과. 즉시 세션 정리 필요."
+        return "hard", t("zone.blocked"), None, t("zone.abs.hard", n=hard // 1000)
     if tokens >= red:
-        return "red", "위험", hard, f"{red // 1000}K 도달. 세션 로테이션 필수."
+        return "red", t("zone.danger"), hard, t("zone.abs.red", n=red // 1000)
     if tokens >= orange:
-        return "orange", "경고", red, f"{orange // 1000}K 도달. 현재 작업 마무리 후 rotate."
+        return "orange", t("zone.warning"), red, t("zone.abs.orange", n=orange // 1000)
     if tokens >= yellow:
-        return "yellow", "주의", orange, f"{yellow // 1000}K 도달. 문서 업데이트 + rotate 준비."
-    return "green", "안전", yellow, None
+        return "yellow", t("zone.caution"), orange, t("zone.abs.yellow", n=yellow // 1000)
+    return "green", t("zone.safe"), yellow, None
 
 
 def _classify_zone_ratio(tokens: int, ceiling: Optional[int] = None) -> tuple:
@@ -154,10 +158,12 @@ def _classify_zone_ratio(tokens: int, ceiling: Optional[int] = None) -> tuple:
     Env: CC_TOKEN_CEILING (default 1,000,000 for local / 500,000 recommended for public)
     Returns (zone, zone_label, next_threshold, message).
     """
+    from llm_relay.i18n import t
+
     if ceiling is None:
         ceiling = int(os.getenv("CC_TOKEN_CEILING", "1000000"))
     if ceiling <= 0:
-        return "green", "안전", 0, None
+        return "green", t("zone.safe"), 0, None
 
     yellow_t = int(ceiling * 0.50)
     orange_t = int(ceiling * 0.70)
@@ -165,14 +171,23 @@ def _classify_zone_ratio(tokens: int, ceiling: Optional[int] = None) -> tuple:
     ratio = tokens / ceiling if ceiling else 0.0
 
     if ratio >= 1.0:
-        return "hard", "차단", None, f"100% ({ceiling // 1000}K) 천장 도달. 즉시 세션 정리."
+        return "hard", t("zone.blocked"), None, t("zone.ratio.hard", n=ceiling // 1000)
     if ratio >= 0.90:
-        return "red", "위험", ceiling, f"90% ({red_t // 1000}K) 도달. 로테이션 필수."
+        return "red", t("zone.danger"), ceiling, t("zone.ratio.red", n=red_t // 1000)
     if ratio >= 0.70:
-        return "orange", "경고", red_t, f"70% ({orange_t // 1000}K) 도달. 마무리 후 rotate."
+        return "orange", t("zone.warning"), red_t, t("zone.ratio.orange", n=orange_t // 1000)
     if ratio >= 0.50:
-        return "yellow", "주의", orange_t, f"50% ({yellow_t // 1000}K) 도달. rotate 준비."
-    return "green", "안전", yellow_t, None
+        return "yellow", t("zone.caution"), orange_t, t("zone.ratio.yellow", n=yellow_t // 1000)
+    return "green", t("zone.safe"), yellow_t, None
+
+
+async def _api_i18n(request: Request) -> Response:
+    """Return i18n message dict for the requested locale."""
+    from llm_relay.i18n import MESSAGES, get_lang
+
+    lang = request.query_params.get("lang", get_lang())
+    msgs = MESSAGES.get(lang, MESSAGES["en"])
+    return _json_response({"lang": lang, "messages": msgs})
 
 
 def _overall_zone(zone_a: str, zone_b: str) -> str:
@@ -626,4 +641,5 @@ def get_api_routes() -> List[Route]:
         Route("/api/v1/history", _api_history_sessions, methods=["GET"]),
         Route("/api/v1/history/{session_id}", _api_history_detail, methods=["GET"]),
         Route("/api/v1/history/{session_id}/compactions", _api_history_compactions, methods=["GET"]),
+        Route("/api/v1/i18n", _api_i18n, methods=["GET"]),
     ]
