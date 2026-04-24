@@ -3,6 +3,7 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <link rel="icon" href="data:,">
   <title>llm-relay Dashboard</title>
   <link rel="stylesheet" href="style.css">
 </head>
@@ -48,6 +49,18 @@
       </table>
     </section>
   </main>
+
+  <div id="detail-overlay"></div>
+  <div id="detail-panel">
+    <div class="panel-header">
+      <span class="panel-title">Delegation Detail</span>
+      <div class="panel-controls">
+        <button id="panel-copy" title="Copy details">Copy</button>
+        <button id="panel-close" title="Close panel">&times;</button>
+      </div>
+    </div>
+    <div class="panel-body" id="panel-body"></div>
+  </div>
 
   <script src="app.js"></script>
 </body>
