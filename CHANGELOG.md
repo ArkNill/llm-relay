@@ -2,6 +2,23 @@
 
 All notable changes to llm-relay are documented here.
 
+## [0.6.0] - 2026-04-26
+
+### Added
+- **Dashboard Context Health section**: Real-time summary of SNR, duplicate reads, and tool_result% across all active sessions with per-session health cards
+- **Duplicate read details**: `duplicate_reads` dict in composition API returns `{filepath: count}` instead of count-only; top file basenames shown in Display, Dashboard, and TUI
+- **Duplicate read warning**: `DUPLICATE_READ_WARN_THRESHOLD` env var (default 5) triggers visual warning when any file exceeds threshold
+- **SNR recommendation**: `CC_SNR_WARNING` env var (default 0.3) adds session-split recommendation message when SNR drops below threshold
+- **Per-turn composition chart**: SVG stacked area chart on `/history/` session detail page showing how context composition evolves across turns, with compaction markers and hover tooltips
+- **Per-turn composition API**: `GET /api/v1/history/{session_id}/composition` endpoint with automatic sampling for large sessions (>50 turns)
+- `composition` field added to `/api/v1/turns` response (was only on `/api/v1/display`)
+- 13 new tests (composition, turns, history)
+
+### Fixed
+- History test mock leaks: `discover_external_cli_sessions` was not mocked, causing tests to find real session files on disk
+- Codex session file fallback test: path detection now works with `patch()` instead of monkey-patching
+- 2 ruff lint issues in `scripts/context_composition.py`
+
 ## [0.5.0] - 2026-04-24
 
 ### Added
