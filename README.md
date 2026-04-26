@@ -44,43 +44,52 @@ pip install llm-relay[all]
 
 ## Quick Start
 
-### CLI diagnostics (no server needed)
+### One-command setup (recommended)
 
 ```bash
+pip install llm-relay[all]
+llm-relay init
+```
+
+This single command:
+1. Detects installed CLIs (Claude Code, Codex, Gemini)
+2. Initializes the database (`~/.llm-relay/usage.db`)
+3. Configures Claude Code to route through the proxy (`ANTHROPIC_BASE_URL`)
+4. Registers the MCP server in Claude Code (8 tools)
+5. Starts the proxy server with history enabled
+6. Runs a health check to verify everything works
+
+After init, open: **http://localhost:8083/dashboard/**
+
+Options: `--dry-run` (preview without changes), `--skip-server` (configure only), `--port 9090` (custom port).
+
+### Manual setup
+
+```bash
+# CLI diagnostics only (no server needed)
+pip install llm-relay
 llm-relay scan              # Session health check (7 detectors)
 llm-relay doctor            # Configuration health check (7 checks)
-llm-relay recover           # Extract session context for resumption
 llm-relay top               # Live terminal monitor (btop-style TUI)
-```
 
-### Web dashboard
-
-```bash
-# Option 1: Direct
+# Web dashboard
 pip install llm-relay[proxy]
-uvicorn llm_relay.proxy.proxy:app --host 0.0.0.0 --port 8083
+llm-relay serve             # Starts proxy + dashboard on port 8083
 
-# Option 2: Docker
-cp .env.example .env        # Edit as needed
-docker compose up -d
+# Then configure Claude Code to use the proxy:
+# In ~/.claude/settings.json, add:
+#   "env": { "ANTHROPIC_BASE_URL": "http://localhost:8083" }
 ```
 
-Then open:
-- `/dashboard/` — CLI status, cost, delegation history, Turn Monitor (alive sessions only; `?include_dead=1` to bypass)
-- `/display/` — Turn counter with context composition pie chart, connection type badges, CC/Codex/Gemini session cards
+Web pages:
+- `/dashboard/` — CLI status, cost, quota, error rate, cache hit rate, Turn Monitor
+- `/display/` — Turn counter with context composition, connection type badges
 - `/history/` — Session conversation replay with compaction timeline
 
 ### MCP server
 
 ```bash
 llm-relay-mcp               # stdio transport, 8 tools
-```
-
-### API proxy for Claude Code
-
-```bash
-# Set in Claude Code
-export ANTHROPIC_BASE_URL=http://localhost:8080
 ```
 
 ## CLI Status
