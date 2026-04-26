@@ -277,6 +277,103 @@ def top(host: str, port: int, refresh: float) -> None:
         console.print("\n[grey62]  Stopped.[/grey62]")
 
 
+@cli.command()
+@click.option("--port", "-p", default=8083, type=int, help="Proxy port (default: 8083).")
+@click.option("--skip-server", is_flag=True, help="Configure only, don't start the server.")
+@click.option("--dry-run", is_flag=True, help="Show what would be done without making changes.")
+def init(port: int, skip_server: bool, dry_run: bool) -> None:
+    """One-command setup — detect CLIs, configure proxy, start server.
+
+    \b
+    What this does:
+      1. Detect installed CLIs (Claude Code, Codex, Gemini)
+      2. Initialize DB (~/.llm-relay/usage.db)
+      3. Configure Claude Code to route through proxy
+      4. Register llm-relay MCP server in Claude Code
+      5. Start the proxy server (with history enabled)
+      6. Verify everything works
+
+    \b
+    After running this, open the dashboard:
+      http://localhost:8083/dashboard/
+    """
+    from llm_relay.setup_init import run_init
+
+    if dry_run:
+        click.echo("=== llm-relay init (dry run) ===\n")
+    else:
+        click.echo("=== llm-relay init ===\n")
+
+    summary = run_init(port=port, skip_server=skip_server, dry_run=dry_run)
+
+    # Display results
+    click.echo("Version: {}".format(summary["version"]))
+    click.echo()
+
+    # CLIs detected
+    click.echo("CLIs detected:")
+    if summary["clis"]:
+        for c in summary["clis"]:
+            ver = " v{}".format(c["version"]) if c.get("version") else ""
+            click.echo("  {} {}{}".format(
+                click.style("OK", fg="green"), c["name"], ver,
+            ))
+    else:
+        click.echo("  {} No AI CLI tools found".format(click.style("!!", fg="yellow")))
+    click.echo()
+
+    # DB
+    click.echo("Database: {}".format(summary["db"]))
+
+    # Config
+    click.echo("Config:   {}".format(summary["config"]))
+    click.echo()
+
+    # Claude Code configuration
+    click.echo("Claude Code configuration:")
+    for action in summary["claude_code"]:
+        if "skipped" in action.lower():
+            click.echo("  {} {}".format(click.style("--", fg="yellow"), action))
+        else:
+            click.echo("  {} {}".format(click.style("OK", fg="green"), action))
+    click.echo()
+
+    # Server
+    click.echo("Server: {}".format(summary["server"] or "not started"))
+
+    # Health check
+    if isinstance(summary["health"], dict):
+        click.echo()
+        click.echo("Health check:")
+        all_ok = True
+        for name, result in summary["health"].items():
+            if result.get("ok"):
+                click.echo("  {} {}".format(click.style("OK", fg="green"), name))
+            else:
+                click.echo("  {} {} — {}".format(
+                    click.style("FAIL", fg="red"), name, result.get("error", ""),
+                ))
+                all_ok = False
+        if all_ok:
+            click.echo()
+            click.echo(click.style("All checks passed.", fg="green", bold=True))
+
+    # URLs
+    if summary["urls"]:
+        click.echo()
+        click.echo("Ready! Open in browser:")
+        click.echo("  Dashboard:  {}".format(summary["urls"]["dashboard"]))
+        click.echo("  Display:    {}".format(summary["urls"]["display"]))
+        click.echo("  History:    {}".format(summary["urls"]["history"]))
+        click.echo()
+        click.echo("Claude Code will automatically route through the proxy.")
+        click.echo("To stop: kill the uvicorn process or press Ctrl+C.")
+
+    if dry_run:
+        click.echo()
+        click.echo("(dry run — no changes were made)")
+
+
 def main() -> None:
     """Entry point."""
     cli()
