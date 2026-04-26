@@ -40,6 +40,18 @@ h2 { font-size: 1.1rem; color: #8b949e; margin-bottom: 0.8rem; }
 .session-card .meta { font-size: 0.8rem; color: #8b949e; display: flex; gap: 1rem; flex-wrap: wrap; }
 .session-card .meta strong { color: #c9d1d9; }
 .provider-badge { font-size: 0.65rem; padding: 0.1rem 0.4rem; border-radius: 4px; background: #1f6feb; color: #fff; }
+.source-badge { font-size: 0.65rem; padding: 0.1rem 0.4rem; border-radius: 4px; border: 1px solid #30363d; color: #8b949e; }
+.token-meta {
+  display: flex;
+  gap: 0.8rem;
+  flex-wrap: wrap;
+  margin-top: 0.7rem;
+  padding-top: 0.7rem;
+  border-top: 1px solid #21262d;
+  font-size: 0.75rem;
+  color: #8b949e;
+}
+.token-meta strong { color: #c9d1d9; }
 
 /* Detail view */
 .detail-header { display: flex; align-items: baseline; justify-content: space-between; margin-bottom: 1rem; }
@@ -92,3 +104,13 @@ h2 { font-size: 1.1rem; color: #8b949e; margin-bottom: 0.8rem; }
 .msg-role.thinking { color: #a371f7; }
 
 .empty { text-align: center; color: #6e7681; padding: 3rem; font-size: 0.9rem; }
+
+/* Composition chart */
+.composition-chart { background: #161b22; border: 1px solid #21262d; border-radius: 8px; padding: 1rem; margin-bottom: 1.5rem; }
+.composition-chart h3 { font-size: 0.9rem; color: #8b949e; margin-bottom: 0.8rem; }
+.composition-chart svg { width: 100%; height: auto; max-height: 220px; }
+.comp-chart-legend { display: flex; gap: 1rem; flex-wrap: wrap; font-size: 0.75rem; color: #8b949e; margin-top: 0.5rem; }
+.comp-chart-legend b { font-weight: 600; }
+.sampled-badge { font-size: 0.65rem; color: #6e7681; border: 1px solid #30363d; border-radius: 4px; padding: 0 0.3rem; }
+.chart-tooltip { display: none; font-size: 0.75rem; color: #c9d1d9; background: #21262d; border: 1px solid #30363d; border-radius: 6px; padding: 0.5rem 0.7rem; margin-top: 0.4rem; line-height: 1.5; }
+.hover-target { cursor: crosshair; }

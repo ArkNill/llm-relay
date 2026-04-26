@@ -235,6 +235,135 @@ def _extract_prompt_from_gemini(content: str) -> dict:
     return {"text": "", "timestamp": None}
 
 
+def _parse_codex_session_history(path: Path, include_thinking: bool = False) -> list[dict]:
+    """Build history-detail turns from a Codex session JSONL file.
+
+    Codex sessions are not stored in the proxy DB, so the History page needs a
+    lightweight session-file fallback that roughly matches the proxy DB shape.
+    """
+    turns: list[dict] = []
+    current_turn: Optional[dict] = None
+    turn_number = 0
+
+    def _finalize_turn() -> None:
+        nonlocal current_turn
+        if current_turn is None:
+            return
+        response_blocks = current_turn.pop("_response_blocks")
+        thinking_blocks = current_turn.pop("_thinking_blocks")
+        current_turn["response_message"] = (
+            json.dumps(response_blocks, ensure_ascii=False) if response_blocks else None
+        )
+        current_turn["thinking_blocks"] = (
+            json.dumps(thinking_blocks, ensure_ascii=False) if thinking_blocks else None
+        )
+        current_turn["response_size_bytes"] = (
+            len(current_turn["response_message"].encode("utf-8"))
+            if current_turn["response_message"]
+            else 0
+        )
+        turns.append(current_turn)
+        current_turn = None
+
+    try:
+        for line in path.read_text(encoding="utf-8", errors="replace").splitlines():
+            stripped = line.strip()
+            if not stripped:
+                continue
+            try:
+                obj = json.loads(stripped)
+            except (json.JSONDecodeError, ValueError):
+                continue
+
+            if obj.get("type") != "response_item":
+                continue
+
+            payload = obj.get("payload", {})
+            if not isinstance(payload, dict):
+                continue
+
+            item_type = payload.get("type")
+            role = payload.get("role")
+            ts_epoch = _iso_to_epoch(obj.get("timestamp", ""))
+
+            if role == "user":
+                _finalize_turn()
+                turn_number += 1
+                request_messages = json.dumps(
+                    [{"role": "user", "content": payload.get("content")}],
+                    ensure_ascii=False,
+                )
+                current_turn = {
+                    "id": None,
+                    "ts": ts_epoch,
+                    "session_id": path.stem,
+                    "request_id": None,
+                    "turn_number": turn_number,
+                    "storage_mode": "full",
+                    "request_messages": request_messages,
+                    "response_message": None,
+                    "thinking_blocks": None,
+                    "model": None,
+                    "temperature": None,
+                    "max_tokens": None,
+                    "total_message_count": 1,
+                    "previous_message_count": max(0, turn_number - 1),
+                    "request_size_bytes": len(request_messages.encode("utf-8")),
+                    "response_size_bytes": 0,
+                    "provider": "openai-codex",
+                    "_response_blocks": [],
+                    "_thinking_blocks": [],
+                }
+                continue
+
+            if current_turn is None:
+                continue
+
+            if role == "assistant" and item_type == "message":
+                content = payload.get("content")
+                if isinstance(content, list):
+                    current_turn["_response_blocks"].extend(content)
+                elif content is not None:
+                    current_turn["_response_blocks"].append({"type": "output_text", "text": str(content)})
+                continue
+
+            if item_type == "function_call":
+                current_turn["_response_blocks"].append({
+                    "type": "tool_use",
+                    "name": payload.get("name", ""),
+                    "input": payload.get("arguments", ""),
+                })
+                continue
+
+            if item_type == "function_call_output":
+                current_turn["_response_blocks"].append({
+                    "type": "tool_result",
+                    "content": payload.get("output", ""),
+                })
+                continue
+
+            if item_type == "reasoning" and include_thinking:
+                summary = payload.get("summary")
+                if isinstance(summary, list) and summary:
+                    thinking_text = "\n".join(
+                        part.get("text", "") for part in summary if isinstance(part, dict)
+                    ).strip()
+                else:
+                    thinking_text = ""
+                if not thinking_text and payload.get("encrypted_content"):
+                    thinking_text = "[encrypted reasoning]"
+                if thinking_text:
+                    current_turn["_thinking_blocks"].append({
+                        "type": "thinking",
+                        "thinking": thinking_text,
+                    })
+    except OSError:
+        return []
+
+    _finalize_turn()
+    return turns
+
+
 def get_last_user_prompt(session_id: str, projects_dir: Optional[Path] = None) -> dict:
     """Return the most recent real user prompt for a session.
 
