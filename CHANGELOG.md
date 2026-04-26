@@ -2,6 +2,19 @@
 
 All notable changes to llm-relay are documented here.
 
+## [0.7.0] - 2026-04-26
+
+### Added
+- **Quota monitoring**: `/api/v1/quota` endpoint surfaces Q5h/Q7d utilization and overage status from stored ratelimit headers
+- **Error rate tracking**: `/api/v1/errors` endpoint with 2xx/4xx/5xx/429 breakdown and error rate percentage
+- **Cache hit rate**: `/api/v1/cache` endpoint and per-session `cache_hit_rate` field in `/turns/{id}` and `/display` responses
+- **TTL tier detection**: `/api/v1/ttl` endpoint detects 1h/5m/mixed ephemeral cache tiers from SSE `message_start` events
+- **Dashboard API Health section**: 4-card grid showing quota, error rate, cache hit rate, and TTL tier with 30s auto-refresh
+- **Display page badges**: Cache hit rate and TTL tier badges on session cards
+- Ephemeral token extraction from SSE `cache_creation.ephemeral_1h/5m_input_tokens` (streaming and non-streaming)
+- DB migration: `ephemeral_1h_tokens` and `ephemeral_5m_tokens` columns on `requests` table
+- 28 new tests (quota 5, error 5, cache 6, TTL 7, log_request 2, API endpoints 3)
+
 ## [0.6.0] - 2026-04-26
 
 ### Added
