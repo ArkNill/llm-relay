@@ -16,6 +16,68 @@ logger = logging.getLogger(__name__)
 
 _DEFAULT_TIMEOUT = int(os.environ.get("LLM_RELAY_ORCH_EXEC_TIMEOUT", "120"))
 
+# Codex GitHub App token injection — when llm-relay's cli_delegate spawns
+# Codex (cli.cli_id == "openai-codex"), we generate a fresh GitHub App
+# installation token via a user-provided script and inject it as GH_TOKEN
+# in the subprocess env. This lets Codex use a dedicated bot identity for
+# `gh` operations (PR comments, label changes, branch pushes) instead of
+# falling back to the operator's personal token.
+#
+# Tokens are GitHub-installation tokens that expire after 60 minutes; we
+# cache for 50 minutes to leave a comfortable margin.
+#
+# Disable by unsetting LLM_RELAY_CODEX_GH_TOKEN_SCRIPT (or pointing it at a
+# non-existent path). Disabled by default — feature only activates when the
+# script exists and is executable.
+_CODEX_GH_TOKEN_SCRIPT = os.environ.get(
+    "LLM_RELAY_CODEX_GH_TOKEN_SCRIPT",
+    os.path.expanduser("~/.claude/github-apps/generate-token.sh"),
+)
+_CODEX_GH_TOKEN_AGENT = os.environ.get("LLM_RELAY_CODEX_GH_AGENT", "codex-reviewer")
+_CODEX_GH_TOKEN_TTL_S = 3000  # 50 min cache; tokens themselves expire at 60
+_codex_gh_token_cache: Optional[tuple] = None  # (token, expiry_monotonic)
+
+
+def _get_codex_gh_token() -> Optional[str]:
+    """Generate (or return cached) GitHub App installation token for Codex.
+
+    Returns None silently if the script doesn't exist, isn't executable, or
+    fails — callers must tolerate that and continue without the env injection.
+    """
+    global _codex_gh_token_cache
+    if _codex_gh_token_cache:
+        token, expiry = _codex_gh_token_cache
+        if time.monotonic() < expiry:
+            return token
+
+    script = _CODEX_GH_TOKEN_SCRIPT
+    if not script or not os.path.isfile(script) or not os.access(script, os.X_OK):
+        return None
+
+    try:
+        proc = subprocess.run(
+            [script, _CODEX_GH_TOKEN_AGENT],
+            capture_output=True,
+            text=True,
+            timeout=15,
+            stdin=subprocess.DEVNULL,
+        )
+        if proc.returncode == 0 and proc.stdout.strip():
+            token = proc.stdout.strip()
+            _codex_gh_token_cache = (token, time.monotonic() + _CODEX_GH_TOKEN_TTL_S)
+            logger.debug("Codex GH token generated (cached %ds)", _CODEX_GH_TOKEN_TTL_S)
+            return token
+        logger.debug("Codex GH token script returned %d: %s", proc.returncode, proc.stderr.strip()[:200])
+    except Exception:
+        logger.debug("Codex GH token generation failed", exc_info=True)
+    return None
+
+
+def _reset_codex_gh_token_cache_for_test() -> None:
+    """Test helper — clear the in-memory cache."""
+    global _codex_gh_token_cache
+    _codex_gh_token_cache = None
+
 
 def execute_cli(
     cli: CLIStatus,
@@ -63,6 +125,16 @@ def execute_cli(
     cmd = builder(cli, prompt, model=model, working_dir=working_dir, max_budget_usd=max_budget_usd)
     logger.info("Executing %s: %s", cli.cli_id, " ".join(cmd[:4]) + " ...")
 
+    # Inject Codex bot-account GitHub App token when invoking Codex. None
+    # = inherit current env (the default subprocess behavior); falling back
+    # to operator's gh credentials. See _get_codex_gh_token above for the
+    # opt-in / disable contract.
+    env = None
+    if cli.cli_id == "openai-codex":
+        gh_token = _get_codex_gh_token()
+        if gh_token:
+            env = {**os.environ, "GH_TOKEN": gh_token}
+
     start = time.monotonic()
     try:
         proc = subprocess.run(
@@ -72,6 +144,7 @@ def execute_cli(
             timeout=timeout,
             cwd=working_dir,
             stdin=subprocess.DEVNULL,
+            env=env,
         )
         duration_ms = (time.monotonic() - start) * 1000
 
