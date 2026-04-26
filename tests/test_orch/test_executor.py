@@ -215,6 +215,129 @@ class TestExecuteCli:
         assert "Unknown CLI" in result.error
 
 
+class TestCodexGhTokenInjection:
+    """Verify that Codex invocations get GH_TOKEN injected from a user-supplied
+    GitHub App token script when configured, and skip cleanly otherwise."""
+
+    def setup_method(self):
+        from llm_relay.orch.executor import _reset_codex_gh_token_cache_for_test
+        _reset_codex_gh_token_cache_for_test()
+
+    @patch("llm_relay.orch.executor.subprocess.run")
+    def test_codex_no_script_configured_no_env_injection(self, mock_run, tmp_path):
+        """When the script path doesn't exist, env stays None (subprocess
+        inherits the operator's environment) — no failure."""
+        mock_run.return_value = MagicMock(returncode=0, stdout='{"items":[]}', stderr="")
+        cli = _make_cli(cli_id="openai-codex", binary_name="codex", path="/usr/bin/codex")
+
+        with patch("llm_relay.orch.executor._CODEX_GH_TOKEN_SCRIPT", str(tmp_path / "missing.sh")):
+            execute_cli(cli, "hello")
+
+        # subprocess.run was called with env=None (inherit current env)
+        assert mock_run.call_args.kwargs.get("env") is None
+
+    @patch("llm_relay.orch.executor.subprocess.run")
+    def test_codex_with_token_script_injects_gh_token(self, mock_run, tmp_path):
+        """When the script exists, token is generated and merged into subprocess env."""
+        # Script that prints a fake token
+        token_script = tmp_path / "gen.sh"
+        token_script.write_text("#!/bin/bash\necho 'fake-token-abc123'\n")
+        token_script.chmod(0o755)
+
+        # First call to subprocess.run returns the token (script invocation),
+        # second returns the codex result.
+        def run_side_effect(*args, **kwargs):
+            cmd = args[0]
+            if cmd[0] == str(token_script):
+                return MagicMock(returncode=0, stdout="fake-token-abc123\n", stderr="")
+            return MagicMock(returncode=0, stdout='{"items":[]}', stderr="")
+        mock_run.side_effect = run_side_effect
+
+        cli = _make_cli(cli_id="openai-codex", binary_name="codex", path="/usr/bin/codex")
+        with patch("llm_relay.orch.executor._CODEX_GH_TOKEN_SCRIPT", str(token_script)):
+            execute_cli(cli, "hello")
+
+        # Find the codex execution call (not the token-generation call)
+        codex_call = next(
+            c for c in mock_run.call_args_list
+            if c.args[0][0] != str(token_script)
+        )
+        env = codex_call.kwargs.get("env")
+        assert env is not None
+        assert env.get("GH_TOKEN") == "fake-token-abc123"
+
+    @patch("llm_relay.orch.executor.subprocess.run")
+    def test_non_codex_cli_never_calls_token_script(self, mock_run, tmp_path):
+        """A claude-code or gemini-cli invocation must not trigger the token script."""
+        token_script = tmp_path / "gen.sh"
+        token_script.write_text("#!/bin/bash\necho 'should-not-be-called'\n")
+        token_script.chmod(0o755)
+
+        mock_run.return_value = MagicMock(returncode=0, stdout='{"result":"x"}', stderr="")
+        cli = _make_cli(cli_id="claude-code", binary_name="claude", path="/usr/bin/claude")
+
+        with patch("llm_relay.orch.executor._CODEX_GH_TOKEN_SCRIPT", str(token_script)):
+            execute_cli(cli, "hello")
+
+        # Token script must not appear in any subprocess.run invocation
+        for call in mock_run.call_args_list:
+            assert call.args[0][0] != str(token_script), \
+                f"non-Codex CLI should not invoke token script, but did: {call.args[0]}"
+        # And env must be None (no injection)
+        assert mock_run.call_args.kwargs.get("env") is None
+
+    @patch("llm_relay.orch.executor.subprocess.run")
+    def test_token_script_failure_is_silent_no_injection(self, mock_run, tmp_path):
+        """When the token script fails, env stays None — Codex still runs."""
+        token_script = tmp_path / "gen.sh"
+        token_script.write_text("#!/bin/bash\necho 'boom' >&2\nexit 1\n")
+        token_script.chmod(0o755)
+
+        def run_side_effect(*args, **kwargs):
+            cmd = args[0]
+            if cmd[0] == str(token_script):
+                return MagicMock(returncode=1, stdout="", stderr="boom\n")
+            return MagicMock(returncode=0, stdout='{"items":[]}', stderr="")
+        mock_run.side_effect = run_side_effect
+
+        cli = _make_cli(cli_id="openai-codex", binary_name="codex", path="/usr/bin/codex")
+        with patch("llm_relay.orch.executor._CODEX_GH_TOKEN_SCRIPT", str(token_script)):
+            result = execute_cli(cli, "hello")
+
+        # Codex still ran (success), but with no GH_TOKEN injected
+        codex_call = next(
+            c for c in mock_run.call_args_list
+            if c.args[0][0] != str(token_script)
+        )
+        assert codex_call.kwargs.get("env") is None
+        assert result.success is True
+
+    @patch("llm_relay.orch.executor.subprocess.run")
+    def test_token_is_cached_between_calls(self, mock_run, tmp_path):
+        """Two Codex invocations within TTL only call the token script once."""
+        token_script = tmp_path / "gen.sh"
+        token_script.write_text("#!/bin/bash\necho 'cached-token'\n")
+        token_script.chmod(0o755)
+
+        script_calls = {"count": 0}
+        def run_side_effect(*args, **kwargs):
+            cmd = args[0]
+            if cmd[0] == str(token_script):
+                script_calls["count"] += 1
+                return MagicMock(returncode=0, stdout="cached-token\n", stderr="")
+            return MagicMock(returncode=0, stdout='{"items":[]}', stderr="")
+        mock_run.side_effect = run_side_effect
+
+        cli = _make_cli(cli_id="openai-codex", binary_name="codex", path="/usr/bin/codex")
+        with patch("llm_relay.orch.executor._CODEX_GH_TOKEN_SCRIPT", str(token_script)):
+            execute_cli(cli, "first")
+            execute_cli(cli, "second")
+            execute_cli(cli, "third")
+
+        assert script_calls["count"] == 1, \
+            f"token script should only be called once due to caching, was called {script_calls['count']} times"
+
+
 class TestPromptUtils:
     def test_hash_deterministic(self):
         h1 = prompt_hash("hello")
