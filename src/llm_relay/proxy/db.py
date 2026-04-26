@@ -145,6 +145,9 @@ _MIGRATIONS = [
         dropped_roles TEXT
     )""",
     "CREATE INDEX IF NOT EXISTS idx_compaction_session ON compaction_events(session_id)",
+    # TTL tier tracking (ephemeral cache token fields from SSE message_start)
+    "ALTER TABLE requests ADD COLUMN ephemeral_1h_tokens INTEGER DEFAULT 0",
+    "ALTER TABLE requests ADD COLUMN ephemeral_5m_tokens INTEGER DEFAULT 0",
 ]
 
 
@@ -188,6 +191,8 @@ def log_request(
     raw_usage: dict[str, Any] | None = None,
     request_body_bytes: int = 0,
     ratelimit_headers: dict[str, str] | None = None,
+    ephemeral_1h_tokens: int = 0,
+    ephemeral_5m_tokens: int = 0,
 ) -> None:
     total_cached = cache_creation + cache_read
     read_ratio = (cache_read / total_cached * 100) if total_cached > 0 else 0.0
@@ -197,8 +202,8 @@ def log_request(
            (ts, session_id, model, input_tokens, output_tokens,
             cache_creation, cache_read, read_ratio, status_code,
             latency_ms, endpoint, is_stream, raw_usage, request_body_bytes,
-            ratelimit_headers)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            ratelimit_headers, ephemeral_1h_tokens, ephemeral_5m_tokens)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
         (
             time.time(),
             session_id,
@@ -215,6 +220,8 @@ def log_request(
             json.dumps(raw_usage) if raw_usage else None,
             request_body_bytes,
             json.dumps(ratelimit_headers) if ratelimit_headers else None,
+            ephemeral_1h_tokens,
+            ephemeral_5m_tokens,
         ),
     )
     conn.commit()
@@ -496,6 +503,180 @@ def get_recent(
         "SELECT * FROM requests ORDER BY ts DESC LIMIT ?", (limit,)
     ).fetchall()
     return [dict(r) for r in rows]
+
+
+def get_latest_quota(conn: sqlite3.Connection) -> Optional[dict[str, Any]]:
+    """Return the latest ratelimit quota data from the most recent request with headers.
+
+    Extracts anthropic-ratelimit-unified-5h/7d-utilization and overage status
+    from the stored ratelimit_headers JSON.
+    """
+    row = conn.execute(
+        """SELECT ratelimit_headers, ts
+           FROM requests
+           WHERE ratelimit_headers IS NOT NULL
+           ORDER BY ts DESC
+           LIMIT 1"""
+    ).fetchone()
+    if not row or not row["ratelimit_headers"]:
+        return None
+    try:
+        headers = json.loads(row["ratelimit_headers"])
+    except (json.JSONDecodeError, TypeError):
+        return None
+
+    # Normalize header keys to lowercase for consistent lookup
+    lower = {k.lower(): v for k, v in headers.items()}
+    return {
+        "ts": row["ts"],
+        "q5h_utilization": lower.get("anthropic-ratelimit-unified-5h-utilization"),
+        "q7d_utilization": lower.get("anthropic-ratelimit-unified-7d-utilization"),
+        "unified_status": lower.get("anthropic-ratelimit-unified-status"),
+        "overage_status": lower.get("anthropic-ratelimit-unified-overage-status"),
+    }
+
+
+def get_error_stats(
+    conn: sqlite3.Connection,
+    session_id: Optional[str] = None,
+    window_hours: float = 8,
+) -> dict[str, Any]:
+    """Return error rate statistics from status_code data.
+
+    Returns total requests, success (2xx), client errors (4xx), server errors (5xx),
+    and the error rate as a percentage.
+    """
+    cutoff = time.time() - window_hours * 3600
+    params: list[Any] = [cutoff]
+    where = "WHERE ts > ?"
+    if session_id:
+        where += " AND session_id = ?"
+        params.append(session_id)
+
+    row = conn.execute(
+        """SELECT COUNT(*) AS total,
+                  SUM(CASE WHEN status_code >= 200 AND status_code < 300 THEN 1 ELSE 0 END) AS success_2xx,
+                  SUM(CASE WHEN status_code >= 400 AND status_code < 500 THEN 1 ELSE 0 END) AS client_4xx,
+                  SUM(CASE WHEN status_code >= 500 THEN 1 ELSE 0 END) AS server_5xx,
+                  SUM(CASE WHEN status_code = 429 THEN 1 ELSE 0 END) AS rate_limited
+           FROM requests
+           """
+        + where,
+        params,
+    ).fetchone()
+    if not row or row["total"] == 0:
+        return {
+            "total": 0,
+            "success_2xx": 0,
+            "client_4xx": 0,
+            "server_5xx": 0,
+            "rate_limited": 0,
+            "error_rate_pct": 0.0,
+        }
+    total = row["total"]
+    errors = (row["client_4xx"] or 0) + (row["server_5xx"] or 0)
+    return {
+        "total": total,
+        "success_2xx": row["success_2xx"] or 0,
+        "client_4xx": row["client_4xx"] or 0,
+        "server_5xx": row["server_5xx"] or 0,
+        "rate_limited": row["rate_limited"] or 0,
+        "error_rate_pct": round(errors / total * 100, 2) if total else 0.0,
+    }
+
+
+def get_session_cache_stats(
+    conn: sqlite3.Connection,
+    session_id: Optional[str] = None,
+    window_hours: float = 8,
+) -> dict[str, Any]:
+    """Return cache hit rate statistics.
+
+    cache_hit_rate = cache_read / (cache_read + cache_creation) when there is cached data.
+    Also returns fresh_input (tokens not from cache).
+    """
+    cutoff = time.time() - window_hours * 3600
+    params: list[Any] = [cutoff]
+    where = "WHERE ts > ? AND endpoint = '/v1/messages'"
+    if session_id:
+        where += " AND session_id = ?"
+        params.append(session_id)
+
+    row = conn.execute(
+        """SELECT SUM(cache_read) AS total_cache_read,
+                  SUM(cache_creation) AS total_cache_creation,
+                  SUM(input_tokens) AS total_input_tokens,
+                  COUNT(*) AS request_count
+           FROM requests
+           """
+        + where,
+        params,
+    ).fetchone()
+    if not row or row["request_count"] == 0:
+        return {
+            "total_cache_read": 0,
+            "total_cache_creation": 0,
+            "total_input_tokens": 0,
+            "cache_hit_rate": 0.0,
+            "request_count": 0,
+        }
+    cr = row["total_cache_read"] or 0
+    cc = row["total_cache_creation"] or 0
+    total_cached = cr + cc
+    return {
+        "total_cache_read": cr,
+        "total_cache_creation": cc,
+        "total_input_tokens": row["total_input_tokens"] or 0,
+        "cache_hit_rate": round(cr / total_cached * 100, 2) if total_cached > 0 else 0.0,
+        "request_count": row["request_count"],
+    }
+
+
+def get_ttl_tier(
+    conn: sqlite3.Connection,
+    session_id: Optional[str] = None,
+) -> dict[str, Any]:
+    """Detect cache TTL tier (1h vs 5m) from ephemeral token columns.
+
+    Returns the latest non-zero ephemeral token data and inferred tier.
+    Tier logic: if ephemeral_1h_tokens > 0 → '1h', if ephemeral_5m_tokens > 0 → '5m',
+    otherwise 'unknown'.
+    """
+    params: list[Any] = []
+    where = "WHERE (ephemeral_1h_tokens > 0 OR ephemeral_5m_tokens > 0)"
+    if session_id:
+        where += " AND session_id = ?"
+        params.append(session_id)
+
+    row = conn.execute(
+        """SELECT SUM(ephemeral_1h_tokens) AS total_1h,
+                  SUM(ephemeral_5m_tokens) AS total_5m,
+                  COUNT(*) AS request_count
+           FROM requests
+           """
+        + where,
+        params,
+    ).fetchone()
+
+    total_1h = (row["total_1h"] or 0) if row else 0
+    total_5m = (row["total_5m"] or 0) if row else 0
+    req_count = (row["request_count"] or 0) if row else 0
+
+    if total_1h > 0 and total_5m == 0:
+        tier = "1h"
+    elif total_5m > 0 and total_1h == 0:
+        tier = "5m"
+    elif total_1h > 0 and total_5m > 0:
+        tier = "mixed"
+    else:
+        tier = "unknown"
+
+    return {
+        "tier": tier,
+        "ephemeral_1h_tokens": total_1h,
+        "ephemeral_5m_tokens": total_5m,
+        "request_count": req_count,
+    }
 
 
 # ── Session history storage & query functions ──
