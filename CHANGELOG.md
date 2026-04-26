@@ -2,6 +2,13 @@
 
 All notable changes to llm-relay are documented here.
 
+## [0.7.1] - 2026-04-26
+
+### Added
+- **`llm-relay init`**: One-command setup — auto-detects CLIs, configures Claude Code proxy + MCP, initializes DB, starts server, runs health check. Options: `--dry-run`, `--skip-server`, `--port`
+- Updated README with `llm-relay init` as primary quick start
+- 18 new tests for init module
+
 ## [0.7.0] - 2026-04-26
 
 ### Added
