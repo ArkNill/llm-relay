@@ -7,7 +7,6 @@ import time
 import pytest
 
 from llm_relay.proxy.db import (
-    get_conn,
     get_history_sessions,
     get_session_compactions,
     get_session_history,
@@ -17,7 +16,6 @@ from llm_relay.proxy.db import (
 from llm_relay.proxy.history import (
     _compute_delta,
     _detect_compaction,
-    _do_capture,
     _extract_model_params,
     _extract_response_content,
     _extract_thinking,

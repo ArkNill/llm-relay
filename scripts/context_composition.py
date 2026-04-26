@@ -473,7 +473,8 @@ def print_turn_detail(analysis: SessionAnalysis) -> None:
         if total > 0:
             print(f"  Signal (user+assistant text):   {_fmt_bytes(signal):>8} ({signal / total * 100:.1f}%)")
             print(f"  Noise  (tool_result+thinking):  {_fmt_bytes(noise):>8} ({noise / total * 100:.1f}%)")
-            print(f"  Overhead (system+tool_call):    {_fmt_bytes(final.system + final.tool_use):>8} ({(final.system + final.tool_use) / total * 100:.1f}%)")
+            overhead = final.system + final.tool_use
+            print(f"  Overhead (system+tool_call):    {_fmt_bytes(overhead):>8} ({overhead / total * 100:.1f}%)")
             print(f"  Signal-to-noise ratio:          {signal / max(noise, 1):.2f}")
 
     # Duplicate reads
@@ -520,7 +521,7 @@ def print_cross_session_summary(analyses: List[SessionAnalysis]) -> None:
 
     # Per-session summaries
     print("Session summaries (sorted by peak context):")
-    print(f"  Legend: S=system U=user A=assistant C=tool_call R=tool_result T=thinking\n")
+    print("  Legend: S=system U=user A=assistant C=tool_call R=tool_result T=thinking\n")
     for a in sorted(meaningful, key=lambda x: x.peak_bytes, reverse=True):
         print_session_summary(a)
         print()
