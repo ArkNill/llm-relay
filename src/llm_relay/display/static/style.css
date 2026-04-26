@@ -190,6 +190,26 @@ main { margin-bottom: 2rem; }
   margin-top: 0.2rem;
 }
 
+/* Cache / TTL metric badges */
+.metric-badges {
+  display: flex;
+  gap: 0.4rem;
+  margin-top: 0.3rem;
+  flex-wrap: wrap;
+}
+.metric-badge {
+  display: inline-block;
+  padding: 0.15rem 0.5rem;
+  border-radius: 10px;
+  font-size: 0.72rem;
+  font-weight: 600;
+  font-family: ui-monospace, "SF Mono", Menlo, monospace;
+}
+.badge-ok { background: #238636; color: #fff; }
+.badge-warn { background: #d29922; color: #000; }
+.badge-danger { background: #da3633; color: #fff; }
+.badge-info { background: #6e40c9; color: #fff; }
+
 /* Progress bars */
 .bar {
   height: 4px;

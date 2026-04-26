@@ -77,6 +77,23 @@ body.tab-hidden .turn-card.zone-red { animation-play-state: paused; }
 .health-row.dupes-row-warn { border-left-color: #d29922; }
 .health-empty { color: #6e7681; font-size: 0.8rem; padding: 0.8rem; text-align: center; }
 
+/* API Health section */
+.api-health-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 0.8rem; }
+.api-health-card { background: #161b22; border: 1px solid #21262d; border-radius: 8px; padding: 1rem; }
+.api-health-card h3 { font-size: 0.85rem; color: #8b949e; margin-bottom: 0.6rem; }
+.api-health-body { font-size: 0.85rem; }
+.api-health-body .muted { color: #484f58; font-size: 0.8rem; }
+.quota-row { display: flex; justify-content: space-between; padding: 0.2rem 0; }
+.quota-label { color: #8b949e; font-size: 0.8rem; }
+.quota-value { color: #c9d1d9; font-weight: 600; }
+.error-detail { display: flex; flex-wrap: wrap; gap: 0.4rem 0.8rem; font-size: 0.75rem; color: #8b949e; margin-top: 0.4rem; }
+.danger { color: #da3633 !important; }
+.warn { color: #d29922 !important; }
+.ttl-badge { display: inline-block; padding: 0.2rem 0.6rem; border-radius: 12px; font-size: 0.85rem; font-weight: 600; }
+.ttl-1h { background: #238636; color: #fff; }
+.ttl-5m { background: #d29922; color: #000; }
+.ttl-mixed { background: #6e40c9; color: #fff; }
+
 /* Delegation detail slide-out panel */
 #detail-panel { position: fixed; top: 0; right: -480px; width: 480px; height: 100vh; background: #161b22; border-left: 1px solid #30363d; box-shadow: -4px 0 24px rgba(0,0,0,0.4); z-index: 100; transition: right 0.25s ease; overflow-y: auto; }
 #detail-panel.open { right: 0; }

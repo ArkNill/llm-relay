@@ -223,7 +223,8 @@
              ":" + (s.current_ctx || 0) + ":" + (s.peak_ctx || 0) +
              ":" + (s.model_window || 0) +
              ":" + (s.last_prompt_ts || "") + ":" + (s.tty || "") +
-             ":" + (s.provider || "") + ":" + compHash;
+             ":" + (s.provider || "") + ":" + compHash +
+             ":" + (s.cache_hit_rate || 0) + ":" + (s.ttl_tier || "");
     }).join("|");
 
     if (hash === lastHash) {
@@ -339,6 +340,23 @@
             (officialCtx ? '<span>Official ' + formatTokens(officialCtx) + '</span>' : '') +
             (modelWindow ? '<span>Window ' + formatTokens(modelWindow) + '</span>' : '') +
           '</div>';
+      }
+
+      // Cache hit rate + TTL tier badges (appended to metrics)
+      var cacheRate = s.cache_hit_rate;
+      var ttlTier = s.ttl_tier;
+      if (cacheRate !== undefined || (ttlTier && ttlTier !== "unknown")) {
+        var cacheBadges = '<div class="metric-badges">';
+        if (cacheRate !== undefined) {
+          var cacheCls = cacheRate < 50 ? "badge-danger" : (cacheRate < 80 ? "badge-warn" : "badge-ok");
+          cacheBadges += '<span class="metric-badge ' + cacheCls + '" title="Cache hit rate">Cache ' + cacheRate + '%</span>';
+        }
+        if (ttlTier && ttlTier !== "unknown") {
+          var ttlCls = ttlTier === "1h" ? "badge-ok" : (ttlTier === "5m" ? "badge-warn" : "badge-info");
+          cacheBadges += '<span class="metric-badge ' + ttlCls + '" title="Cache TTL tier">TTL ' + ttlTier + '</span>';
+        }
+        cacheBadges += '</div>';
+        metricsHtml += cacheBadges;
       }
 
       var compHtml = compositionHtml(s.composition);
