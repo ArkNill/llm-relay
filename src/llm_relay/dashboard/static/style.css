@@ -54,3 +54,20 @@ body.tab-hidden .turn-card.zone-red { animation-play-state: paused; }
 .turn-card.zone-orange .bar-fill { background: #f0883e; }
 .turn-card.zone-red .bar-fill { background: #da3633; }
 .turn-monitor-empty { color: #6e7681; font-size: 0.9rem; padding: 1rem; text-align: center; }
+
+/* Context Health */
+.health-cards { display: flex; flex-direction: column; gap: 0.4rem; }
+.health-row { display: flex; align-items: center; gap: 1rem; flex-wrap: wrap; background: #161b22; border: 1px solid #21262d; border-radius: 6px; padding: 0.6rem 1rem; font-size: 0.8rem; border-left: 3px solid #3fb950; }
+.health-row .sid { font-family: ui-monospace, "SF Mono", Menlo, monospace; color: #8b949e; min-width: 5rem; }
+.health-row .metric { color: #c9d1d9; min-width: 5rem; }
+.health-row .metric-label { color: #6e7681; font-size: 0.7rem; margin-right: 0.3rem; }
+.health-row.snr-warn { border-left-color: #d29922; }
+.health-row.snr-danger { border-left-color: #da3633; }
+.health-row .snr-val.warn { color: #d29922; font-weight: 600; }
+.health-row .snr-val.danger { color: #da3633; font-weight: 600; }
+.health-row .result-val.warn { color: #d29922; font-weight: 600; }
+.health-row .dupes-val { color: #f0883e; }
+.health-rec { font-size: 0.7rem; color: #da3633; margin-top: 0.3rem; padding: 0.2rem 0.5rem; background: rgba(218, 54, 51, 0.1); border-radius: 3px; width: 100%; flex-basis: 100%; }
+.health-row .dupes-warn { color: #d29922; font-weight: 600; }
+.health-row.dupes-row-warn { border-left-color: #d29922; }
+.health-empty { color: #6e7681; font-size: 0.8rem; padding: 0.8rem; text-align: center; }

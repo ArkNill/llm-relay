@@ -1028,3 +1028,76 @@ class TestGetTurnCountMetrics:
         assert by_sid["sa"]["peak_ctx"] == 100_000
         assert by_sid["sb"]["peak_ctx"] == 800_000
         assert by_sid["sb"]["current_ctx"] == 800_000
+
+
+# ── /api/v1/turns composition field tests ──
+
+
+class TestTurnsAllComposition:
+    """Verify that /api/v1/turns includes composition field for each session."""
+
+    @patch("llm_relay.api.routes._get_composition_safe")
+    @patch("llm_relay.proxy.db.get_conn")
+    @patch("llm_relay.proxy.db.get_all_turn_counts")
+    @patch("llm_relay.proxy.db.get_all_session_terminals")
+    @patch("llm_relay.api.display.is_cc_process_alive", return_value=True)
+    def test_composition_included(
+        self, _mock_alive, mock_terms, mock_all, mock_conn, mock_comp,
+    ):
+        """Each session in /turns should carry a composition dict when history is enabled."""
+        mock_conn.return_value = MagicMock()
+        mock_all.return_value = [
+            _empty_metrics(turns=10, first_ts=1000.0, last_ts=2000.0,
+                           current_ctx=50_000, peak_ctx=80_000) | {"session_id": "sid-c1"},
+        ]
+        mock_terms.return_value = {
+            "sid-c1": {"cc_pid": 1234, "tty": "/dev/pts/0"},
+        }
+        mock_comp.return_value = {
+            "categories": {
+                "system": {"bytes": 1000, "pct": 5.0},
+                "user_text": {"bytes": 4000, "pct": 20.0},
+                "assistant_text": {"bytes": 4000, "pct": 20.0},
+                "tool_use": {"bytes": 2000, "pct": 10.0},
+                "tool_result": {"bytes": 8000, "pct": 40.0},
+                "thinking_overhead": {"bytes": 1000, "pct": 5.0},
+            },
+            "total_bytes": 20000,
+            "est_tokens": 5000,
+            "snr": 0.89,
+            "duplicate_read_count": 3,
+        }
+        client = TestClient(_make_app())
+        resp = client.get("/api/v1/turns?window=4")
+        data = resp.json()
+        assert data["count"] == 1
+        sess = data["sessions"][0]
+        assert "composition" in sess
+        comp = sess["composition"]
+        assert comp["snr"] == 0.89
+        assert comp["duplicate_read_count"] == 3
+        assert comp["categories"]["tool_result"]["pct"] == 40.0
+
+    @patch("llm_relay.api.routes._get_composition_safe")
+    @patch("llm_relay.proxy.db.get_conn")
+    @patch("llm_relay.proxy.db.get_all_turn_counts")
+    @patch("llm_relay.proxy.db.get_all_session_terminals")
+    @patch("llm_relay.api.display.is_cc_process_alive", return_value=True)
+    def test_composition_none_when_disabled(
+        self, _mock_alive, mock_terms, mock_all, mock_conn, mock_comp,
+    ):
+        """When history is off, composition should be None (not absent)."""
+        mock_conn.return_value = MagicMock()
+        mock_all.return_value = [
+            _empty_metrics(turns=5, first_ts=1000.0, last_ts=1500.0) | {"session_id": "sid-no"},
+        ]
+        mock_terms.return_value = {
+            "sid-no": {"cc_pid": 5678, "tty": "/dev/pts/1"},
+        }
+        mock_comp.return_value = None
+        client = TestClient(_make_app())
+        resp = client.get("/api/v1/turns?window=4")
+        data = resp.json()
+        sess = data["sessions"][0]
+        assert "composition" in sess
+        assert sess["composition"] is None

@@ -318,6 +318,8 @@ async def _api_turns_all(request: Request) -> Response:
                 "cumul_unique": r["cumul_unique"],
                 "ceiling": ceiling,
                 "alive": alive,
+                # Context composition (requires LLM_RELAY_HISTORY=1)
+                "composition": _get_composition_safe(conn, r["session_id"]),
                 **zones,
             })
 
@@ -368,7 +370,7 @@ async def _api_session_terminal(request: Request) -> Response:
 
 def _get_composition_safe(conn: Any, session_id: str) -> Optional[dict]:
     """Return composition analysis for a session, or None on any failure."""
-    if not os.getenv("CC_RELAY_HISTORY", "") == "1":
+    if not os.getenv("LLM_RELAY_HISTORY", "") == "1":
         return None
     try:
         from llm_relay.proxy.composition import analyze_session_composition
@@ -556,6 +558,49 @@ async def _api_history_sessions(request: Request) -> Response:
         window = float(request.query_params.get("window", "24"))
         conn = get_conn()
         sessions = get_history_sessions(conn, window_hours=window)
+        ceiling = int(os.getenv("CC_TOKEN_CEILING", "1000000"))
+
+        for s in sessions:
+            s["history_source"] = "proxy_db"
+            s["ceiling"] = ceiling
+
+        # Codex/Gemini do not flow through the proxy DB. For the history list,
+        # expose their session-file summaries so token growth is visible there too.
+        try:
+            from llm_relay.api.display import discover_external_cli_sessions
+
+            seen = {s["session_id"] for s in sessions}
+            external = discover_external_cli_sessions(
+                window_hours=window,
+                include_dead=True,
+                check_open_fds=False,
+            )
+            for ext in external:
+                if ext["session_id"] in seen:
+                    continue
+                sessions.append({
+                    "session_id": ext["session_id"],
+                    "total_turns": ext["turns"],
+                    "first_ts": ext["first_ts"],
+                    "last_ts": ext["last_ts"],
+                    "total_request_bytes": 0,
+                    "total_response_bytes": 0,
+                    "provider": ext["provider"],
+                    "current_ctx": ext.get("current_ctx", 0),
+                    "peak_ctx": ext.get("peak_ctx", 0),
+                    "recent_peak": ext.get("recent_peak", 0),
+                    "cumul_unique": ext.get("cumul_unique", 0),
+                    "ceiling": ext.get("ceiling", 0),
+                    "model_window": ext.get("model_window", 0),
+                    "official_context_window": ext.get("official_context_window", 0),
+                    "official_max_output": ext.get("official_max_output", 0),
+                    "alive": ext.get("alive", False),
+                    "history_source": "session_file",
+                })
+            sessions.sort(key=lambda s: s.get("last_ts") or 0, reverse=True)
+        except Exception as exc:
+            logger.debug("External CLI history discovery failed: %s", exc)
+
         return _json_response({"count": len(sessions), "sessions": sessions})
     except ImportError:
         return _json_response({"error": "Proxy module not available"}, status=501)
@@ -590,6 +635,26 @@ async def _api_history_detail(request: Request) -> Response:
             turn_end=turn_end,
             include_thinking=include_thinking,
         )
+
+        # Codex/Gemini history-list entries come from session files, not proxy DB.
+        # If the DB has no turns, fall back to reconstructing detail from disk.
+        if not turns:
+            try:
+                from llm_relay.api.display import _find_session_file, _parse_codex_session_history
+
+                session_path = _find_session_file(session_id)
+                if session_path and ".codex" in str(session_path):
+                    turns = _parse_codex_session_history(
+                        session_path,
+                        include_thinking=include_thinking,
+                    )
+                    if turn_start > 0:
+                        turns = [t for t in turns if t.get("turn_number", 0) >= turn_start]
+                    if turn_end >= 0:
+                        turns = [t for t in turns if t.get("turn_number", 0) <= turn_end]
+            except Exception as exc:
+                logger.debug("Session-file history fallback failed for %s: %s", session_id, exc)
+
         return _json_response({
             "session_id": session_id,
             "total_turns": len(turns),
@@ -624,6 +689,32 @@ async def _api_history_compactions(request: Request) -> Response:
         return _json_response({"error": str(e)}, status=500)
 
 
+async def _api_history_composition(request: Request) -> Response:
+    """Return per-turn composition analysis for a session."""
+    if not os.getenv("LLM_RELAY_HISTORY", "") == "1":
+        return _json_response(
+            {"error": "History not enabled (set LLM_RELAY_HISTORY=1)"}, status=501,
+        )
+    try:
+        from llm_relay.proxy.composition import analyze_session_composition_per_turn
+        from llm_relay.proxy.db import get_conn
+
+        session_id = request.path_params["session_id"]
+        conn = get_conn()
+        result = analyze_session_composition_per_turn(conn, session_id)
+        if result is None:
+            return _json_response(
+                {"error": "No history data for session", "session_id": session_id},
+                status=404,
+            )
+        return _json_response(result)
+    except ImportError:
+        return _json_response({"error": "Proxy module not available"}, status=501)
+    except Exception as e:
+        logger.error("Failed to get per-turn composition: %s", e)
+        return _json_response({"error": str(e)}, status=500)
+
+
 def get_api_routes() -> List[Route]:
     """Return all API routes for mounting into the main Starlette app."""
     return [
@@ -641,5 +732,6 @@ def get_api_routes() -> List[Route]:
         Route("/api/v1/history", _api_history_sessions, methods=["GET"]),
         Route("/api/v1/history/{session_id}", _api_history_detail, methods=["GET"]),
         Route("/api/v1/history/{session_id}/compactions", _api_history_compactions, methods=["GET"]),
+        Route("/api/v1/history/{session_id}/composition", _api_history_composition, methods=["GET"]),
         Route("/api/v1/i18n", _api_i18n, methods=["GET"]),
     ]
