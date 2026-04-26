@@ -115,7 +115,7 @@
     var withComp = sessions.filter(function (s) { return s.composition; });
     if (withComp.length === 0) {
       summaryEl.innerHTML = "";
-      sessionsEl.innerHTML = '<div class="health-empty">No composition data — enable with CC_RELAY_HISTORY=1</div>';
+      sessionsEl.innerHTML = '<div class="health-empty">No composition data — enable with LLM_RELAY_HISTORY=1</div>';
       return;
     }
 
