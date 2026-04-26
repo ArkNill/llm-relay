@@ -2,14 +2,6 @@
 (function () {
   const API = window.location.origin + "/api/v1";
 
-  // i18n — detect browser locale, fall back to English
-  var _lang = (navigator.language || "en").startsWith("ko") ? "ko" : "en";
-  var _msgs = {
-    en: { no_sessions: "No active sessions", no_prompt: "(no prompt)" },
-    ko: { no_sessions: "활성 세션 없음", no_prompt: "(프롬프트 없음)" },
-  };
-  function msg(key) { return (_msgs[_lang] || _msgs.en)[key] || key; }
-
   async function fetchJSON(path) {
     try {
       const resp = await fetch(API + path);
@@ -145,11 +137,27 @@
         '<span class="has-tip' + snrCls + '"' + tipAttr("snr") + '>SNR ' + snr.toFixed(2) + '</span>' +
       '</div>';
 
-    var dupeLine = dupes > 0
-      ? '<div class="comp-dupes has-tip"' + tipAttr("dupes") + '>' + dupes + ' duplicate reads</div>'
+    var dupeLine = '';
+    if (dupes > 0) {
+      var dupeReads = comp.duplicate_reads || {};
+      var dupeWarning = comp.duplicate_read_warning || false;
+      var dupeCls = "comp-dupes has-tip" + (dupeWarning ? " comp-dupes-warn" : "");
+      var topFiles = Object.keys(dupeReads).sort(function (a, b) {
+        return dupeReads[b] - dupeReads[a];
+      }).slice(0, 3).map(function (p) {
+        var name = p.split("/").pop();
+        return name + " (" + dupeReads[p] + "x)";
+      }).join(", ");
+      var dupeText = dupes + ' duplicate reads';
+      if (topFiles) dupeText += ': ' + topFiles;
+      dupeLine = '<div class="' + dupeCls + '"' + tipAttr("dupes") + '>' + dupeText + '</div>';
+    }
+
+    var snrRecLine = comp.snr_recommendation
+      ? '<div class="comp-snr-rec">' + comp.snr_recommendation + '</div>'
       : '';
 
-    return '<div class="comp-section">' + pie + '<div class="comp-detail">' + grid + dupeLine + '</div></div>';
+    return '<div class="comp-section">' + pie + '<div class="comp-detail">' + grid + dupeLine + snrRecLine + '</div></div>';
   }
 
   // Map zone → { label, cssClass } for badge rendering
@@ -200,7 +208,7 @@
 
     if (!data || !data.sessions || data.sessions.length === 0) {
       if (lastHash !== "EMPTY") {
-        container.innerHTML = '<div class="empty-state">' + msg("no_sessions") + '</div>';
+        container.innerHTML = '<div class="empty-state">활성 세션 없음</div>';
         countEl.textContent = "0 sessions";
         lastHash = "EMPTY";
       }
@@ -242,7 +250,7 @@
 
       var promptText = s.last_prompt || "";
       var promptClass = promptText ? "prompt-block" : "prompt-block empty";
-      var promptDisplay = promptText ? escapeHtml(promptText) : msg("no_prompt");
+      var promptDisplay = promptText ? escapeHtml(promptText) : "(프롬프트 없음)";
       var warn = s.message ? '<div class="warning">' + escapeHtml(s.message) + '</div>' : '';
 
       // Terminal badge + connection type

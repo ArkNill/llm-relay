@@ -140,7 +140,21 @@ def _render_session_panel(s: Dict[str, Any]) -> Panel:
         lines.append(f"{snr:.2f}", style=snr_style)
 
         if dupes > 0:
-            lines.append(f" · {dupes} dupes", style="grey62")
+            dupe_reads = comp.get("duplicate_reads", {})
+            dupe_warning = comp.get("duplicate_read_warning", False)
+            dupe_style = "dark_orange" if dupe_warning else "grey62"
+            top_files = sorted(dupe_reads.items(), key=lambda x: x[1], reverse=True)[:2]
+            top_str = ", ".join(
+                f"{p.rsplit('/', 1)[-1]}({c}x)" for p, c in top_files
+            )
+            lines.append(f" · {dupes} dupes", style=dupe_style)
+            if top_str:
+                lines.append(f" [{top_str}]", style="grey50")
+
+        snr_rec = comp.get("snr_recommendation")
+        if snr_rec:
+            lines.append("\n")
+            lines.append(f"  {snr_rec}", style="bold red")
 
     # Duration
     duration = s.get("duration_s", 0)
