@@ -260,10 +260,19 @@ class TestClassifyZone:
 # ── API endpoint tests ──
 
 
+_CACHE_ZERO = {
+    "total_cache_read": 0, "total_cache_creation": 0, "total_input_tokens": 0,
+    "cache_hit_rate": 0.0, "request_count": 0,
+}
+_TTL_UNKNOWN = {"tier": "unknown", "ephemeral_1h_tokens": 0, "ephemeral_5m_tokens": 0, "request_count": 0}
+
+
 class TestTurnsEndpoint:
+    @patch("llm_relay.proxy.db.get_ttl_tier", return_value=_TTL_UNKNOWN)
+    @patch("llm_relay.proxy.db.get_session_cache_stats", return_value=_CACHE_ZERO)
     @patch("llm_relay.proxy.db.get_conn")
     @patch("llm_relay.proxy.db.get_turn_count")
-    def test_returns_json(self, mock_count, mock_conn):
+    def test_returns_json(self, mock_count, mock_conn, _mc, _mt):
         mock_conn.return_value = MagicMock()
         mock_count.return_value = _empty_metrics(turns=42, first_ts=1000.0, last_ts=2000.0)
         client = TestClient(_make_app())
@@ -282,10 +291,14 @@ class TestTurnsEndpoint:
         assert data["ceiling"] == 1000000
         assert data["zone_a"] == "green"
         assert data["zone_b"] == "green"
+        assert data["cache_hit_rate"] == 0.0
+        assert data["ttl_tier"] == "unknown"
 
+    @patch("llm_relay.proxy.db.get_ttl_tier", return_value=_TTL_UNKNOWN)
+    @patch("llm_relay.proxy.db.get_session_cache_stats", return_value=_CACHE_ZERO)
     @patch("llm_relay.proxy.db.get_conn")
     @patch("llm_relay.proxy.db.get_turn_count")
-    def test_unknown_session(self, mock_count, mock_conn):
+    def test_unknown_session(self, mock_count, mock_conn, _mc, _mt):
         mock_conn.return_value = MagicMock()
         mock_count.return_value = _empty_metrics(turns=0)
         client = TestClient(_make_app())
@@ -297,9 +310,11 @@ class TestTurnsEndpoint:
         assert data["duration_s"] == 0
         assert data["current_ctx"] == 0
 
+    @patch("llm_relay.proxy.db.get_ttl_tier", return_value=_TTL_UNKNOWN)
+    @patch("llm_relay.proxy.db.get_session_cache_stats", return_value=_CACHE_ZERO)
     @patch("llm_relay.proxy.db.get_conn")
     @patch("llm_relay.proxy.db.get_turn_count")
-    def test_heavy_session_tokens_drive_zone(self, mock_count, mock_conn):
+    def test_heavy_session_tokens_drive_zone(self, mock_count, mock_conn, _mc, _mt):
         """High turn count no longer drives zone — only tokens do."""
         mock_conn.return_value = MagicMock()
         # Lots of turns but low context → still green (turns ignored)
@@ -314,9 +329,11 @@ class TestTurnsEndpoint:
         assert data["zone"] == "green"  # tokens < 300K so green
         assert data["zone_a"] == "green"
 
+    @patch("llm_relay.proxy.db.get_ttl_tier", return_value=_TTL_UNKNOWN)
+    @patch("llm_relay.proxy.db.get_session_cache_stats", return_value=_CACHE_ZERO)
     @patch("llm_relay.proxy.db.get_conn")
     @patch("llm_relay.proxy.db.get_turn_count")
-    def test_red_zone_via_tokens(self, mock_count, mock_conn):
+    def test_red_zone_via_tokens(self, mock_count, mock_conn, _mc, _mt):
         mock_conn.return_value = MagicMock()
         mock_count.return_value = _empty_metrics(
             turns=100, first_ts=1000.0, last_ts=8000.0,
@@ -331,9 +348,11 @@ class TestTurnsEndpoint:
         assert data["zone_b"] == "orange"
         assert data["message"] is not None
 
+    @patch("llm_relay.proxy.db.get_ttl_tier", return_value=_TTL_UNKNOWN)
+    @patch("llm_relay.proxy.db.get_session_cache_stats", return_value=_CACHE_ZERO)
     @patch("llm_relay.proxy.db.get_conn")
     @patch("llm_relay.proxy.db.get_turn_count")
-    def test_hard_stop_zone(self, mock_count, mock_conn):
+    def test_hard_stop_zone(self, mock_count, mock_conn, _mc, _mt):
         mock_conn.return_value = MagicMock()
         mock_count.return_value = _empty_metrics(
             turns=100, first_ts=1000.0, last_ts=8000.0,
@@ -603,6 +622,8 @@ class TestIsCcProcessAlive:
 
 
 class TestDisplayLivenessFilter:
+    @patch("llm_relay.proxy.db.get_ttl_tier", return_value=_TTL_UNKNOWN)
+    @patch("llm_relay.proxy.db.get_session_cache_stats", return_value=_CACHE_ZERO)
     @patch("llm_relay.api.display.discover_external_cli_sessions", return_value=[])
     @patch("llm_relay.proxy.db.get_conn")
     @patch("llm_relay.proxy.db.get_all_turn_counts")
@@ -611,7 +632,7 @@ class TestDisplayLivenessFilter:
     @patch("llm_relay.api.display.find_claude_pid_by_tty")
     @patch("llm_relay.api.display.is_cc_process_alive")
     def test_filters_dead_sessions(
-        self, mock_alive, mock_find_tty, mock_prompt, mock_terms, mock_counts, mock_conn, _mock_ext,
+        self, mock_alive, mock_find_tty, mock_prompt, mock_terms, mock_counts, mock_conn, _mock_ext, _mc, _mt,
     ):
         import time as _time
         mock_conn.return_value = MagicMock()
@@ -648,6 +669,8 @@ class TestDisplayLivenessFilter:
         assert "unregistered-sid" not in sids
         assert data["count"] == 2
 
+    @patch("llm_relay.proxy.db.get_ttl_tier", return_value=_TTL_UNKNOWN)
+    @patch("llm_relay.proxy.db.get_session_cache_stats", return_value=_CACHE_ZERO)
     @patch("llm_relay.api.display.discover_external_cli_sessions", return_value=[])
     @patch("llm_relay.proxy.db.get_conn")
     @patch("llm_relay.proxy.db.get_all_turn_counts")
@@ -656,7 +679,7 @@ class TestDisplayLivenessFilter:
     @patch("llm_relay.api.display.find_claude_pid_by_tty")
     @patch("llm_relay.api.display.is_cc_process_alive")
     def test_tty_reuse_by_registered_session_filters_stale(
-        self, mock_alive, mock_find_tty, mock_prompt, mock_terms, mock_counts, mock_conn, _mock_ext
+        self, mock_alive, mock_find_tty, mock_prompt, mock_terms, mock_counts, mock_conn, _mock_ext, _mc, _mt
     ):
         """A dead session must not be resurrected via TTY fallback when the
         claude process on that TTY is already claimed by another *registered*
@@ -687,6 +710,8 @@ class TestDisplayLivenessFilter:
         assert "stale-sid" not in sids  # rejected: pid 8000 owned by new-sid
         assert data["count"] == 1
 
+    @patch("llm_relay.proxy.db.get_ttl_tier", return_value=_TTL_UNKNOWN)
+    @patch("llm_relay.proxy.db.get_session_cache_stats", return_value=_CACHE_ZERO)
     @patch("llm_relay.api.display.discover_external_cli_sessions", return_value=[])
     @patch("llm_relay.proxy.db.get_conn")
     @patch("llm_relay.proxy.db.get_all_turn_counts")
@@ -695,7 +720,7 @@ class TestDisplayLivenessFilter:
     @patch("llm_relay.api.display.find_claude_pid_by_tty")
     @patch("llm_relay.api.display.is_cc_process_alive")
     def test_tty_fallback_skipped_for_stale_last_ts(
-        self, mock_alive, mock_find_tty, mock_prompt, mock_terms, mock_counts, mock_conn, _mock_ext
+        self, mock_alive, mock_find_tty, mock_prompt, mock_terms, mock_counts, mock_conn, _mock_ext, _mc, _mt
     ):
         """A long-dead session must not be resurrected via TTY fallback even
         if an unregistered claude process is sitting on the same /dev/pts/N.
@@ -723,13 +748,15 @@ class TestDisplayLivenessFilter:
         data = resp.json()
         assert data["count"] == 0  # stale session filtered by time-window guard
 
+    @patch("llm_relay.proxy.db.get_ttl_tier", return_value=_TTL_UNKNOWN)
+    @patch("llm_relay.proxy.db.get_session_cache_stats", return_value=_CACHE_ZERO)
     @patch("llm_relay.api.display.discover_external_cli_sessions", return_value=[])
     @patch("llm_relay.proxy.db.get_conn")
     @patch("llm_relay.proxy.db.get_all_turn_counts")
     @patch("llm_relay.proxy.db.get_all_session_terminals")
     @patch("llm_relay.api.display.get_last_user_prompt")
     @patch("llm_relay.api.display.is_cc_process_alive")
-    def test_include_dead_param(self, mock_alive, mock_prompt, mock_terms, mock_counts, mock_conn, _mock_ext):
+    def test_include_dead_param(self, mock_alive, mock_prompt, mock_terms, mock_counts, mock_conn, _mock_ext, _mc, _mt):
         mock_conn.return_value = MagicMock()
         mock_counts.return_value = [
             _empty_metrics(turns=50, first_ts=50.0, last_ts=300.0) | {"session_id": "dead-sid"},
