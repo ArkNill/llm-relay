@@ -329,6 +329,11 @@ async def _proxy(request: Request) -> Response:
         # thread via asyncio.to_thread inside starlette response flow was
         # dropping records when the response task was torn down mid-await.
         sid = headers.get("x-claude-code-session-id") or headers.get("x-session-id")
+        # Extract ephemeral TTL tier tokens for non-streaming path
+        resp_usage = resp_json.get("usage", {})
+        cc_detail = resp_usage.get("cache_creation", {})
+        eph_1h = cc_detail.get("ephemeral_1h_input_tokens", 0) if isinstance(cc_detail, dict) else 0
+        eph_5m = cc_detail.get("ephemeral_5m_input_tokens", 0) if isinstance(cc_detail, dict) else 0
         log_request(
             _get_conn(),
             session_id=sid,
@@ -344,6 +349,8 @@ async def _proxy(request: Request) -> Response:
             raw_usage=resp_json.get("usage"),
             request_body_bytes=body_bytes,
             ratelimit_headers=rl_headers,
+            ephemeral_1h_tokens=eph_1h,
+            ephemeral_5m_tokens=eph_5m,
         )
         # Session history capture (opt-in)
         if _HISTORY_ENABLED and req_json and path.startswith("/v1/messages"):
@@ -394,6 +401,8 @@ async def _proxy_stream(client, method, url, headers, body, path, t0, body_bytes
         "cache_creation": 0,
         "cache_read": 0,
         "model": None,
+        "ephemeral_1h_tokens": 0,
+        "ephemeral_5m_tokens": 0,
     }
 
     # History: accumulate response content blocks from SSE events
@@ -429,6 +438,16 @@ async def _proxy_stream(client, method, url, headers, body, path, t0, body_bytes
                     usage_acc["model"] = u["model"]
                 else:
                     usage_acc[k] += u[k]
+            # Extract ephemeral TTL tier tokens from cache_creation breakdown
+            msg_usage = msg.get("usage", {})
+            cache_creation_detail = msg_usage.get("cache_creation", {})
+            if isinstance(cache_creation_detail, dict):
+                usage_acc["ephemeral_1h_tokens"] += cache_creation_detail.get(
+                    "ephemeral_1h_input_tokens", 0
+                )
+                usage_acc["ephemeral_5m_tokens"] += cache_creation_detail.get(
+                    "ephemeral_5m_input_tokens", 0
+                )
         elif etype == "message_delta":
             delta_usage = event.get("usage", {})
             usage_acc["output_tokens"] = delta_usage.get(
@@ -532,6 +551,8 @@ async def _proxy_stream(client, method, url, headers, body, path, t0, body_bytes
                     raw_usage=dict(usage_acc),
                     request_body_bytes=body_bytes,
                     ratelimit_headers=rl_headers,
+                    ephemeral_1h_tokens=usage_acc.get("ephemeral_1h_tokens", 0),
+                    ephemeral_5m_tokens=usage_acc.get("ephemeral_5m_tokens", 0),
                 )
             except Exception:
                 logger.warning("log_request failed (stream path)", exc_info=True)
