@@ -19,6 +19,7 @@ This project started from a need to escape deep vendor lock-in with a single AI 
 - **Display**: Multi-CLI session monitor with context composition pie chart, connection type badges (SSH/tmux/tailscale/mosh), and provider liveness detection
 - **History**: Proxy-level conversation capture with delta/full storage, compaction detection, and web replay viewer
 - **Composition**: Real-time context window analysis — classifies content into 6 categories (user/assistant/tool_use/tool_result/thinking/system) with SNR metrics and duplicate read tracking
+- **Monitoring**: Quota utilization (Q5h/Q7d), cache hit rate, error rate (2xx/4xx/5xx/429), TTL tier detection (1h/5m) — all surfaced from data already collected by the proxy
 - **TUI**: `llm-relay top` — btop-style terminal monitor with Rich Live (works over SSH, no browser needed)
 - **i18n**: Browser locale detection with en/ko support; server-side override via `LLM_RELAY_LANG`
 - **MCP**: 8 tools via stdio transport (cli_delegate, cli_status, cli_probe, orch_delegate, orch_history, relay_stats, session_turns, session_history)
@@ -91,6 +92,31 @@ Web pages:
 ```bash
 llm-relay-mcp               # stdio transport, 8 tools
 ```
+
+## API Endpoints
+
+All endpoints are served by the proxy at `http://localhost:8083/api/v1/`.
+
+| Endpoint | Description |
+|----------|-------------|
+| `GET /api/v1/turns` | Turn counts + token metrics + zone classification for active sessions |
+| `GET /api/v1/turns/{session_id}` | Per-session metrics with cache hit rate and TTL tier |
+| `GET /api/v1/display` | Session cards with prompts, terminal info, composition |
+| `GET /api/v1/quota` | Anthropic Q5h/Q7d quota utilization and overage status |
+| `GET /api/v1/errors` | Error rate breakdown (2xx/4xx/5xx/429) |
+| `GET /api/v1/cache` | Cache hit rate (global or per-session) |
+| `GET /api/v1/ttl` | Cache TTL tier detection (1h/5m/mixed) |
+| `GET /api/v1/health` | CLI + proxy + orchestration DB health |
+| `GET /api/v1/cost` | Cost breakdown by model |
+| `GET /api/v1/sessions` | Proxy session summaries |
+| `GET /api/v1/cli/status` | CLI installation and auth status |
+| `GET /api/v1/delegations` | Multi-CLI delegation history |
+| `GET /api/v1/delegations/stats` | Delegation aggregate statistics |
+| `GET /api/v1/history` | Sessions with conversation history |
+| `GET /api/v1/history/{session_id}` | Conversation turns for a session |
+| `GET /api/v1/history/{session_id}/compactions` | Compaction events |
+| `GET /api/v1/history/{session_id}/composition` | Per-turn context composition |
+| `GET /api/v1/i18n` | Locale-specific UI messages |
 
 ## CLI Status
 
