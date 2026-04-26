@@ -370,12 +370,89 @@
     });
   });
 
+  async function loadQuota() {
+    var el = document.getElementById("quota-content");
+    var data = await fetchJSON("/quota");
+    if (!data || !data.available) {
+      el.innerHTML = '<span class="muted">No data yet</span>';
+      return;
+    }
+    var q5h = data.q5h_utilization || "—";
+    var q7d = data.q7d_utilization || "—";
+    var status = data.unified_status || "—";
+    var overage = data.overage_status || "—";
+    var overageCls = overage === "overage" ? ' class="danger"' : "";
+    el.innerHTML =
+      '<div class="quota-row"><span class="quota-label">Q5h</span><span class="quota-value">' + q5h + '</span></div>' +
+      '<div class="quota-row"><span class="quota-label">Q7d</span><span class="quota-value">' + q7d + '</span></div>' +
+      '<div class="quota-row"><span class="quota-label">Status</span><span class="quota-value">' + status + '</span></div>' +
+      '<div class="quota-row"><span class="quota-label">Overage</span><span' + overageCls + '>' + overage + '</span></div>';
+  }
+
+  async function loadErrors() {
+    var el = document.getElementById("error-content");
+    var data = await fetchJSON("/errors?window=8");
+    if (!data || data.total === 0) {
+      el.innerHTML = '<span class="muted">No requests in window</span>';
+      return;
+    }
+    var errPct = data.error_rate_pct || 0;
+    var errCls = errPct > 5 ? "danger" : (errPct > 1 ? "warn" : "");
+    el.innerHTML =
+      '<div class="stat-box"><div class="value' + (errCls ? " " + errCls : "") + '">' + errPct + '%</div><div class="label">Error Rate (8h)</div></div>' +
+      '<div class="error-detail">' +
+        '<span>2xx: ' + data.success_2xx + '</span>' +
+        '<span>4xx: ' + data.client_4xx + '</span>' +
+        '<span>5xx: ' + data.server_5xx + '</span>' +
+        '<span>429: ' + data.rate_limited + '</span>' +
+        '<span>Total: ' + data.total + '</span>' +
+      '</div>';
+  }
+
+  async function loadCache() {
+    var el = document.getElementById("cache-content");
+    var data = await fetchJSON("/cache?window=8");
+    if (!data || data.request_count === 0) {
+      el.innerHTML = '<span class="muted">No requests in window</span>';
+      return;
+    }
+    var rate = data.cache_hit_rate || 0;
+    var rateCls = rate < 80 ? "warn" : (rate < 50 ? "danger" : "");
+    el.innerHTML =
+      '<div class="stat-box"><div class="value' + (rateCls ? " " + rateCls : "") + '">' + rate + '%</div><div class="label">Hit Rate (8h)</div></div>' +
+      '<div class="error-detail">' +
+        '<span>Read: ' + (data.total_cache_read || 0).toLocaleString() + '</span>' +
+        '<span>Create: ' + (data.total_cache_creation || 0).toLocaleString() + '</span>' +
+        '<span>Input: ' + (data.total_input_tokens || 0).toLocaleString() + '</span>' +
+      '</div>';
+  }
+
+  async function loadTTL() {
+    var el = document.getElementById("ttl-content");
+    var data = await fetchJSON("/ttl");
+    if (!data || data.tier === "unknown") {
+      el.innerHTML = '<span class="muted">No ephemeral data</span>';
+      return;
+    }
+    var tierCls = data.tier === "1h" ? "ttl-1h" : (data.tier === "5m" ? "ttl-5m" : "ttl-mixed");
+    el.innerHTML =
+      '<div class="ttl-badge ' + tierCls + '">' + data.tier + '</div>' +
+      '<div class="error-detail">' +
+        '<span>1h: ' + (data.ephemeral_1h_tokens || 0).toLocaleString() + ' tokens</span>' +
+        '<span>5m: ' + (data.ephemeral_5m_tokens || 0).toLocaleString() + ' tokens</span>' +
+      '</div>';
+  }
+
   // Initial load
   loadHealth();
   loadCLIStatus();
   loadStats();
   loadHistory();
   loadTurnMonitor();
+  loadQuota();
+  loadErrors();
+  loadCache();
+  loadTTL();
 
   // Polling intervals — pause when tab is hidden (Page Visibility API)
   // Reduces GPU/CPU load when user isn't actively viewing
@@ -389,6 +466,7 @@
     if (otherInterval === null) {
       otherInterval = setInterval(function () {
         loadHealth(); loadStats(); loadHistory();
+        loadQuota(); loadErrors(); loadCache(); loadTTL();
       }, 30000);
     }
   }
