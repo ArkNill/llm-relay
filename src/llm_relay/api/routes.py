@@ -237,7 +237,7 @@ def _compute_zone_bundle(current_ctx: int, peak_ctx: int) -> dict:
 async def _api_turns(request: Request) -> Response:
     """Return turn count + 4 token metrics + dual-zone classification for a session."""
     try:
-        from llm_relay.proxy.db import get_conn, get_turn_count
+        from llm_relay.proxy.db import get_conn, get_session_cache_stats, get_ttl_tier, get_turn_count
 
         session_id = request.path_params["session_id"]
         conn = get_conn()
@@ -249,6 +249,8 @@ async def _api_turns(request: Request) -> Response:
             duration_s = data["last_ts"] - data["first_ts"]
 
         zones = _compute_zone_bundle(data["current_ctx"], data["peak_ctx"])
+        cache = get_session_cache_stats(conn, session_id=session_id)
+        ttl = get_ttl_tier(conn, session_id=session_id)
 
         return _json_response({
             "session_id": session_id,
@@ -263,6 +265,9 @@ async def _api_turns(request: Request) -> Response:
             "cumul_unique": data["cumul_unique"],
             # Ceiling for ratio display on the client
             "ceiling": int(os.getenv("CC_TOKEN_CEILING", "1000000")),
+            # Cache hit rate + TTL tier
+            "cache_hit_rate": cache["cache_hit_rate"],
+            "ttl_tier": ttl["tier"],
             # Zone bundle (zone, zone_a*, zone_b*, zone_{a,b}_peak, legacy message/next_threshold)
             **zones,
         })
@@ -399,7 +404,13 @@ async def _api_display(request: Request) -> Response:
             discover_external_cli_sessions,
             get_last_user_prompt,
         )
-        from llm_relay.proxy.db import get_all_session_terminals, get_all_turn_counts, get_conn
+        from llm_relay.proxy.db import (
+            get_all_session_terminals,
+            get_all_turn_counts,
+            get_conn,
+            get_session_cache_stats,
+            get_ttl_tier,
+        )
 
         window = float(request.query_params.get("window", "4"))
         include_dead = request.query_params.get("include_dead", "0") == "1"
@@ -423,6 +434,8 @@ async def _api_display(request: Request) -> Response:
                 duration_s = r["last_ts"] - r["first_ts"]
             prompt_info = get_last_user_prompt(r["session_id"])
             zones = _compute_zone_bundle(r["current_ctx"], r["peak_ctx"])
+            cache = get_session_cache_stats(conn, session_id=r["session_id"])
+            ttl = get_ttl_tier(conn, session_id=r["session_id"])
             sessions.append({
                 "session_id": r["session_id"],
                 "provider": "claude-code",
@@ -437,6 +450,9 @@ async def _api_display(request: Request) -> Response:
                 "recent_peak": r["recent_peak"],
                 "cumul_unique": r["cumul_unique"],
                 "ceiling": ceiling,
+                # Cache hit rate + TTL tier
+                "cache_hit_rate": cache["cache_hit_rate"],
+                "ttl_tier": ttl["tier"],
                 # Dual zone bundle
                 **zones,
                 # Terminal + prompt
@@ -689,6 +705,81 @@ async def _api_history_compactions(request: Request) -> Response:
         return _json_response({"error": str(e)}, status=500)
 
 
+# ── GET /api/v1/quota ──
+
+async def _api_quota(request: Request) -> Response:
+    """Return latest ratelimit quota data (Q5h/Q7d utilization + overage)."""
+    try:
+        from llm_relay.proxy.db import get_conn, get_latest_quota
+
+        conn = get_conn()
+        quota = get_latest_quota(conn)
+        if not quota:
+            return _json_response({"available": False, "message": "No ratelimit data yet"})
+        return _json_response({"available": True, **quota})
+    except ImportError:
+        return _json_response({"error": "Proxy module not available"}, status=501)
+    except Exception as e:
+        logger.error("Failed to get quota: %s", e)
+        return _json_response({"error": str(e)}, status=500)
+
+
+# ── GET /api/v1/errors ──
+
+async def _api_errors(request: Request) -> Response:
+    """Return error rate statistics."""
+    try:
+        from llm_relay.proxy.db import get_conn, get_error_stats
+
+        window = float(request.query_params.get("window", "8"))
+        session_id = request.query_params.get("session_id")
+        conn = get_conn()
+        stats = get_error_stats(conn, session_id=session_id, window_hours=window)
+        return _json_response({"window_hours": window, **stats})
+    except ImportError:
+        return _json_response({"error": "Proxy module not available"}, status=501)
+    except Exception as e:
+        logger.error("Failed to get error stats: %s", e)
+        return _json_response({"error": str(e)}, status=500)
+
+
+# ── GET /api/v1/cache ──
+
+async def _api_cache(request: Request) -> Response:
+    """Return cache hit rate statistics."""
+    try:
+        from llm_relay.proxy.db import get_conn, get_session_cache_stats
+
+        window = float(request.query_params.get("window", "8"))
+        session_id = request.query_params.get("session_id")
+        conn = get_conn()
+        stats = get_session_cache_stats(conn, session_id=session_id, window_hours=window)
+        return _json_response({"window_hours": window, **stats})
+    except ImportError:
+        return _json_response({"error": "Proxy module not available"}, status=501)
+    except Exception as e:
+        logger.error("Failed to get cache stats: %s", e)
+        return _json_response({"error": str(e)}, status=500)
+
+
+# ── GET /api/v1/ttl ──
+
+async def _api_ttl(request: Request) -> Response:
+    """Return TTL tier detection (1h vs 5m ephemeral cache)."""
+    try:
+        from llm_relay.proxy.db import get_conn, get_ttl_tier
+
+        session_id = request.query_params.get("session_id")
+        conn = get_conn()
+        ttl = get_ttl_tier(conn, session_id=session_id)
+        return _json_response(ttl)
+    except ImportError:
+        return _json_response({"error": "Proxy module not available"}, status=501)
+    except Exception as e:
+        logger.error("Failed to get TTL tier: %s", e)
+        return _json_response({"error": str(e)}, status=500)
+
+
 async def _api_history_composition(request: Request) -> Response:
     """Return per-turn composition analysis for a session."""
     if not os.getenv("LLM_RELAY_HISTORY", "") == "1":
@@ -728,6 +819,11 @@ def get_api_routes() -> List[Route]:
         Route("/api/v1/display", _api_display, methods=["GET"]),
         Route("/api/v1/session-terminal", _api_session_terminal, methods=["POST"]),
         Route("/api/v1/health", _api_health, methods=["GET"]),
+        # Surfaced data endpoints (quota, errors, cache, ttl)
+        Route("/api/v1/quota", _api_quota, methods=["GET"]),
+        Route("/api/v1/errors", _api_errors, methods=["GET"]),
+        Route("/api/v1/cache", _api_cache, methods=["GET"]),
+        Route("/api/v1/ttl", _api_ttl, methods=["GET"]),
         # Session history
         Route("/api/v1/history", _api_history_sessions, methods=["GET"]),
         Route("/api/v1/history/{session_id}", _api_history_detail, methods=["GET"]),
