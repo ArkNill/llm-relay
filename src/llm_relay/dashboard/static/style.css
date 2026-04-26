@@ -19,6 +19,11 @@ section { margin-bottom: 2rem; }
 .status-ok { background: #3fb950; }
 .status-warn { background: #d29922; }
 .status-off { background: #484f58; }
+.card-inactive { opacity: 0.45; }
+.card-active { border-color: #3fb950; }
+.card .activity { color: #58a6ff; font-weight: 500; }
+.card .pulse { display: inline-block; width: 6px; height: 6px; border-radius: 50%; background: #3fb950; margin-left: 0.4rem; animation: pulse-dot 2s ease-in-out infinite; }
+@keyframes pulse-dot { 0%, 100% { opacity: 1; } 50% { opacity: 0.3; } }
 .stats-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); gap: 0.6rem; }
 .stat-box { background: #161b22; border: 1px solid #21262d; border-radius: 6px; padding: 0.8rem; text-align: center; }
 .stat-box .value { font-size: 1.4rem; font-weight: 700; color: #58a6ff; }
@@ -71,3 +76,23 @@ body.tab-hidden .turn-card.zone-red { animation-play-state: paused; }
 .health-row .dupes-warn { color: #d29922; font-weight: 600; }
 .health-row.dupes-row-warn { border-left-color: #d29922; }
 .health-empty { color: #6e7681; font-size: 0.8rem; padding: 0.8rem; text-align: center; }
+
+/* Delegation detail slide-out panel */
+#detail-panel { position: fixed; top: 0; right: -480px; width: 480px; height: 100vh; background: #161b22; border-left: 1px solid #30363d; box-shadow: -4px 0 24px rgba(0,0,0,0.4); z-index: 100; transition: right 0.25s ease; overflow-y: auto; }
+#detail-panel.open { right: 0; }
+#detail-panel .panel-header { display: flex; justify-content: space-between; align-items: center; padding: 1rem 1.2rem; border-bottom: 1px solid #21262d; position: sticky; top: 0; background: #161b22; z-index: 1; }
+#detail-panel .panel-title { font-size: 0.9rem; font-weight: 600; color: #c9d1d9; }
+#detail-panel .panel-controls { display: flex; gap: 0.6rem; }
+#detail-panel .panel-controls button { background: none; border: 1px solid #30363d; color: #8b949e; border-radius: 6px; padding: 0.25rem 0.5rem; font-size: 0.75rem; cursor: pointer; transition: all 0.15s; }
+#detail-panel .panel-controls button:hover { color: #58a6ff; border-color: #58a6ff; }
+#detail-panel .panel-body { padding: 1.2rem; }
+#detail-panel .detail-row { margin-bottom: 1rem; }
+#detail-panel .detail-label { font-size: 0.7rem; color: #8b949e; text-transform: uppercase; letter-spacing: 0.05em; margin-bottom: 0.3rem; }
+#detail-panel .detail-value { font-size: 0.85rem; color: #c9d1d9; }
+#detail-panel .detail-value.mono { font-family: ui-monospace, "SF Mono", Menlo, monospace; font-size: 0.8rem; white-space: pre-wrap; word-break: break-word; background: #0d1117; padding: 0.6rem; border-radius: 6px; border: 1px solid #21262d; max-height: 300px; overflow-y: auto; }
+#detail-panel .detail-status { display: inline-block; padding: 0.15rem 0.5rem; border-radius: 12px; font-size: 0.75rem; font-weight: 600; }
+#detail-panel .detail-status.ok { background: #238636; color: #fff; }
+#detail-panel .detail-status.fail { background: #da3633; color: #fff; }
+#detail-overlay { position: fixed; top: 0; left: 0; width: 100vw; height: 100vh; background: rgba(0,0,0,0.3); z-index: 99; display: none; }
+#detail-overlay.open { display: block; }
+tr.clickable { cursor: pointer; }
