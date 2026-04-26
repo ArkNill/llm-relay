@@ -30,15 +30,60 @@
 
   async function loadCLIStatus() {
     const container = document.getElementById("cli-cards");
-    const data = await fetchJSON("/cli/status");
-    if (!data) { container.innerHTML = "<p>Failed to load</p>"; return; }
-    container.innerHTML = data.map(function (s) {
+    var cliData = await fetchJSON("/cli/status");
+    if (!cliData) { container.innerHTML = "<p>Failed to load</p>"; return; }
+
+    // Fetch active sessions and recent delegations for activity counts
+    var sessionsData = await fetchJSON("/sessions?window=1");
+    var delegData = await fetchJSON("/delegations?limit=50");
+
+    var now = Date.now() / 1000;
+    var activeSessions = 0;
+    if (sessionsData && sessionsData.sessions) {
+      activeSessions = sessionsData.sessions.filter(function (s) {
+        return (now - s.last_ts) < 300; // active within 5 minutes
+      }).length;
+    }
+
+    // Count recent delegations per CLI (last 2 hours)
+    var delegCounts = {};
+    if (delegData && delegData.delegations) {
+      delegData.delegations.forEach(function (d) {
+        if ((now - d.ts) < 7200) {
+          var cli = d.cli_id || "unknown";
+          delegCounts[cli] = (delegCounts[cli] || 0) + 1;
+        }
+      });
+    }
+
+    // Map CLI IDs to display names
+    var cliIdMap = { "claude-code": "claude", "openai-codex": "codex", "gemini-cli": "gemini" };
+
+    container.innerHTML = cliData.map(function (s) {
       var statusClass = s.usable ? "status-ok" : (s.installed ? "status-warn" : "status-off");
       var authLabel = s.usable ? s.preferred_auth : "none";
-      return '<div class="card">' +
-        '<h3><span class="status ' + statusClass + '"></span>' + s.binary_name + '</h3>' +
+
+      // Activity: sessions for claude, delegations for codex/gemini
+      var activityHtml = "";
+      var isActive = false;
+      if (s.cli_id === "claude-code") {
+        activityHtml = '<div class="detail activity">' + activeSessions + ' active session' + (activeSessions !== 1 ? 's' : '') + '</div>';
+        isActive = activeSessions > 0;
+      } else {
+        var count = delegCounts[s.cli_id] || 0;
+        activityHtml = '<div class="detail activity">' + count + ' delegation' + (count !== 1 ? 's' : '') + ' (2h)</div>';
+        isActive = count > 0;
+      }
+
+      var cardClass = "card" + (isActive ? " card-active" : "") + (!s.usable ? " card-inactive" : "");
+
+      return '<div class="' + cardClass + '">' +
+        '<h3><span class="status ' + statusClass + '"></span>' + s.binary_name +
+        (isActive ? '<span class="pulse"></span>' : '') +
+        '</h3>' +
         '<div class="detail">v' + (s.version || "?") + '</div>' +
         '<div class="detail">Auth: ' + authLabel + '</div>' +
+        activityHtml +
         '</div>';
     }).join("");
   }
@@ -213,10 +258,11 @@
     var tbody = document.querySelector("#history-table tbody");
     var data = await fetchJSON("/delegations?limit=20");
     if (!data || !data.delegations) { tbody.innerHTML = "<tr><td colspan=5>No data</td></tr>"; return; }
-    tbody.innerHTML = data.delegations.map(function (d) {
+    var delegations = data.delegations;
+    tbody.innerHTML = delegations.map(function (d, i) {
       var statusClass = d.success ? "success" : "failure";
       var statusText = d.success ? "OK" : "FAIL";
-      return "<tr>" +
+      return '<tr class="clickable" data-idx="' + i + '">' +
         "<td>" + timeAgo(d.ts) + "</td>" +
         '<td>' + d.cli_id + "</td>" +
         '<td class="' + statusClass + '">' + statusText + "</td>" +
@@ -224,7 +270,105 @@
         "<td>" + (d.prompt_preview || "").substring(0, 60) + "</td>" +
         "</tr>";
     }).join("");
+
+    // Click handler for detail panel
+    tbody.querySelectorAll("tr.clickable").forEach(function (row) {
+      row.addEventListener("click", function () {
+        var d = delegations[parseInt(row.dataset.idx)];
+        openDetailPanel(d);
+      });
+    });
   }
+
+  function openDetailPanel(d) {
+    var panel = document.getElementById("detail-panel");
+    var overlay = document.getElementById("detail-overlay");
+    var body = document.getElementById("panel-body");
+
+    var statusCls = d.success ? "ok" : "fail";
+    var statusText = d.success ? "OK" : "FAIL";
+    var date = new Date(d.ts * 1000);
+    var dateStr = date.toLocaleString(undefined, { hour12: false });
+
+    body.innerHTML =
+      '<div class="detail-row">' +
+        '<div class="detail-label">Status</div>' +
+        '<span class="detail-status ' + statusCls + '">' + statusText + '</span>' +
+        (d.exit_code !== 0 ? ' <span style="color:#8b949e;font-size:0.75rem">(exit ' + d.exit_code + ')</span>' : '') +
+      '</div>' +
+      '<div class="detail-row">' +
+        '<div class="detail-label">CLI</div>' +
+        '<div class="detail-value">' + d.cli_id + '</div>' +
+      '</div>' +
+      '<div class="detail-row">' +
+        '<div class="detail-label">Strategy</div>' +
+        '<div class="detail-value">' + (d.strategy || "direct") + '</div>' +
+      '</div>' +
+      '<div class="detail-row">' +
+        '<div class="detail-label">Model</div>' +
+        '<div class="detail-value">' + (d.model || "default") + '</div>' +
+      '</div>' +
+      '<div class="detail-row">' +
+        '<div class="detail-label">Duration</div>' +
+        '<div class="detail-value">' + (d.duration_ms / 1000).toFixed(1) + 's (' + Math.round(d.duration_ms) + 'ms)</div>' +
+      '</div>' +
+      '<div class="detail-row">' +
+        '<div class="detail-label">Timestamp</div>' +
+        '<div class="detail-value">' + dateStr + '</div>' +
+      '</div>' +
+      '<div class="detail-row">' +
+        '<div class="detail-label">Working Directory</div>' +
+        '<div class="detail-value mono">' + (d.working_dir || "—") + '</div>' +
+      '</div>' +
+      '<div class="detail-row">' +
+        '<div class="detail-label">Auth</div>' +
+        '<div class="detail-value">' + (d.auth_method || "—") + '</div>' +
+      '</div>' +
+      '<div class="detail-row">' +
+        '<div class="detail-label">Output Size</div>' +
+        '<div class="detail-value">' + (d.output_chars || 0).toLocaleString() + ' chars</div>' +
+      '</div>' +
+      '<div class="detail-row">' +
+        '<div class="detail-label">Prompt</div>' +
+        '<div class="detail-value mono">' + escapeHtml(d.prompt_preview || "—") + '</div>' +
+      '</div>' +
+      (d.error ? '<div class="detail-row"><div class="detail-label">Error</div><div class="detail-value mono" style="color:#f85149">' + escapeHtml(d.error) + '</div></div>' : '');
+
+    panel.classList.add("open");
+    overlay.classList.add("open");
+    panel._data = d;
+  }
+
+  function closeDetailPanel() {
+    document.getElementById("detail-panel").classList.remove("open");
+    document.getElementById("detail-overlay").classList.remove("open");
+  }
+
+  function escapeHtml(s) {
+    if (!s) return "";
+    return s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
+  }
+
+  document.getElementById("panel-close").addEventListener("click", closeDetailPanel);
+  document.getElementById("detail-overlay").addEventListener("click", closeDetailPanel);
+  document.addEventListener("keydown", function (e) {
+    if (e.key === "Escape") closeDetailPanel();
+  });
+  document.getElementById("panel-copy").addEventListener("click", function () {
+    var panel = document.getElementById("detail-panel");
+    var d = panel._data;
+    if (!d) return;
+    var text = "CLI: " + d.cli_id + "\nStatus: " + (d.success ? "OK" : "FAIL") +
+      "\nDuration: " + (d.duration_ms / 1000).toFixed(1) + "s" +
+      "\nDir: " + (d.working_dir || "—") +
+      "\nPrompt: " + (d.prompt_preview || "—") +
+      (d.error ? "\nError: " + d.error : "");
+    navigator.clipboard.writeText(text).then(function () {
+      var btn = document.getElementById("panel-copy");
+      btn.textContent = "Copied!";
+      setTimeout(function () { btn.textContent = "Copy"; }, 1500);
+    });
+  });
 
   // Initial load
   loadHealth();
