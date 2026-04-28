@@ -1,0 +1,8 @@
+# Development override — build from local source instead of GHCR image.
+# Usage: docker compose -f docker-compose.yml -f docker-compose.dev.yml up -d --build
+services:
+  llm-relay:
+    image: llm-relay:dev
+    build:
+      context: .
+      dockerfile: Dockerfile
