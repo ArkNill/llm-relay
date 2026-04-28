@@ -14,6 +14,10 @@ from starlette.routing import Route
 
 logger = logging.getLogger(__name__)
 
+# Docker environment detection — liveness filtering is impossible inside a container
+# because /proc shows container processes, not host processes.
+_IN_DOCKER = os.path.exists("/.dockerenv") or os.getenv("CC_IN_DOCKER", "") == "1"
+
 
 def _json_response(data: Any, status: int = 200) -> Response:
     return Response(
@@ -292,7 +296,7 @@ async def _api_turns_all(request: Request) -> Response:
         from llm_relay.proxy.db import get_all_session_terminals, get_all_turn_counts, get_conn
 
         window = float(request.query_params.get("window", "4"))
-        include_dead = request.query_params.get("include_dead", "0") == "1"
+        include_dead = request.query_params.get("include_dead", "0") == "1" or _IN_DOCKER
         conn = get_conn()
         rows = get_all_turn_counts(conn, window_hours=window)
         terminals = get_all_session_terminals(conn)
@@ -304,7 +308,7 @@ async def _api_turns_all(request: Request) -> Response:
         sessions = []
         for r in rows:
             term = terminals.get(r["session_id"]) or {}
-            alive = check_cc_session_alive(term, r["last_ts"], owned_cc_pids, now_ts)
+            alive = _IN_DOCKER or check_cc_session_alive(term, r["last_ts"], owned_cc_pids, now_ts)
             if not alive and not include_dead:
                 continue
             duration_s = 0.0
@@ -413,7 +417,7 @@ async def _api_display(request: Request) -> Response:
         )
 
         window = float(request.query_params.get("window", "4"))
-        include_dead = request.query_params.get("include_dead", "0") == "1"
+        include_dead = request.query_params.get("include_dead", "0") == "1" or _IN_DOCKER
         conn = get_conn()
         rows = get_all_turn_counts(conn, window_hours=window)
         terminals = get_all_session_terminals(conn)
@@ -425,7 +429,7 @@ async def _api_display(request: Request) -> Response:
         sessions = []
         for r in rows:
             term = terminals.get(r["session_id"]) or {}
-            alive = check_cc_session_alive(term, r["last_ts"], owned_cc_pids, now_ts)
+            alive = _IN_DOCKER or check_cc_session_alive(term, r["last_ts"], owned_cc_pids, now_ts)
             if not alive and not include_dead:
                 continue
 
