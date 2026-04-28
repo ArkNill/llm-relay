@@ -226,6 +226,12 @@ def _start_server(port: int) -> Tuple[bool, str]:
         log_path = db_dir_for_env() / "server.log"
         log_file = open(str(log_path), "a")  # noqa: SIM115
 
+        detach_kwargs = {}
+        if sys.platform == "win32":
+            detach_kwargs["creationflags"] = subprocess.CREATE_NEW_PROCESS_GROUP
+        else:
+            detach_kwargs["start_new_session"] = True
+
         proc = subprocess.Popen(
             [
                 sys.executable, "-m", "uvicorn",
@@ -238,7 +244,7 @@ def _start_server(port: int) -> Tuple[bool, str]:
             stdout=log_file,
             stderr=log_file,
             stdin=subprocess.DEVNULL,
-            start_new_session=True,
+            **detach_kwargs,
         )
 
         # Wait for startup

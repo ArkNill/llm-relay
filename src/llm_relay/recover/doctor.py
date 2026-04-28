@@ -64,7 +64,7 @@ def check_trust_dialog_hang() -> HealthResult:
         return HealthResult(
             "trust-dialog-hang", "warning",
             "hasTrustDialogAccepted=true -- can cause resume hangs on some setups",
-            recommendation="Set to false: jq '.hasTrustDialogAccepted = false' ~/.claude.json | sponge ~/.claude.json",
+            recommendation="Set hasTrustDialogAccepted to false in ~/.claude.json (or %USERPROFILE%\\.claude.json on Windows)",
             fixable=True,
         )
     return HealthResult("trust-dialog-hang", "ok", "Trust dialog state is clean")
@@ -85,7 +85,7 @@ def check_hooks_trust_flag() -> HealthResult:
         return HealthResult(
             "hooks-trust-flag", "warning",
             "hasTrustDialogHooksAccepted missing -- hooks may be silently blocked",
-            recommendation="Add: jq '.hasTrustDialogHooksAccepted = true' ~/.claude.json | sponge ~/.claude.json",
+            recommendation="Add hasTrustDialogHooksAccepted: true to ~/.claude.json (or %USERPROFILE%\\.claude.json on Windows)",
             fixable=True,
         )
     return HealthResult("hooks-trust-flag", "ok", "Hooks trust flag present")
@@ -265,16 +265,37 @@ def check_zombie_sessions() -> HealthResult:
 def check_relay_health() -> HealthResult:
     """Check if llm-relay proxy is running and DB is accessible."""
     import subprocess
+    import sys
 
-    # Check if proxy process is running
-    try:
-        result = subprocess.run(
-            ["pgrep", "-f", "llm_relay"],
-            capture_output=True, timeout=5,
-        )
-        proxy_running = result.returncode == 0
-    except (subprocess.TimeoutExpired, FileNotFoundError):
-        proxy_running = False
+    # Check if proxy process is running (cross-platform)
+    proxy_running = False
+    if sys.platform == "win32":
+        # Windows: use tasklist to find uvicorn/python running llm_relay
+        try:
+            result = subprocess.run(
+                ["tasklist", "/FI", "IMAGENAME eq python.exe", "/FO", "CSV"],
+                capture_output=True, text=True, timeout=5,
+                stdin=subprocess.DEVNULL,
+            )
+            if result.returncode == 0 and "python" in result.stdout.lower():
+                wmic = subprocess.run(
+                    ["wmic", "process", "where", "name='python.exe'", "get", "commandline"],
+                    capture_output=True, text=True, timeout=5,
+                    stdin=subprocess.DEVNULL,
+                )
+                proxy_running = "llm_relay" in wmic.stdout
+        except (subprocess.TimeoutExpired, FileNotFoundError, OSError):
+            proxy_running = False
+    else:
+        try:
+            result = subprocess.run(
+                ["pgrep", "-f", "llm_relay"],
+                capture_output=True, timeout=5,
+                stdin=subprocess.DEVNULL,
+            )
+            proxy_running = result.returncode == 0
+        except (subprocess.TimeoutExpired, FileNotFoundError):
+            proxy_running = False
 
     db_path = Path.home() / ".llm-relay" / "usage.db"
     db_exists = db_path.exists()
