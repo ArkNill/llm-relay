@@ -7,12 +7,7 @@ services:
       - "127.0.0.1:8080:8080"
     volumes:
       - llm-relay-data:/data
-      # Optional: mount Claude Code session files for display page prompts.
-      # Uncomment the line for your OS:
-      # Linux/macOS:
-      # - ${HOME}/.claude/projects:/data/claude-projects:ro
-      # Windows (PowerShell):
-      # - ${USERPROFILE}/.claude/projects:/data/claude-projects:ro
+      - ${HOME:-${USERPROFILE}}/.claude/projects:/data/claude-projects:ro
     environment:
       - LLM_RELAY_UPSTREAM=https://api.anthropic.com
       - LLM_RELAY_DB=/data/usage.db
@@ -26,8 +21,7 @@ services:
       - CC_TOKEN_A_RED=${CC_TOKEN_A_RED:-750000}
       - CC_TOKEN_A_HARD=${CC_TOKEN_A_HARD:-900000}
       - CC_TOKEN_CEILING=${CC_TOKEN_CEILING:-1000000}
-      # Uncomment if mounting Claude Code session files:
-      # - CC_CLAUDE_PROJECTS_DIR=/data/claude-projects
+      - CC_CLAUDE_PROJECTS_DIR=/data/claude-projects
     mem_limit: 256m
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8080/_health')"]
