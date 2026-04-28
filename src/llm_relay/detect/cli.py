@@ -228,6 +228,21 @@ def doctor(fix: bool) -> None:
 @click.option("--workers", "-w", default=1, type=int, help="Number of worker processes.")
 def serve(host: str, port: int, workers: int) -> None:
     """Start the proxy server with dashboard and display pages."""
+    if sys.platform == "win32":
+        click.echo(click.style("Error: ", fg="red") + "Native serve is not supported on Windows.")
+        click.echo()
+        click.echo("Why: Windows lacks /proc, so process liveness detection falls back")
+        click.echo("to psutil which scans all running processes via NT system calls.")
+        click.echo("This makes the 2-second dashboard polling unacceptably slow.")
+        click.echo("Docker runs Linux internally, so /proc works at native speed.")
+        click.echo()
+        click.echo("Use Docker instead:")
+        click.echo("  curl -sL https://raw.githubusercontent.com/ArkNill/llm-relay/")
+        click.echo("    main/docker-compose.yml -o docker-compose.yml")
+        click.echo("  docker compose up -d")
+        click.echo("  llm-relay connect")
+        raise SystemExit(1)
+
     try:
         import uvicorn
     except ImportError:
