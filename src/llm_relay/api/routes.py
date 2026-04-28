@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import os
 import time
+import urllib.request
 from typing import Any, List, Optional
 
 from starlette.requests import Request
@@ -810,6 +812,75 @@ async def _api_history_composition(request: Request) -> Response:
         return _json_response({"error": str(e)}, status=500)
 
 
+# ── GET /api/v1/anthropic-status — proxied + cached upstream status ──
+
+# Module-level cache: (expiry_epoch, payload). Refreshed via 60s TTL.
+_anthropic_status_cache: Optional[tuple] = None
+_ANTHROPIC_STATUS_TTL_S = 60.0
+_ANTHROPIC_STATUS_URL = os.getenv(
+    "LLM_RELAY_ANTHROPIC_STATUS_URL",
+    "https://status.claude.com/api/v2/summary.json",
+)
+
+
+def _fetch_anthropic_status_sync(now: float) -> dict:
+    """Blocking fetch of Anthropic status; runs in thread pool via asyncio.to_thread."""
+    try:
+        req = urllib.request.Request(
+            _ANTHROPIC_STATUS_URL,
+            headers={"Accept": "application/json", "User-Agent": "llm-relay-dashboard"},
+        )
+        with urllib.request.urlopen(req, timeout=5) as resp:
+            payload = json.loads(resp.read())
+        status = payload.get("status", {}) or {}
+        incidents = payload.get("incidents", []) or []
+        return {
+            "indicator": status.get("indicator", "unknown"),
+            "description": status.get("description", ""),
+            "incidents": [
+                {
+                    "name": i.get("name", ""),
+                    "status": i.get("status", ""),
+                    "impact": i.get("impact", ""),
+                    "updated_at": i.get("updated_at", ""),
+                    "shortlink": i.get("shortlink", ""),
+                }
+                for i in incidents
+            ],
+            "last_fetched": now,
+            "source_url": "https://status.claude.com",
+            "fetch_ok": True,
+        }
+    except Exception as exc:  # noqa: BLE001 — surface any failure to UI
+        logger.debug("Anthropic status fetch failed: %s", exc)
+        return {
+            "indicator": "unknown",
+            "description": "Status fetch failed",
+            "incidents": [],
+            "last_fetched": now,
+            "source_url": "https://status.claude.com",
+            "fetch_ok": False,
+            "error": str(exc)[:200],
+        }
+
+
+async def _api_anthropic_status(request: Request) -> Response:
+    """Return Anthropic API status with 60s in-memory cache.
+
+    Proxies https://status.claude.com/api/v2/summary.json so the dashboard
+    can render an upstream-status tile without each tab hammering the
+    Anthropic status page directly.
+    """
+    global _anthropic_status_cache
+    now = time.time()
+    if _anthropic_status_cache is not None and _anthropic_status_cache[0] > now:
+        return _json_response(_anthropic_status_cache[1])
+
+    data = await asyncio.to_thread(_fetch_anthropic_status_sync, now)
+    _anthropic_status_cache = (now + _ANTHROPIC_STATUS_TTL_S, data)
+    return _json_response(data)
+
+
 def get_api_routes() -> List[Route]:
     """Return all API routes for mounting into the main Starlette app."""
     return [
@@ -834,4 +905,6 @@ def get_api_routes() -> List[Route]:
         Route("/api/v1/history/{session_id}/compactions", _api_history_compactions, methods=["GET"]),
         Route("/api/v1/history/{session_id}/composition", _api_history_composition, methods=["GET"]),
         Route("/api/v1/i18n", _api_i18n, methods=["GET"]),
+        # Upstream Anthropic status (proxied + cached 60s)
+        Route("/api/v1/anthropic-status", _api_anthropic_status, methods=["GET"]),
     ]
