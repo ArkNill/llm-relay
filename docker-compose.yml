@@ -4,7 +4,7 @@ services:
     container_name: llm-relay
     restart: unless-stopped
     ports:
-      - "127.0.0.1:8080:8080"
+      - "127.0.0.1:8083:8083"
     volumes:
       - llm-relay-data:/data
       - ${HOME:-${USERPROFILE}}/.claude/projects:/data/claude-projects:ro
@@ -24,7 +24,7 @@ services:
       - CC_CLAUDE_PROJECTS_DIR=/data/claude-projects
     mem_limit: 256m
     healthcheck:
-      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8080/_health')"]
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8083/_health')"]
       interval: 30s
       timeout: 5s
       retries: 3
