@@ -64,7 +64,10 @@ def check_trust_dialog_hang() -> HealthResult:
         return HealthResult(
             "trust-dialog-hang", "warning",
             "hasTrustDialogAccepted=true -- can cause resume hangs on some setups",
-            recommendation="Set hasTrustDialogAccepted to false in ~/.claude.json (or %USERPROFILE%\\.claude.json on Windows)",
+            recommendation=(
+                "Set hasTrustDialogAccepted to false in ~/.claude.json"
+                " (or %USERPROFILE%\\.claude.json on Windows)"
+            ),
             fixable=True,
         )
     return HealthResult("trust-dialog-hang", "ok", "Trust dialog state is clean")
@@ -85,7 +88,10 @@ def check_hooks_trust_flag() -> HealthResult:
         return HealthResult(
             "hooks-trust-flag", "warning",
             "hasTrustDialogHooksAccepted missing -- hooks may be silently blocked",
-            recommendation="Add hasTrustDialogHooksAccepted: true to ~/.claude.json (or %USERPROFILE%\\.claude.json on Windows)",
+            recommendation=(
+                "Add hasTrustDialogHooksAccepted: true to ~/.claude.json"
+                " (or %USERPROFILE%\\.claude.json on Windows)"
+            ),
             fixable=True,
         )
     return HealthResult("hooks-trust-flag", "ok", "Hooks trust flag present")
