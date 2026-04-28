@@ -2,21 +2,41 @@
 
 Lightweight tail-based JSONL parsing for real-time dashboard display.
 Supports Claude Code, OpenAI Codex, and Gemini CLI sessions.
-Also provides CLI process liveness check via host /proc mount.
+Also provides CLI process liveness check via /proc (Linux) or psutil (Windows).
 """
 
 from __future__ import annotations
 
 import json
 import os
+import sys
 import time as _time
 from pathlib import Path
 from typing import Optional
 
 from llm_relay.detect.scanner import find_projects_dir
 
+_IS_LINUX = sys.platform.startswith("linux")
+
 # Known CLI binary names for process detection
-_CLI_PROCESS_NAMES = {"claude", "codex", "gemini"}
+_CLI_PROCESS_NAMES = {"claude", "codex", "gemini", "node", "bun", "deno"}
+
+# Lazy psutil import for non-Linux platforms
+_psutil = None
+_psutil_checked = False
+
+
+def _get_psutil():
+    """Soft-import psutil. Returns module or None."""
+    global _psutil, _psutil_checked
+    if not _psutil_checked:
+        try:
+            import psutil
+            _psutil = psutil
+        except ImportError:
+            _psutil = None
+        _psutil_checked = True
+    return _psutil
 
 # Filters for non-user-input messages that live under type=="user"
 _WRAPPER_PREFIXES = (
@@ -397,7 +417,10 @@ def get_last_user_prompt(session_id: str, projects_dir: Optional[Path] = None) -
 
 
 def _get_proc_dir() -> Path:
-    """Return the /proc directory path (host /proc if mounted, else local)."""
+    """Return the /proc directory path (host /proc if mounted, else local).
+
+    Only meaningful on Linux. Windows callers should check _IS_LINUX first.
+    """
     env_path = os.getenv("CC_HOST_PROC")
     if env_path:
         return Path(env_path)
@@ -417,6 +440,9 @@ def _is_cli_process(comm: str, cmdline: str) -> bool:
 def find_cli_pid_by_tty(tty: Optional[str]) -> Optional[int]:
     """Find a running CLI process (claude/codex/gemini) on a given TTY.
 
+    Linux: scans /proc/*/stat for TTY major/minor matching.
+    Windows: TTY concept does not apply -- always returns None.
+
     Args:
         tty: TTY path like "/dev/pts/8" or "pts/8".
 
@@ -424,6 +450,9 @@ def find_cli_pid_by_tty(tty: Optional[str]) -> Optional[int]:
         PID of the matching CLI process, or None if not found.
     """
     if not tty:
+        return None
+
+    if not _IS_LINUX:
         return None
 
     tty_short = tty.replace("/dev/", "")
@@ -446,7 +475,6 @@ def find_cli_pid_by_tty(tty: Optional[str]) -> Optional[int]:
                     comm = comm_path.read_text(errors="replace").strip()
                 if not _is_cli_process(comm, cmdline):
                     continue
-                # Check the stat file for TTY
                 stat_path = entry / "stat"
                 if not stat_path.exists():
                     continue
@@ -461,9 +489,9 @@ def find_cli_pid_by_tty(tty: Optional[str]) -> Optional[int]:
                 major = (tty_nr >> 8) & 0xff
                 minor = (tty_nr & 0xff) | ((tty_nr >> 12) & 0xfff00)
                 if major == 136:
-                    candidate = f"pts/{minor}"
+                    candidate = "pts/{}".format(minor)
                 elif major == 4:
-                    candidate = f"tty{minor}"
+                    candidate = "tty{}".format(minor)
                 else:
                     continue
                 if candidate == tty_short:
@@ -478,8 +506,8 @@ def find_cli_pid_by_tty(tty: Optional[str]) -> Optional[int]:
 def is_cli_process_alive(pid: Optional[int]) -> bool:
     """Check if a process is alive and is a known CLI instance.
 
-    Verifies both existence and that the process matches claude/codex/gemini
-    to protect against PID reuse.
+    Linux: reads /proc/PID/cmdline.
+    Windows/macOS: uses psutil.Process(pid).cmdline().
 
     Args:
         pid: Process ID to check. Returns False if None or invalid.
@@ -490,25 +518,36 @@ def is_cli_process_alive(pid: Optional[int]) -> bool:
     if not pid or pid <= 0:
         return False
 
-    proc_dir = _get_proc_dir() / str(pid)
-    if not proc_dir.exists():
-        return False
-
-    try:
-        cmdline_path = proc_dir / "cmdline"
-        if not cmdline_path.exists():
+    if _IS_LINUX:
+        proc_dir = _get_proc_dir() / str(pid)
+        if not proc_dir.exists():
             return False
-        cmdline = cmdline_path.read_bytes().decode("utf-8", errors="replace")
-        comm = ""
-        comm_path = proc_dir / "comm"
-        if comm_path.exists():
-            comm = comm_path.read_text(errors="replace").strip()
-        if _is_cli_process(comm, cmdline):
-            return True
-    except (OSError, PermissionError):
-        pass
+        try:
+            cmdline_path = proc_dir / "cmdline"
+            if not cmdline_path.exists():
+                return False
+            cmdline = cmdline_path.read_bytes().decode("utf-8", errors="replace")
+            comm = ""
+            comm_path = proc_dir / "comm"
+            if comm_path.exists():
+                comm = comm_path.read_text(errors="replace").strip()
+            return _is_cli_process(comm, cmdline)
+        except (OSError, PermissionError):
+            return False
 
-    return False
+    # Non-Linux: psutil fallback
+    psutil = _get_psutil()
+    if psutil is None:
+        return False
+    try:
+        proc = psutil.Process(pid)
+        if not proc.is_running():
+            return False
+        cmdline = " ".join(proc.cmdline())
+        comm = proc.name()
+        return _is_cli_process(comm, cmdline)
+    except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess, OSError):
+        return False
 
 
 # Backward-compatible aliases
@@ -570,36 +609,60 @@ def _collect_open_session_paths(proc_dir: Optional[Path] = None) -> set:
 
     Codex/Gemini transcripts persist on disk after the CLI exits, so file
     mtime is not a reliable liveness signal. Instead we check whether any
-    process currently has the transcript open as a file descriptor — when
-    the CLI exits the kernel closes the fd and the path drops out of /proc.
+    process currently has the transcript open as a file descriptor.
+
+    Linux: reads /proc/*/fd symlinks.
+    Windows: uses psutil to enumerate open files across all processes.
     """
-    if proc_dir is None:
-        proc_dir = _get_proc_dir()
     open_paths: set = set()
-    try:
-        entries = list(proc_dir.iterdir())
-    except OSError:
-        return open_paths
-    for entry in entries:
-        if not entry.name.isdigit():
-            continue
-        fd_dir = entry / "fd"
+
+    if _IS_LINUX:
+        if proc_dir is None:
+            proc_dir = _get_proc_dir()
         try:
-            fds = list(fd_dir.iterdir())
-        except (OSError, PermissionError):
-            continue
-        for fd in fds:
-            try:
-                target = os.readlink(str(fd))
-            except OSError:
+            entries = list(proc_dir.iterdir())
+        except OSError:
+            return open_paths
+        for entry in entries:
+            if not entry.name.isdigit():
                 continue
-            if not (target.endswith(".jsonl") or target.endswith(".json")):
-                continue
+            fd_dir = entry / "fd"
             try:
-                resolved = str(Path(target).resolve())
-            except OSError:
-                resolved = target
-            open_paths.add(resolved)
+                fds = list(fd_dir.iterdir())
+            except (OSError, PermissionError):
+                continue
+            for fd in fds:
+                try:
+                    target = os.readlink(str(fd))
+                except OSError:
+                    continue
+                if not (target.endswith(".jsonl") or target.endswith(".json")):
+                    continue
+                try:
+                    resolved = str(Path(target).resolve())
+                except OSError:
+                    resolved = target
+                open_paths.add(resolved)
+        return open_paths
+
+    # Non-Linux: psutil fallback
+    psutil = _get_psutil()
+    if psutil is None:
+        return open_paths
+    try:
+        for proc in psutil.process_iter(["pid"]):
+            try:
+                for f in proc.open_files():
+                    if f.path.endswith(".jsonl") or f.path.endswith(".json"):
+                        try:
+                            resolved = str(Path(f.path).resolve())
+                        except OSError:
+                            resolved = f.path
+                        open_paths.add(resolved)
+            except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess, OSError):
+                continue
+    except (psutil.Error, OSError):
+        pass
     return open_paths
 
 
@@ -848,46 +911,84 @@ _CONN_CACHE_TTL = 60.0  # seconds
 
 
 def _read_proc_environ(pid: int) -> dict:
-    """Read /proc/PID/environ and return as a dict."""
-    proc_dir = _get_proc_dir() / str(pid)
-    environ_path = proc_dir / "environ"
+    """Read a process's environment variables.
+
+    Linux: reads /proc/PID/environ.
+    Windows/macOS: uses psutil.Process(pid).environ().
+    """
+    if _IS_LINUX:
+        proc_dir = _get_proc_dir() / str(pid)
+        environ_path = proc_dir / "environ"
+        try:
+            raw = environ_path.read_bytes()
+            result = {}
+            for entry in raw.split(b"\x00"):
+                if b"=" in entry:
+                    key, _, val = entry.partition(b"=")
+                    result[key.decode("utf-8", errors="replace")] = val.decode("utf-8", errors="replace")
+            return result
+        except (OSError, PermissionError):
+            return {}
+
+    psutil = _get_psutil()
+    if psutil is None:
+        return {}
     try:
-        raw = environ_path.read_bytes()
-        result = {}
-        for entry in raw.split(b"\x00"):
-            if b"=" in entry:
-                key, _, val = entry.partition(b"=")
-                result[key.decode("utf-8", errors="replace")] = val.decode("utf-8", errors="replace")
-        return result
-    except (OSError, PermissionError):
+        return psutil.Process(pid).environ()
+    except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess, OSError):
         return {}
 
 
 def _get_parent_comm_chain(pid: int, max_depth: int = 10) -> list:
-    """Walk parent process chain and return list of (pid, comm) tuples."""
-    proc_dir = _get_proc_dir()
+    """Walk parent process chain and return list of (pid, comm) tuples.
+
+    Linux: reads /proc/PID/status recursively.
+    Windows/macOS: uses psutil.Process(pid).ppid() + .name().
+    """
+    if _IS_LINUX:
+        proc_dir = _get_proc_dir()
+        chain = []
+        current = pid
+        for _ in range(max_depth):
+            try:
+                status_path = proc_dir / str(current) / "status"
+                if not status_path.exists():
+                    break
+                ppid = None
+                comm = ""
+                for line in status_path.read_text(errors="replace").splitlines():
+                    if line.startswith("Name:\t"):
+                        comm = line[6:].strip()
+                    elif line.startswith("PPid:\t"):
+                        ppid = int(line[6:].strip())
+                if ppid is None or ppid <= 1:
+                    if comm:
+                        chain.append((current, comm))
+                    break
+                chain.append((current, comm))
+                current = ppid
+            except (OSError, ValueError, PermissionError):
+                break
+        return chain
+
+    psutil = _get_psutil()
+    if psutil is None:
+        return []
     chain = []
     current = pid
-    for _ in range(max_depth):
-        try:
-            status_path = proc_dir / str(current) / "status"
-            if not status_path.exists():
-                break
-            ppid = None
-            comm = ""
-            for line in status_path.read_text(errors="replace").splitlines():
-                if line.startswith("Name:\t"):
-                    comm = line[6:].strip()
-                elif line.startswith("PPid:\t"):
-                    ppid = int(line[6:].strip())
+    try:
+        for _ in range(max_depth):
+            proc = psutil.Process(current)
+            comm = proc.name()
+            ppid = proc.ppid()
             if ppid is None or ppid <= 1:
                 if comm:
                     chain.append((current, comm))
                 break
             chain.append((current, comm))
             current = ppid
-        except (OSError, ValueError, PermissionError):
-            break
+    except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess, OSError):
+        pass
     return chain
 
 

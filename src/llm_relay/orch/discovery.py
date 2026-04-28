@@ -95,6 +95,7 @@ def _get_version(binary_path: str, binary_name: str) -> Optional[str]:
             capture_output=True,
             text=True,
             timeout=5,
+            stdin=subprocess.DEVNULL,
         )
         output = result.stdout.strip() or result.stderr.strip()
         if output:
@@ -138,7 +139,7 @@ def _probe_codex(binary_path: str) -> bool:
     if not os.path.isfile(auth_file):
         return False
     try:
-        with open(auth_file) as f:
+        with open(auth_file, encoding="utf-8") as f:
             content = f.read().strip()
             return len(content) > 10  # Non-empty auth file
     except OSError:
