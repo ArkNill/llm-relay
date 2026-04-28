@@ -143,7 +143,7 @@ def _check_container() -> Dict[str, Any]:
 
     # Fallback: try health endpoint on common ports
     if result["running"] and not result["port"]:
-        for port in [8080, 8083]:
+        for port in [8083, 8080]:
             try:
                 import urllib.request
                 resp = urllib.request.urlopen(
@@ -172,7 +172,7 @@ def db_dir_for_env() -> Path:
 
 
 def run_init(
-    port: int = 8080,
+    port: int = 8083,
     skip_server: bool = False,
     dry_run: bool = False,
     verbose: bool = False,

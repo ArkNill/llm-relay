@@ -36,7 +36,7 @@ curl -sL https://raw.githubusercontent.com/ArkNill/llm-relay/main/docker-compose
 docker compose up -d
 
 # 3. Open the dashboard
-#    http://localhost:8080/dashboard/
+#    http://localhost:8083/dashboard/
 ```
 
 To route Claude Code through the proxy, add to `~/.claude/settings.json`:
@@ -44,7 +44,7 @@ To route Claude Code through the proxy, add to `~/.claude/settings.json`:
 ```json
 {
   "env": {
-    "ANTHROPIC_BASE_URL": "http://localhost:8080"
+    "ANTHROPIC_BASE_URL": "http://localhost:8083"
   }
 }
 ```
@@ -88,7 +88,7 @@ llm-relay-mcp                  # stdio transport, 8 tools
 
 ## API Endpoints
 
-All endpoints are served by the proxy at `http://localhost:8080/api/v1/`.
+All endpoints are served by the proxy at `http://localhost:8083/api/v1/`.
 
 | Endpoint | Description |
 |----------|-------------|
