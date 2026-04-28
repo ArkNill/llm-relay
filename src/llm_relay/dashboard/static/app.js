@@ -28,6 +28,50 @@
     badge.className = "badge badge-" + (data.status === "ok" ? "ok" : "degraded");
   }
 
+  // Map Anthropic status indicator → CSS state class + human label
+  var ANTHROPIC_STATUS_LABELS = {
+    none: "API operational",
+    minor: "Minor disruption",
+    major: "Major outage",
+    critical: "Critical incident",
+    maintenance: "Scheduled maintenance",
+    unknown: "Status unavailable",
+  };
+
+  async function loadAnthropicStatus() {
+    var banner = document.getElementById("anthropic-status-banner");
+    var textEl = banner.querySelector(".status-text");
+    var incidentEl = document.getElementById("anthropic-status-incident");
+    var fetchedEl = document.getElementById("anthropic-status-fetched");
+    var data = await fetchJSON("/anthropic-status");
+    if (!data) {
+      banner.className = "status-banner status-unknown";
+      textEl.textContent = "Anthropic status: unavailable";
+      incidentEl.textContent = "";
+      fetchedEl.textContent = "";
+      return;
+    }
+    var indicator = data.indicator || "unknown";
+    var label = ANTHROPIC_STATUS_LABELS[indicator] || ("Status: " + indicator);
+    var description = data.description || "";
+    banner.className = "status-banner status-" + indicator;
+    textEl.textContent = "Anthropic: " + label + (description && indicator !== "none" ? " — " + description : "");
+    if (data.incidents && data.incidents.length > 0) {
+      var top = data.incidents[0];
+      var bits = [top.name];
+      if (top.impact && top.impact !== "none") bits.push("[" + top.impact + "]");
+      if (top.status) bits.push("(" + top.status + ")");
+      incidentEl.textContent = bits.join(" ");
+    } else {
+      incidentEl.textContent = "";
+    }
+    if (data.last_fetched) {
+      fetchedEl.textContent = "fetched " + timeAgo(data.last_fetched);
+    } else {
+      fetchedEl.textContent = "";
+    }
+  }
+
   async function loadCLIStatus() {
     const container = document.getElementById("cli-cards");
     var cliData = await fetchJSON("/cli/status");
@@ -445,6 +489,7 @@
 
   // Initial load
   loadHealth();
+  loadAnthropicStatus();
   loadCLIStatus();
   loadStats();
   loadHistory();
@@ -465,7 +510,7 @@
     }
     if (otherInterval === null) {
       otherInterval = setInterval(function () {
-        loadHealth(); loadStats(); loadHistory();
+        loadHealth(); loadAnthropicStatus(); loadStats(); loadHistory();
         loadQuota(); loadErrors(); loadCache(); loadTTL();
       }, 30000);
     }
