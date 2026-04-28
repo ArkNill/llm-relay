@@ -24,62 +24,30 @@ This project started from a need to escape deep vendor lock-in with a single AI 
 - **i18n**: Browser locale detection with en/ko support; server-side override via `LLM_RELAY_LANG`
 - **MCP**: 8 tools via stdio transport (cli_delegate, cli_status, cli_probe, orch_delegate, orch_history, relay_stats, session_turns, session_history)
 
-## Install
+## Quick Start (Docker — recommended)
+
+Runs on **Linux, macOS, and Windows** with Docker. No Python or pip required on the host.
 
 ```bash
-# CLI only (diagnostics, recovery, orchestration)
-pip install llm-relay
+# 1. Download docker-compose.yml
+curl -sL https://raw.githubusercontent.com/ArkNill/llm-relay/main/docker-compose.yml \
+  -o docker-compose.yml
 
-# With Rich TUI (llm-relay top)
-pip install llm-relay[cli]
+# 2. Start the proxy
+docker compose up -d
 
-# With proxy + web dashboard
-pip install llm-relay[proxy]
-
-# With MCP server (Python 3.10+)
-pip install llm-relay[mcp]
-
-# Everything
-pip install llm-relay[all]
+# 3. Open the dashboard
+#    http://localhost:8080/dashboard/
 ```
 
-## Quick Start
+To route Claude Code through the proxy, add to `~/.claude/settings.json`:
 
-### One-command setup (recommended)
-
-```bash
-pip install llm-relay[all]
-llm-relay init
-```
-
-This single command:
-1. Detects installed CLIs (Claude Code, Codex, Gemini)
-2. Initializes the database (`~/.llm-relay/usage.db`)
-3. Configures Claude Code to route through the proxy (`ANTHROPIC_BASE_URL`)
-4. Registers the MCP server in Claude Code (8 tools)
-5. Starts the proxy server with history enabled
-6. Runs a health check to verify everything works
-
-After init, open: **http://localhost:8083/dashboard/**
-
-Options: `--dry-run` (preview without changes), `--skip-server` (configure only), `--port 9090` (custom port).
-
-### Manual setup
-
-```bash
-# CLI diagnostics only (no server needed)
-pip install llm-relay
-llm-relay scan              # Session health check (7 detectors)
-llm-relay doctor            # Configuration health check (7 checks)
-llm-relay top               # Live terminal monitor (btop-style TUI)
-
-# Web dashboard
-pip install llm-relay[proxy]
-llm-relay serve             # Starts proxy + dashboard on port 8083
-
-# Then configure Claude Code to use the proxy:
-# In ~/.claude/settings.json, add:
-#   "env": { "ANTHROPIC_BASE_URL": "http://localhost:8083" }
+```json
+{
+  "env": {
+    "ANTHROPIC_BASE_URL": "http://localhost:8080"
+  }
+}
 ```
 
 Web pages:
@@ -87,15 +55,41 @@ Web pages:
 - `/display/` — Turn counter with context composition, connection type badges
 - `/history/` — Session conversation replay with compaction timeline
 
+### Clean removal
+
+```bash
+docker compose down -v    # Stops container + removes data volume
+rm docker-compose.yml     # Remove compose file
+```
+
+No files are left on the host. To stop routing Claude Code, remove `ANTHROPIC_BASE_URL` from `~/.claude/settings.json`.
+
+## Install (CLI only — optional)
+
+For lightweight diagnostics without the proxy server:
+
+```bash
+pip install llm-relay          # Core diagnostics
+pip install llm-relay[cli]     # With Rich TUI (llm-relay top)
+pip install llm-relay[mcp]     # MCP server (Python 3.10+)
+```
+
+```bash
+llm-relay scan                 # Session health check (7 detectors)
+llm-relay doctor               # Configuration health check (7 checks)
+llm-relay top                  # Live terminal monitor (btop-style TUI)
+llm-relay init                 # Check Docker status + setup guide
+```
+
 ### MCP server
 
 ```bash
-llm-relay-mcp               # stdio transport, 8 tools
+llm-relay-mcp                  # stdio transport, 8 tools
 ```
 
 ## API Endpoints
 
-All endpoints are served by the proxy at `http://localhost:8083/api/v1/`.
+All endpoints are served by the proxy at `http://localhost:8080/api/v1/`.
 
 | Endpoint | Description |
 |----------|-------------|
@@ -126,9 +120,18 @@ All endpoints are served by the proxy at `http://localhost:8083/api/v1/`.
 | OpenAI Codex | Fully supported |
 | Gemini CLI | Display supported, oauth-personal has known 403 server-side bug ([#25425](https://github.com/google-gemini/gemini-cli/issues/25425)) |
 
+## Development
+
+For local development without GHCR image:
+
+```bash
+docker compose -f docker-compose.yml -f docker-compose.dev.yml up -d --build
+```
+
 ## Requirements
 
-- Python >= 3.9
+- Docker (recommended) — Linux, macOS, or Windows with Docker Desktop
+- Python >= 3.9 (CLI diagnostics only)
 - MCP tools require Python >= 3.10
 
 ## License
