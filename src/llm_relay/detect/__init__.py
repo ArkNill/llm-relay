@@ -4,7 +4,8 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-__version__ = "0.5.0"
+from llm_relay import __version__  # single source from pyproject.toml
+
 __all__ = ["__version__", "get_all_detectors", "get_detectors_for_provider"]
 
 if TYPE_CHECKING:
