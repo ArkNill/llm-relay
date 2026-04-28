@@ -30,8 +30,7 @@ Runs on **Linux, macOS, and Windows** with Docker. No Python or pip required on 
 
 ```bash
 # 1. Download docker-compose.yml
-curl -sL https://raw.githubusercontent.com/ArkNill/llm-relay/main/docker-compose.yml \
-  -o docker-compose.yml
+curl -sL https://raw.githubusercontent.com/ArkNill/llm-relay/main/docker-compose.yml -o docker-compose.yml
 
 # 2. Start the proxy
 docker compose up -d
