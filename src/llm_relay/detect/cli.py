@@ -375,7 +375,7 @@ def init(port: int, skip_server: bool, dry_run: bool) -> None:
 
 
 @cli.command()
-@click.option("--port", "-p", default=8080, type=int, help="Proxy port (default: 8080).")
+@click.option("--port", "-p", default=8083, type=int, help="Proxy port (default: 8083).")
 def connect(port: int) -> None:
     """Connect Claude Code, Codex, and Gemini to the llm-relay proxy.
 
