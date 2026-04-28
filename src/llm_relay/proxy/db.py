@@ -424,16 +424,40 @@ def upsert_session_terminal(
                WHERE cc_pid = ? AND session_id != ?""",
             (cc_pid, session_id),
         )
+    # term_name preservation rule: if the incoming value is a generic shell or
+    # process name AND the existing row already has a non-generic value, keep
+    # the existing one. This lets users (or per-project SessionStart hooks) set
+    # human-readable agent labels without auto-registration clobbering them on
+    # the next sub-agent spawn. Explicit overrides still work — just POST a
+    # non-generic name.
+    GENERIC_TERM_NAMES = (
+        "claude.exe",
+        "bash",
+        "sh",
+        "zsh",
+        "fish",
+        "dash",
+        "ksh",
+        "tmux",
+        "screen",
+    )
+    placeholders = ",".join(["?"] * len(GENERIC_TERM_NAMES))
     conn.execute(
-        """INSERT INTO session_terminals (session_id, tty, cc_pid, term_pid, term_name, updated_ts)
+        f"""INSERT INTO session_terminals (session_id, tty, cc_pid, term_pid, term_name, updated_ts)
            VALUES (?, ?, ?, ?, ?, ?)
            ON CONFLICT(session_id) DO UPDATE SET
                tty = excluded.tty,
                cc_pid = excluded.cc_pid,
                term_pid = excluded.term_pid,
-               term_name = excluded.term_name,
+               term_name = CASE
+                   WHEN excluded.term_name IN ({placeholders})
+                        AND term_name IS NOT NULL
+                        AND term_name NOT IN ({placeholders})
+                   THEN term_name
+                   ELSE excluded.term_name
+               END,
                updated_ts = excluded.updated_ts""",
-        (session_id, tty, cc_pid, term_pid, term_name, now),
+        (session_id, tty, cc_pid, term_pid, term_name, now, *GENERIC_TERM_NAMES, *GENERIC_TERM_NAMES),
     )
     conn.commit()
 
