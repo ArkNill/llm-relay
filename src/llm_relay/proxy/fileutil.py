@@ -6,14 +6,16 @@ when Claude may be appending to the same JSONL file.
 
 from __future__ import annotations
 
-import fcntl
 import hashlib
 import os
+import sys
 import tempfile
 from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal
+
+_IS_WINDOWS = sys.platform == "win32"
 
 
 @dataclass(frozen=True)
@@ -27,7 +29,7 @@ class FileSnapshot:
     """
 
     path: Path
-    inode: int
+    inode: int  # 0 on Windows (NTFS st_ino unreliable)
     size: int
     content_hash: str  # MD5 of full content at snapshot time
 
@@ -37,7 +39,8 @@ class FileSnapshot:
         stat = path.stat()
         data = path.read_bytes()
         h = hashlib.md5(data, usedforsecurity=False).hexdigest()
-        return cls(path=path, inode=stat.st_ino, size=stat.st_size, content_hash=h)
+        inode = 0 if _IS_WINDOWS else stat.st_ino
+        return cls(path=path, inode=inode, size=stat.st_size, content_hash=h)
 
     def classify(self) -> Literal["unchanged", "appended", "conflict"]:
         """Check what happened since the snapshot was taken."""
@@ -46,7 +49,8 @@ class FileSnapshot:
         except FileNotFoundError:
             return "conflict"
 
-        if stat.st_ino != self.inode:
+        # Inode check (skip on Windows -- NTFS st_ino is unreliable)
+        if not _IS_WINDOWS and stat.st_ino != self.inode:
             return "conflict"
 
         if stat.st_size == self.size:
@@ -78,14 +82,29 @@ def advisory_lock(path: Path):
 
     Creates a `.lock` sibling file.  Raises ``BlockingIOError`` if
     another process already holds the lock.
+
+    Linux/macOS: fcntl.flock().  Windows: msvcrt.locking().
     """
     lock_path = path.with_suffix(path.suffix + ".lock")
     fd = os.open(str(lock_path), os.O_CREAT | os.O_WRONLY)
     try:
-        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        if _IS_WINDOWS:
+            import msvcrt
+            msvcrt.locking(fd, msvcrt.LK_NBLCK, 1)
+        else:
+            import fcntl
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
         yield
     finally:
-        fcntl.flock(fd, fcntl.LOCK_UN)
+        if _IS_WINDOWS:
+            import msvcrt
+            try:
+                msvcrt.locking(fd, msvcrt.LK_UNLCK, 1)
+            except OSError:
+                pass
+        else:
+            import fcntl
+            fcntl.flock(fd, fcntl.LOCK_UN)
         os.close(fd)
         try:
             lock_path.unlink()
