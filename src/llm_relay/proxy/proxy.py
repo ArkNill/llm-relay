@@ -265,8 +265,20 @@ def _warn_if_poor(usage: dict, endpoint: str) -> None:
 
 async def _proxy(request: Request) -> Response:
     """Forward request to upstream, log usage, return response."""
-    client = _get_client()
     path = request.url.path
+
+    # Only proxy Anthropic API paths (/v1/messages, /v1/complete, etc.)
+    # Reject everything else to prevent Chrome devtools, favicon, and other
+    # spurious requests from being forwarded upstream (causes ConnectTimeout
+    # hangs when upstream is unreachable).
+    if not path.startswith("/v1/"):
+        return Response(
+            json.dumps({"error": "Not found", "detail": "Only /v1/ API paths are proxied"}),
+            status_code=404,
+            media_type="application/json",
+        )
+
+    client = _get_client()
     query = str(request.url.query)
     url = f"{path}?{query}" if query else path
 
