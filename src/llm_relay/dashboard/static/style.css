@@ -113,3 +113,48 @@ body.tab-hidden .turn-card.zone-red { animation-play-state: paused; }
 #detail-overlay { position: fixed; top: 0; left: 0; width: 100vw; height: 100vh; background: rgba(0,0,0,0.3); z-index: 99; display: none; }
 #detail-overlay.open { display: block; }
 tr.clickable { cursor: pointer; }
+
+/* Anthropic upstream status banner — sits between header and main */
+.status-banner {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+  padding: 0.5rem 1rem;
+  margin: 0.4rem 1rem 0.6rem 1rem;
+  border-radius: 6px;
+  font-size: 0.85rem;
+  text-decoration: none;
+  border: 1px solid transparent;
+  transition: background 0.2s ease;
+}
+.status-banner:hover { filter: brightness(1.1); }
+.status-banner .status-dot {
+  display: inline-block;
+  width: 0.6rem;
+  height: 0.6rem;
+  border-radius: 50%;
+  flex-shrink: 0;
+}
+.status-banner .status-text { font-weight: 600; }
+.status-banner .status-incident { color: #c9d1d9; flex: 1; font-size: 0.8rem; }
+.status-banner .status-fetched { color: #8b949e; font-size: 0.75rem; flex-shrink: 0; }
+
+/* Indicator → color mapping (matches Anthropic's status page semantics) */
+.status-banner.status-none      { background: #0e2a14; color: #6ee06e; border-color: #1f4d2a; }
+.status-banner.status-minor     { background: #2a2410; color: #d4b34a; border-color: #4d4220; }
+.status-banner.status-major     { background: #2e1f0f; color: #ffa040; border-color: #5a3a1c; }
+.status-banner.status-critical  { background: #2e0f0f; color: #ff6b6b; border-color: #5a1c1c; }
+.status-banner.status-maintenance { background: #0f1f2a; color: #6eb0e0; border-color: #1c3a5a; }
+.status-banner.status-unknown   { background: #1a1d24; color: #8b949e; border-color: #30363d; }
+.status-banner.status-loading   { background: #1a1d24; color: #8b949e; border-color: #30363d; }
+.status-banner.status-none .status-dot      { background: #6ee06e; box-shadow: 0 0 8px #6ee06e44; }
+.status-banner.status-minor .status-dot     { background: #d4b34a; box-shadow: 0 0 8px #d4b34a44; }
+.status-banner.status-major .status-dot     { background: #ffa040; box-shadow: 0 0 8px #ffa04066; }
+.status-banner.status-critical .status-dot  { background: #ff6b6b; box-shadow: 0 0 10px #ff6b6b88; animation: pulse 1.4s ease-in-out infinite; }
+.status-banner.status-maintenance .status-dot { background: #6eb0e0; }
+.status-banner.status-unknown .status-dot   { background: #8b949e; }
+.status-banner.status-loading .status-dot   { background: #8b949e; animation: pulse 1.4s ease-in-out infinite; }
+@keyframes pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.4; }
+}
