@@ -169,7 +169,7 @@ def check_corrupted_tool_use() -> HealthResult:
             "corrupted-tool-use", "issue",
             f"{corrupted_count} corrupted tool_use blocks found (name >200 chars) "
             f"in {checked} recent sessions. Likely a serialization bug.",
-            recommendation="Run pruner to fix: cc-relay prune --execute",
+            recommendation="Run pruner to fix: llm-relay prune --execute",
             fixable=True,
         )
     return HealthResult("corrupted-tool-use", "ok", f"No corrupted tool_use in {checked} sessions")
@@ -269,7 +269,7 @@ def check_zombie_sessions() -> HealthResult:
 
 
 def check_relay_health() -> HealthResult:
-    """Check if cc-relay proxy is running and DB is accessible."""
+    """Check if llm-relay proxy is running and DB is accessible."""
     import subprocess
     import sys
 
@@ -304,22 +304,22 @@ def check_relay_health() -> HealthResult:
         except (subprocess.TimeoutExpired, FileNotFoundError):
             proxy_running = False
 
-    db_path = Path.home() / ".cc-relay" / "usage.db"
+    db_path = Path.home() / ".llm-relay" / "usage.db"
     db_exists = db_path.exists()
 
     if proxy_running and db_exists:
-        return HealthResult("relay-health", "ok", "cc-relay proxy running, DB accessible")
+        return HealthResult("relay-health", "ok", "llm-relay proxy running, DB accessible")
     elif not proxy_running and db_exists:
         return HealthResult(
             "relay-health", "warning",
-            "cc-relay proxy not running but DB exists",
-            recommendation="Start with: cc-relay serve",
+            "llm-relay proxy not running but DB exists",
+            recommendation="Start with: llm-relay serve",
         )
     elif not db_exists:
         return HealthResult(
             "relay-health", "warning",
-            "cc-relay DB not found -- proxy may not have been set up",
-            recommendation="Set up with: pip install cc-relay && cc-relay serve",
+            "llm-relay DB not found -- proxy may not have been set up",
+            recommendation="Set up with: pip install llm-relay && llm-relay serve",
         )
     return HealthResult("relay-health", "ok", "No issues")
 

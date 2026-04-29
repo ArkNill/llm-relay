@@ -1,4 +1,4 @@
-"""CLI entry point for cc-relay."""
+"""CLI entry point for llm-relay."""
 
 from __future__ import annotations
 
@@ -30,10 +30,10 @@ def cmd_serve(args):
     )
 
     console = Console()
-    console.print(f"[bold green]cc-relay[/] starting on :{args.port}")
+    console.print(f"[bold green]llm-relay[/] starting on :{args.port}")
     console.print(f"  upstream: {args.upstream}")
     console.print(f"  warn ratio: <{args.warn_ratio}%")
-    console.print("  db: ~/.cc-relay/usage.db")
+    console.print("  db: ~/.llm-relay/usage.db")
     console.print()
     console.print("[dim]Set in Claude Code:[/]")
     console.print(f"  [bold]ANTHROPIC_BASE_URL=http://localhost:{args.port}[/]")
@@ -304,11 +304,11 @@ def cmd_guard(args):
 
     guard = Guard(GuardConfig(enabled=True, mode=args.mode))
     console = Console()
-    console.print("[bold]cc-relay guard[/] -- context monitor")
+    console.print("[bold]llm-relay guard[/] -- context monitor")
     console.print(f"  mode: {args.mode}")
     console.print("  thresholds: 25% checkpoint / 55% gentle / 80% standard / 90% aggressive")
     console.print("\n[dim]Guard runs automatically when proxy is started with LLM_RELAY_GUARD=1[/]")
-    console.print("[dim]Example: LLM_RELAY_GUARD=1 cc-relay serve[/]")
+    console.print("[dim]Example: LLM_RELAY_GUARD=1 llm-relay serve[/]")
 
     statuses = guard.get_all_status()
     if statuses:
@@ -335,7 +335,7 @@ def cmd_watch(args):
     if row and row["max_id"]:
         last_id = row["max_id"]
 
-    console.print("[bold]cc-relay watch[/] -- Ctrl+C to stop\n")
+    console.print("[bold]llm-relay watch[/] -- Ctrl+C to stop\n")
 
     try:
         while True:
@@ -365,7 +365,7 @@ def cmd_watch(args):
 
 def main():
     parser = argparse.ArgumentParser(
-        prog="cc-relay",
+        prog="llm-relay",
         description="Transparent API proxy for Claude Code -- cache monitoring + cost tracking",
     )
     sub = parser.add_subparsers(dest="command")

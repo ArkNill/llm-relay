@@ -37,7 +37,7 @@ if os.getenv("LLM_RELAY_CACHE_FIX", "0") == "1":
     except ImportError:
         pass
 
-logger = logging.getLogger("cc-relay")
+logger = logging.getLogger("llm-relay")
 
 UPSTREAM = os.getenv("LLM_RELAY_UPSTREAM", "https://api.anthropic.com")
 WARN_READ_RATIO = float(os.getenv("LLM_RELAY_WARN_RATIO", "50.0"))
