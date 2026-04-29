@@ -1,23 +1,17 @@
 # llm-relay
 > Unified LLM usage management — API proxy, session diagnostics, multi-CLI orchestration
-- `pip install llm-relay` / `llm-relay[cli]` / `llm-relay[proxy]` / `llm-relay[mcp]` / `llm-relay[all]`
+- `pip install llm-relay` / `llm-relay[proxy]` / `llm-relay[mcp]` / `llm-relay[all]`
 - Python >=3.9 | MCP requires >=3.10 | zero-dep core (detect/recover/guard/cost)
-- 7 session detectors: orphan, stuck, synthetic, bloat, cache, resume, microcompact
+- 8 session detectors: orphan, stuck, inflation, synthetic, bloat, cache, resume, microcompact
 - 12-strategy pruning (gentle/standard/aggressive tiers)
 - Multi-CLI orchestration: Claude Code, Codex CLI, Gemini CLI
-- Context composition analysis: 6-category breakdown with SNR metrics and duplicate read tracking
-- Connection type detection: SSH, tmux, screen, mosh, tailscale, native (+ combinations like ssh+tmux)
-- Session history capture: proxy-level conversation recording with delta storage and compaction detection
-- Web display: `/dashboard/` + `/display/` (pie chart, connection badges) + `/history/` (conversation replay)
-- TUI: `llm-relay top` — btop-style terminal monitor (works over SSH)
-- i18n: browser locale detection (en/ko), server override via LLM_RELAY_LANG
-- MCP: 8 tools (cli_delegate, cli_status, cli_probe, orch_delegate, orch_history, relay_stats, session_turns, session_history)
+- Web display: `/dashboard/` + `/display/` with provider badges (CC/Codex/Gemini), alive-only by default (`?include_dead=1` to override)
+- MCP: 7 tools (cli_delegate, cli_status, cli_probe, orch_delegate, orch_history, relay_stats, session_turns)
 ```bash
-llm-relay scan          # 7-detector session health check
+llm-relay scan          # 8-detector session health check
 llm-relay doctor        # 7-check configuration health
 llm-relay recover       # extract session context for resumption
-llm-relay top           # btop-style terminal monitor
-llm-relay serve         # start proxy + web dashboard
-llm-relay-mcp           # MCP server (stdio, 8 tools)
+uvicorn llm_relay.proxy.proxy:app --port 8083  # web dashboard
+llm-relay-mcp           # MCP server (stdio)
 ```
 - [Docs](https://github.com/QuartzUnit/llm-relay) | [PyPI](https://pypi.org/project/llm-relay/) | [Full API](/llms-full.txt)
