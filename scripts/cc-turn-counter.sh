@@ -6,7 +6,7 @@
 set -euo pipefail
 
 # Disable via env var
-[ "${CC_TURN_COUNTER_DISABLED:-0}" = "1" ] && exit 0
+[ "${LLM_TURN_COUNTER_DISABLED:-0}" = "1" ] && exit 0
 
 # Status file location — honor CLAUDE_CONFIG_DIR for alternate config dirs.
 # Falls back to ~/.claude when unset (stock).
@@ -76,7 +76,7 @@ if [ -n "$CC_PID" ]; then
 fi
 
 # POST terminal info to llm-relay (fire-and-forget, short timeout)
-API_PORT="${CC_TURN_API_PORT:-8083}"
+API_PORT="${LLM_TURN_API_PORT:-8083}"
 if command -v curl >/dev/null 2>&1; then
     TERM_JSON=$(jq -n \
         --arg sid "$SESSION_ID" \
@@ -121,7 +121,7 @@ fi
 [ -z "$TURNS" ] && exit 0
 
 # === Phase 5: Format ===
-RED_THRESHOLD="${CC_TURN_RED:-300}"
+RED_THRESHOLD="${LLM_TURN_RED:-300}"
 
 case "$ZONE" in
     green)  ICON="G" ;;

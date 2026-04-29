@@ -5,7 +5,7 @@ Analyzes what fills up the context window across session turns,
 classifying content into: system, user_text, assistant_text,
 tool_use, tool_result, thinking_overhead.
 
-Reads from ~/.cc-relay/usage.db (conversation_turns + compaction_events).
+Reads from ~/.llm-relay/usage.db (conversation_turns + compaction_events).
 
 Usage:
     python context_composition.py                     # all sessions summary
@@ -27,7 +27,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
-DB_PATH = Path(os.environ.get("CC_RELAY_DB", Path.home() / ".cc-relay" / "usage.db"))
+DB_PATH = Path(os.environ.get("LLM_RELAY_DB", Path.home() / ".llm-relay" / "usage.db"))
 
 # ── Content categories ──
 

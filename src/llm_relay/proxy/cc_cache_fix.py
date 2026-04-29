@@ -18,7 +18,7 @@ import os
 import re
 from typing import Any, Dict, List, Optional, Tuple
 
-logger = logging.getLogger("cc-relay")
+logger = logging.getLogger("llm-relay")
 
 # Sub-feature toggles (all default ON when LLM_RELAY_CACHE_FIX=1)
 _TTL_ENABLED = os.getenv("LLM_RELAY_CACHE_FIX_TTL", "1") == "1"

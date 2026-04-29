@@ -113,9 +113,9 @@ def _classify_zone(turns: int) -> tuple:
 
     Not used by any endpoint anymore. Turn counts are display-only now.
     """
-    yellow = int(os.getenv("CC_TURN_YELLOW", "200"))
-    orange = int(os.getenv("CC_TURN_ORANGE", "250"))
-    red = int(os.getenv("CC_TURN_RED", "300"))
+    yellow = int(os.getenv("LLM_TURN_YELLOW", "200"))
+    orange = int(os.getenv("LLM_TURN_ORANGE", "250"))
+    red = int(os.getenv("LLM_TURN_RED", "300"))
 
     if turns >= red:
         return "red", "위험", None, f"{red}턴 초과. 품질 저하 가능성이 높습니다. 새 세션으로 전환하세요."
