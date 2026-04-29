@@ -159,12 +159,12 @@ def _classify_zone(turns: int) -> tuple:
     red = int(os.getenv("LLM_TURN_RED", "300"))
 
     if turns >= red:
-        return "red", "위험", None, f"{red}턴 초과. 품질 저하 가능성이 높습니다. 새 세션으로 전환하세요."
+        return "red", "danger", None, f"Exceeded {red} turns. Quality degradation likely. Switch to a new session."
     if turns >= orange:
-        return "orange", "경고", red, f"{orange}턴 도달. 품질 저하 구간 진입 임박. 로테이션을 권장합니다."
+        return "orange", "warning", red, f"Reached {orange} turns. Approaching quality degradation. Rotation recommended."
     if turns >= yellow:
-        return "yellow", "주의", orange, f"{yellow}턴 도달. 새 세션 준비를 권장합니다."
-    return "green", "안전", yellow, None
+        return "yellow", "caution", orange, f"Reached {yellow} turns. Prepare a new session."
+    return "green", "safe", yellow, None
 
 
 def _classify_zone_absolute(tokens: int) -> tuple:
@@ -179,14 +179,14 @@ def _classify_zone_absolute(tokens: int) -> tuple:
     hard = _CACHED_TOKEN_A_HARD
 
     if tokens >= hard:
-        return "hard", "차단", None, f"{hard // 1000}K 초과. 즉시 세션 정리 필요."
+        return "hard", "blocked", None, f"Exceeded {hard // 1000}K. Immediate session cleanup required."
     if tokens >= red:
-        return "red", "위험", hard, f"{red // 1000}K 도달. 세션 로테이션 필수."
+        return "red", "danger", hard, f"Reached {red // 1000}K. Session rotation required."
     if tokens >= orange:
-        return "orange", "경고", red, f"{orange // 1000}K 도달. 현재 작업 마무리 후 rotate."
+        return "orange", "warning", red, f"Reached {orange // 1000}K. Finish current work then rotate."
     if tokens >= yellow:
-        return "yellow", "주의", orange, f"{yellow // 1000}K 도달. 문서 업데이트 + rotate 준비."
-    return "green", "안전", yellow, None
+        return "yellow", "caution", orange, f"Reached {yellow // 1000}K. Update docs and prepare to rotate."
+    return "green", "safe", yellow, None
 
 
 def _classify_zone_ratio(tokens: int, ceiling: Optional[int] = None) -> tuple:
@@ -198,7 +198,7 @@ def _classify_zone_ratio(tokens: int, ceiling: Optional[int] = None) -> tuple:
     if ceiling is None:
         ceiling = _CACHED_TOKEN_CEILING
     if ceiling <= 0:
-        return "green", "안전", 0, None
+        return "green", "safe", 0, None
 
     yellow_t = int(ceiling * 0.50)
     orange_t = int(ceiling * 0.70)
@@ -206,14 +206,14 @@ def _classify_zone_ratio(tokens: int, ceiling: Optional[int] = None) -> tuple:
     ratio = tokens / ceiling if ceiling else 0.0
 
     if ratio >= 1.0:
-        return "hard", "차단", None, f"100% ({ceiling // 1000}K) 천장 도달. 즉시 세션 정리."
+        return "hard", "blocked", None, f"100% ({ceiling // 1000}K) ceiling reached. Immediate session cleanup."
     if ratio >= 0.90:
-        return "red", "위험", ceiling, f"90% ({red_t // 1000}K) 도달. 로테이션 필수."
+        return "red", "danger", ceiling, f"90% ({red_t // 1000}K) reached. Rotation required."
     if ratio >= 0.70:
-        return "orange", "경고", red_t, f"70% ({orange_t // 1000}K) 도달. 마무리 후 rotate."
+        return "orange", "warning", red_t, f"70% ({orange_t // 1000}K) reached. Finish then rotate."
     if ratio >= 0.50:
-        return "yellow", "주의", orange_t, f"50% ({yellow_t // 1000}K) 도달. rotate 준비."
-    return "green", "안전", yellow_t, None
+        return "yellow", "caution", orange_t, f"50% ({yellow_t // 1000}K) reached. Prepare to rotate."
+    return "green", "safe", yellow_t, None
 
 
 def _overall_zone(zone_a: str, zone_b: str) -> str:
