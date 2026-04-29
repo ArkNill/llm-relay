@@ -9,7 +9,7 @@ import time
 from pathlib import Path
 from typing import Any, Optional
 
-DEFAULT_DB = Path(os.getenv("LLM_RELAY_DB", str(Path.home() / ".llm-relay" / "usage.db")))
+DEFAULT_DB = Path(os.getenv("LLM_RELAY_DB", str(Path.home() / ".cc-relay" / "usage.db")))
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS requests (
@@ -85,6 +85,15 @@ _MIGRATIONS = [
         detail TEXT,
         session_id TEXT
     )""",
+    """CREATE TABLE IF NOT EXISTS intercept_events (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        ts REAL NOT NULL,
+        session_id TEXT,
+        endpoint TEXT,
+        flags_count INTEGER DEFAULT 0,
+        flags_overridden TEXT
+    )""",
+    "CREATE INDEX IF NOT EXISTS idx_intercept_ts ON intercept_events(ts)",
     """CREATE TABLE IF NOT EXISTS session_terminals (
         session_id TEXT PRIMARY KEY,
         tty TEXT,
@@ -270,6 +279,28 @@ def log_budget_event(
            (ts, session_id, msg_index, tool_name, content_chars, truncated, marker)
            VALUES (?, ?, ?, ?, ?, ?, ?)""",
         (time.time(), session_id, msg_index, tool_name, content_chars, int(truncated), marker),
+    )
+    conn.commit()
+
+
+def log_intercept_event(
+    conn: sqlite3.Connection,
+    *,
+    session_id: str | None = None,
+    endpoint: str = "",
+    flags_overridden: list[str] | None = None,
+) -> None:
+    conn.execute(
+        """INSERT INTO intercept_events
+           (ts, session_id, endpoint, flags_count, flags_overridden)
+           VALUES (?, ?, ?, ?, ?)""",
+        (
+            time.time(),
+            session_id,
+            endpoint,
+            len(flags_overridden) if flags_overridden else 0,
+            json.dumps(flags_overridden) if flags_overridden else None,
+        ),
     )
     conn.commit()
 
@@ -824,17 +855,45 @@ def get_history_sessions(
     """Return sessions that have conversation history, with summary stats."""
     cutoff = time.time() - window_hours * 3600
     rows = conn.execute(
-        """SELECT session_id,
-                  COUNT(*) as total_turns,
-                  MIN(ts) as first_ts,
-                  MAX(ts) as last_ts,
-                  SUM(request_size_bytes) as total_request_bytes,
-                  SUM(response_size_bytes) as total_response_bytes,
-                  provider
-           FROM conversation_turns
-           WHERE ts > ?
-           GROUP BY session_id
-           ORDER BY last_ts DESC""",
-        (cutoff,),
+        """WITH history AS (
+             SELECT session_id,
+                    COUNT(*) as total_turns,
+                    MIN(ts) as first_ts,
+                    MAX(ts) as last_ts,
+                    SUM(request_size_bytes) as total_request_bytes,
+                    SUM(response_size_bytes) as total_response_bytes,
+                    provider
+             FROM conversation_turns
+             WHERE ts > ?
+             GROUP BY session_id
+           ),
+           ranked_usage AS (
+             SELECT session_id, ts,
+                    cache_read + cache_creation + input_tokens AS ctx,
+                    input_tokens + cache_creation + output_tokens AS unique_tokens,
+                    ROW_NUMBER() OVER (PARTITION BY session_id ORDER BY ts DESC) AS rn_desc
+             FROM requests
+             WHERE ts > ?
+               AND endpoint = '/v1/messages'
+               AND session_id IS NOT NULL
+           ),
+           usage AS (
+             SELECT session_id,
+                    COALESCE(MAX(ctx), 0) AS peak_ctx,
+                    COALESCE(SUM(unique_tokens), 0) AS cumul_unique,
+                    COALESCE(MAX(CASE WHEN rn_desc = 1 THEN ctx END), 0) AS current_ctx,
+                    COALESCE(MAX(CASE WHEN rn_desc <= 5 THEN ctx END), 0) AS recent_peak
+             FROM ranked_usage
+             GROUP BY session_id
+           )
+           SELECT history.*,
+                  COALESCE(usage.current_ctx, 0) AS current_ctx,
+                  COALESCE(usage.peak_ctx, 0) AS peak_ctx,
+                  COALESCE(usage.recent_peak, 0) AS recent_peak,
+                  COALESCE(usage.cumul_unique, 0) AS cumul_unique
+           FROM history
+           LEFT JOIN usage ON usage.session_id = history.session_id
+           ORDER BY history.last_ts DESC""",
+        (cutoff, cutoff),
     ).fetchall()
     return [dict(r) for r in rows]

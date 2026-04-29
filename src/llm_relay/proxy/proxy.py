@@ -19,6 +19,14 @@ from starlette.routing import Mount, Route
 
 from .db import get_conn, log_budget_event, log_microcompact, log_request
 
+# GrowthBook intercept (local-only, file excluded via .gitignore)
+try:
+    from .db import log_intercept_event
+    from .growthbook_intercept import apply_overrides, is_intercept_enabled, should_intercept
+    _gb_intercept_available = True
+except ImportError:
+    _gb_intercept_available = False
+
 # CC cache fix (opt-in, LLM_RELAY_CACHE_FIX=1)
 _cache_fix_available = False
 if os.getenv("LLM_RELAY_CACHE_FIX", "0") == "1":
@@ -29,7 +37,7 @@ if os.getenv("LLM_RELAY_CACHE_FIX", "0") == "1":
     except ImportError:
         pass
 
-logger = logging.getLogger("llm-relay")
+logger = logging.getLogger("cc-relay")
 
 UPSTREAM = os.getenv("LLM_RELAY_UPSTREAM", "https://api.anthropic.com")
 WARN_READ_RATIO = float(os.getenv("LLM_RELAY_WARN_RATIO", "50.0"))
@@ -46,7 +54,7 @@ _HISTORY_RAW = os.getenv("LLM_RELAY_HISTORY_RAW", "0") == "1"
 
 CLEARED_MARKER = "[Old tool result content cleared]"
 
-# Per-tool result size caps (server-side configuration)
+# GrowthBook per-tool caps (from tengu_pewter_kestrel)
 TOOL_CAPS = {
     "global": 50_000,
     "Bash": 30_000,
@@ -55,7 +63,7 @@ TOOL_CAPS = {
     "Glob": 20_000,
     "Snip": 1_000,
 }
-AGGREGATE_CAP = 200_000  # aggregate tool result cap
+AGGREGATE_CAP = 200_000  # tengu_hawthorn_window
 
 _RATELIMIT_PREFIXES = ("x-ratelimit-", "anthropic-ratelimit-", "retry-after")
 
@@ -332,6 +340,27 @@ async def _proxy(request: Request) -> Response:
     # Parse and log usage
     resp_body = upstream_resp.content
     rl_headers = _extract_ratelimit_headers(upstream_resp.headers)
+
+    # GrowthBook flag interception (local-only defence -- no-op if module absent)
+    if _gb_intercept_available and is_intercept_enabled() and should_intercept(path):
+        try:
+            gb_data = json.loads(resp_body)
+            modified, touched = apply_overrides(gb_data)
+            if modified:
+                resp_body = json.dumps(gb_data, ensure_ascii=False).encode("utf-8")
+                sid = headers.get("x-claude-code-session-id") or headers.get("x-session-id")
+                logger.info(
+                    "\U0001f6e1 INTERCEPTED %s -- %d flags: %s",
+                    path, len(touched), ", ".join(touched),
+                )
+                log_intercept_event(
+                    _get_conn(),
+                    session_id=sid,
+                    endpoint=path,
+                    flags_overridden=touched,
+                )
+        except (json.JSONDecodeError, UnicodeDecodeError, TypeError):
+            pass
 
     try:
         resp_json = json.loads(resp_body)
@@ -639,8 +668,8 @@ async def _watchdog_loop():
         while True:
             sock.sendto(b"WATCHDOG=1", notify_socket)
             await asyncio.sleep(60)
-    except Exception:
-        logger.debug("watchdog loop exited")
+    except Exception as exc:
+        logger.debug("watchdog loop exited: %s", exc)
 
 
 @asynccontextmanager

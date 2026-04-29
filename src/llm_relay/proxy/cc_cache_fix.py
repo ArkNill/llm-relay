@@ -1,6 +1,6 @@
 """CC cache fix -- normalize request body for stable prompt caching.
 
-Fixes two classes of cache invalidation that server-side configuration cannot address:
+Fixes two classes of cache invalidation that GrowthBook override cannot address:
   - Type 1: Tool ordering jitter (MCP tools register async → non-deterministic order)
   - Type 3: Missing TTL on ephemeral cache_control blocks
 
@@ -18,7 +18,7 @@ import os
 import re
 from typing import Any, Dict, List, Optional, Tuple
 
-logger = logging.getLogger("llm-relay")
+logger = logging.getLogger("cc-relay")
 
 # Sub-feature toggles (all default ON when LLM_RELAY_CACHE_FIX=1)
 _TTL_ENABLED = os.getenv("LLM_RELAY_CACHE_FIX_TTL", "1") == "1"
