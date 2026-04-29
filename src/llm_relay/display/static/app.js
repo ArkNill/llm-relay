@@ -153,11 +153,37 @@
       dupeLine = '<div class="' + dupeCls + '"' + tipAttr("dupes") + '>' + dupeText + '</div>';
     }
 
+    // Per-tool call breakdown
+    var toolLine = '';
+    var toolCalls = comp.tool_calls || {};
+    var toolNames = Object.keys(toolCalls);
+    if (toolNames.length > 0) {
+      var sorted = toolNames.sort(function (a, b) { return toolCalls[b] - toolCalls[a]; });
+      var topTools = sorted.slice(0, 5).map(function (n) { return n + ' ' + toolCalls[n] + 'x'; }).join(' \u00b7 ');
+      toolLine += '<div class="comp-tools has-tip" data-tip="Per-tool invocation count">' + topTools + '</div>';
+    }
+
+    // Exec stats (Codex/Gemini)
+    var execStats = comp.exec_stats;
+    if (execStats && execStats.total > 0) {
+      var rate = Math.round(execStats.success / execStats.total * 100);
+      var execCls = rate < 70 ? " comp-danger" : "";
+      var execText = 'Exec ' + execStats.success + '/' + execStats.total + ' (' + rate + '%)';
+      if (execStats.avg_duration_ms) execText += ' avg ' + execStats.avg_duration_ms + 'ms';
+      toolLine += '<div class="comp-exec' + execCls + '">' + execText + '</div>';
+    }
+
+    // Thinking count
+    var thinkCount = comp.thinking_count || 0;
+    if (thinkCount > 0) {
+      toolLine += '<span class="comp-think-count">' + thinkCount + ' think blocks</span>';
+    }
+
     var snrRecLine = comp.snr_recommendation
       ? '<div class="comp-snr-rec">' + comp.snr_recommendation + '</div>'
       : '';
 
-    return '<div class="comp-section">' + pie + '<div class="comp-detail">' + grid + dupeLine + snrRecLine + '</div></div>';
+    return '<div class="comp-section">' + pie + '<div class="comp-detail">' + grid + dupeLine + toolLine + snrRecLine + '</div></div>';
   }
 
   // Map zone → { label, cssClass } for badge rendering
