@@ -25,6 +25,32 @@ def _json_response(data: Any, status: int = 200) -> Response:
     )
 
 
+def _parse_int(request: Request, name: str, default: str) -> int:
+    """Parse integer query parameter, return 400 response on invalid input."""
+    raw = request.query_params.get(name, default)
+    try:
+        return int(raw)
+    except (ValueError, TypeError):
+        raise _ParamError(name, raw)
+
+
+def _parse_float(request: Request, name: str, default: str) -> float:
+    """Parse float query parameter, return 400 response on invalid input."""
+    raw = request.query_params.get(name, default)
+    try:
+        return float(raw)
+    except (ValueError, TypeError):
+        raise _ParamError(name, raw)
+
+
+class _ParamError(ValueError):
+    """Raised by _parse_int/_parse_float on invalid query parameters."""
+    def __init__(self, name: str, value: str):
+        self.name = name
+        self.value = value
+        super().__init__(f"Invalid parameter '{name}': '{value}'")
+
+
 # ── GET /api/v1/cli/status ──
 
 async def _api_cli_status(request: Request) -> Response:
@@ -53,12 +79,14 @@ async def _api_delegations(request: Request) -> Response:
     """Return recent delegation history."""
     from llm_relay.orch.db import get_delegation_history, get_orch_conn
 
-    limit = int(request.query_params.get("limit", "50"))
     try:
+        limit = _parse_int(request, "limit", "50")
         conn = get_orch_conn()
         history = get_delegation_history(conn, limit=limit)
         conn.close()
         return _json_response({"count": len(history), "delegations": history})
+    except _ParamError as pe:
+        return _json_response({"error": str(pe)}, status=400)
     except Exception as e:
         logger.error("Failed to get delegation history: %s", e)
         return _json_response({"error": str(e), "delegations": []}, status=500)
@@ -70,12 +98,14 @@ async def _api_delegation_stats(request: Request) -> Response:
     """Return aggregate delegation statistics."""
     from llm_relay.orch.db import get_delegation_stats, get_orch_conn
 
-    window = float(request.query_params.get("window", "24"))
     try:
+        window = _parse_float(request, "window", "24")
         conn = get_orch_conn()
         stats = get_delegation_stats(conn, window_hours=window)
         conn.close()
         return _json_response(stats)
+    except _ParamError as pe:
+        return _json_response({"error": str(pe)}, status=400)
     except Exception as e:
         logger.error("Failed to get delegation stats: %s", e)
         return _json_response({"error": str(e)}, status=500)
@@ -88,12 +118,14 @@ async def _api_sessions(request: Request) -> Response:
     try:
         from llm_relay.proxy.db import get_conn, get_session_summary
 
-        window = float(request.query_params.get("window", "8"))
+        window = _parse_float(request, "window", "8")
         conn = get_conn()
         summaries = get_session_summary(conn, window_hours=window)
         return _json_response({"count": len(summaries), "sessions": summaries})
     except ImportError:
         return _json_response({"error": "Proxy module not available", "sessions": []}, status=501)
+    except _ParamError as pe:
+        return _json_response({"error": str(pe)}, status=400)
     except Exception as e:
         logger.error("Failed to get sessions: %s", e)
         return _json_response({"error": str(e), "sessions": []}, status=500)
@@ -108,6 +140,13 @@ async def _api_sessions(request: Request) -> Response:
 # Overall zone = worst of A and B (max).
 
 _ZONE_ORDER = {"green": 0, "yellow": 1, "orange": 2, "red": 3, "hard": 4}
+
+# Cached at module load — avoids repeated os.getenv in hot path
+_CACHED_TOKEN_A_YELLOW = int(os.getenv("LLM_TOKEN_A_YELLOW", "300000"))
+_CACHED_TOKEN_A_ORANGE = int(os.getenv("LLM_TOKEN_A_ORANGE", "500000"))
+_CACHED_TOKEN_A_RED = int(os.getenv("LLM_TOKEN_A_RED", "750000"))
+_CACHED_TOKEN_A_HARD = int(os.getenv("LLM_TOKEN_A_HARD", "900000"))
+_CACHED_TOKEN_CEILING = int(os.getenv("LLM_TOKEN_CEILING", "1000000"))
 
 
 def _classify_zone(turns: int) -> tuple:
@@ -134,10 +173,10 @@ def _classify_zone_absolute(tokens: int) -> tuple:
     Env: LLM_TOKEN_A_YELLOW / _A_ORANGE / _A_RED / _A_HARD
     Returns (zone, zone_label, next_threshold, message).
     """
-    yellow = int(os.getenv("LLM_TOKEN_A_YELLOW", "300000"))
-    orange = int(os.getenv("LLM_TOKEN_A_ORANGE", "500000"))
-    red = int(os.getenv("LLM_TOKEN_A_RED", "750000"))
-    hard = int(os.getenv("LLM_TOKEN_A_HARD", "900000"))
+    yellow = _CACHED_TOKEN_A_YELLOW
+    orange = _CACHED_TOKEN_A_ORANGE
+    red = _CACHED_TOKEN_A_RED
+    hard = _CACHED_TOKEN_A_HARD
 
     if tokens >= hard:
         return "hard", "차단", None, f"{hard // 1000}K 초과. 즉시 세션 정리 필요."
@@ -157,7 +196,7 @@ def _classify_zone_ratio(tokens: int, ceiling: Optional[int] = None) -> tuple:
     Returns (zone, zone_label, next_threshold, message).
     """
     if ceiling is None:
-        ceiling = int(os.getenv("LLM_TOKEN_CEILING", "1000000"))
+        ceiling = _CACHED_TOKEN_CEILING
     if ceiling <= 0:
         return "green", "안전", 0, None
 
@@ -251,7 +290,7 @@ async def _api_turns(request: Request) -> Response:
             "recent_peak": data["recent_peak"],
             "cumul_unique": data["cumul_unique"],
             # Ceiling for ratio display on the client
-            "ceiling": int(os.getenv("LLM_TOKEN_CEILING", "1000000")),
+            "ceiling": _CACHED_TOKEN_CEILING,
             # Cache hit rate
             "cache_hit_rate": cache["cache_hit_rate"],
             # TTL tier
@@ -279,12 +318,12 @@ async def _api_turns_all(request: Request) -> Response:
         from llm_relay.api.display import check_cc_session_alive, collect_owned_cc_pids
         from llm_relay.proxy.db import get_all_session_terminals, get_all_turn_counts, get_conn
 
-        window = float(request.query_params.get("window", "4"))
+        window = _parse_float(request, "window", "4")
         include_dead = request.query_params.get("include_dead", "0") == "1"
         conn = get_conn()
         rows = get_all_turn_counts(conn, window_hours=window)
         terminals = get_all_session_terminals(conn)
-        ceiling = int(os.getenv("LLM_TOKEN_CEILING", "1000000"))
+        ceiling = _CACHED_TOKEN_CEILING
 
         owned_cc_pids = collect_owned_cc_pids(terminals)
         now_ts = time.time()
@@ -402,12 +441,12 @@ async def _api_display(request: Request) -> Response:
             get_ttl_tier,
         )
 
-        window = float(request.query_params.get("window", "4"))
+        window = _parse_float(request, "window", "4")
         include_dead = request.query_params.get("include_dead", "0") == "1"
         conn = get_conn()
         rows = get_all_turn_counts(conn, window_hours=window)
         terminals = get_all_session_terminals(conn)
-        ceiling = int(os.getenv("LLM_TOKEN_CEILING", "1000000"))
+        ceiling = _CACHED_TOKEN_CEILING
 
         owned_cc_pids = collect_owned_cc_pids(terminals)
         now_ts = time.time()
@@ -483,7 +522,7 @@ async def _api_cost(request: Request) -> Response:
     try:
         from llm_relay.proxy.db import get_conn
 
-        window = float(request.query_params.get("window", "24"))
+        window = _parse_float(request, "window", "24")
         import time
         cutoff = time.time() - (window * 3600)
         conn = get_conn()
@@ -510,6 +549,8 @@ async def _api_cost(request: Request) -> Response:
         })
     except ImportError:
         return _json_response({"error": "Proxy module not available"}, status=501)
+    except _ParamError as pe:
+        return _json_response({"error": str(pe)}, status=400)
     except Exception as e:
         logger.error("Failed to get cost data: %s", e)
         return _json_response({"error": str(e)}, status=500)
@@ -563,10 +604,10 @@ async def _api_history_sessions(request: Request) -> Response:
     try:
         from llm_relay.proxy.db import get_conn, get_history_sessions
 
-        window = float(request.query_params.get("window", "24"))
+        window = _parse_float(request, "window", "24")
         conn = get_conn()
         sessions = get_history_sessions(conn, window_hours=window)
-        ceiling = int(os.getenv("LLM_TOKEN_CEILING", "1000000"))
+        ceiling = _CACHED_TOKEN_CEILING
 
         for s in sessions:
             s["history_source"] = "proxy_db"
@@ -632,8 +673,8 @@ async def _api_history_detail(request: Request) -> Response:
         from llm_relay.proxy.db import get_conn, get_session_history
 
         session_id = request.path_params["session_id"]
-        turn_start = int(request.query_params.get("turn_start", "0"))
-        turn_end = int(request.query_params.get("turn_end", "-1"))
+        turn_start = _parse_int(request, "turn_start", "0")
+        turn_end = _parse_int(request, "turn_end", "-1")
         include_thinking = request.query_params.get("include_thinking", "0") == "1"
 
         conn = get_conn()
@@ -670,6 +711,8 @@ async def _api_history_detail(request: Request) -> Response:
         })
     except ImportError:
         return _json_response({"error": "Proxy module not available"}, status=501)
+    except _ParamError as pe:
+        return _json_response({"error": str(pe)}, status=400)
     except Exception as e:
         logger.error("Failed to get session history: %s", e)
         return _json_response({"error": str(e)}, status=500)
@@ -723,13 +766,15 @@ async def _api_errors(request: Request) -> Response:
     try:
         from llm_relay.proxy.db import get_conn, get_error_stats
 
-        window = float(request.query_params.get("window", "8"))
+        window = _parse_float(request, "window", "8")
         session_id = request.query_params.get("session_id")
         conn = get_conn()
         stats = get_error_stats(conn, session_id=session_id, window_hours=window)
         return _json_response({"window_hours": window, **stats})
     except ImportError:
         return _json_response({"error": "Proxy module not available"}, status=501)
+    except _ParamError as pe:
+        return _json_response({"error": str(pe)}, status=400)
     except Exception as e:
         logger.error("Failed to get error stats: %s", e)
         return _json_response({"error": str(e)}, status=500)
@@ -742,13 +787,15 @@ async def _api_cache(request: Request) -> Response:
     try:
         from llm_relay.proxy.db import get_conn, get_session_cache_stats
 
-        window = float(request.query_params.get("window", "8"))
+        window = _parse_float(request, "window", "8")
         session_id = request.query_params.get("session_id")
         conn = get_conn()
         stats = get_session_cache_stats(conn, session_id=session_id, window_hours=window)
         return _json_response({"window_hours": window, **stats})
     except ImportError:
         return _json_response({"error": "Proxy module not available"}, status=501)
+    except _ParamError as pe:
+        return _json_response({"error": str(pe)}, status=400)
     except Exception as e:
         logger.error("Failed to get cache stats: %s", e)
         return _json_response({"error": str(e)}, status=500)
