@@ -141,11 +141,13 @@ async def _api_sessions(request: Request) -> Response:
 
 _ZONE_ORDER = {"green": 0, "yellow": 1, "orange": 2, "red": 3, "hard": 4}
 
-# Cached at module load — avoids repeated os.getenv in hot path
-_CACHED_TOKEN_A_YELLOW = int(os.getenv("LLM_TOKEN_A_YELLOW", "300000"))
-_CACHED_TOKEN_A_ORANGE = int(os.getenv("LLM_TOKEN_A_ORANGE", "500000"))
-_CACHED_TOKEN_A_RED = int(os.getenv("LLM_TOKEN_A_RED", "750000"))
-_CACHED_TOKEN_A_HARD = int(os.getenv("LLM_TOKEN_A_HARD", "900000"))
+# Cached at module load — avoids repeated os.getenv in hot path.
+# Zone A defaults aligned with Zone B ratios of the 1M ceiling:
+#   Yellow 500K (50%) / Orange 700K (70%) / Red 900K (90%) / Hard 1M (100%).
+_CACHED_TOKEN_A_YELLOW = int(os.getenv("LLM_TOKEN_A_YELLOW", "500000"))
+_CACHED_TOKEN_A_ORANGE = int(os.getenv("LLM_TOKEN_A_ORANGE", "700000"))
+_CACHED_TOKEN_A_RED = int(os.getenv("LLM_TOKEN_A_RED", "900000"))
+_CACHED_TOKEN_A_HARD = int(os.getenv("LLM_TOKEN_A_HARD", "1000000"))
 _CACHED_TOKEN_CEILING = int(os.getenv("LLM_TOKEN_CEILING", "1000000"))
 
 
@@ -204,15 +206,16 @@ def _classify_zone_ratio(tokens: int, ceiling: Optional[int] = None) -> tuple:
     orange_t = int(ceiling * 0.70)
     red_t = int(ceiling * 0.90)
     ratio = tokens / ceiling if ceiling else 0.0
+    pct = int(ratio * 100)
 
     if ratio >= 1.0:
-        return "hard", "차단", None, f"100% ({ceiling // 1000}K) 천장 도달. 즉시 세션 정리."
+        return "hard", "차단", None, f"{pct}% ({tokens // 1000}K/{ceiling // 1000}K) 천장 도달. 즉시 세션 정리."
     if ratio >= 0.90:
-        return "red", "위험", ceiling, f"90% ({red_t // 1000}K) 도달. 로테이션 필수."
+        return "red", "위험", ceiling, f"{pct}% ({tokens // 1000}K/{ceiling // 1000}K) 도달. 로테이션 필수."
     if ratio >= 0.70:
-        return "orange", "경고", red_t, f"70% ({orange_t // 1000}K) 도달. 마무리 후 rotate."
+        return "orange", "경고", red_t, f"{pct}% ({tokens // 1000}K/{ceiling // 1000}K) 도달. 마무리 후 rotate."
     if ratio >= 0.50:
-        return "yellow", "주의", orange_t, f"50% ({yellow_t // 1000}K) 도달. rotate 준비."
+        return "yellow", "주의", orange_t, f"{pct}% ({tokens // 1000}K/{ceiling // 1000}K) 도달. rotate 준비."
     return "green", "안전", yellow_t, None
 
 
@@ -291,6 +294,10 @@ async def _api_turns(request: Request) -> Response:
             "cumul_unique": data["cumul_unique"],
             # Ceiling for ratio display on the client
             "ceiling": _CACHED_TOKEN_CEILING,
+            # Model metadata (consistent with Codex/Gemini)
+            "model_window": 0,
+            "official_context_window": 0,
+            "official_max_output": 0,
             # Cache hit rate
             "cache_hit_rate": cache["cache_hit_rate"],
             # TTL tier
@@ -479,6 +486,10 @@ async def _api_display(request: Request) -> Response:
                 "recent_peak": r["recent_peak"],
                 "cumul_unique": r["cumul_unique"],
                 "ceiling": ceiling,
+                # Model metadata (consistent with Codex/Gemini)
+                "model_window": 0,
+                "official_context_window": 0,
+                "official_max_output": 0,
                 # Cache hit rate + TTL tier
                 "cache_hit_rate": cache["cache_hit_rate"],
                 "ttl_tier": ttl["tier"],

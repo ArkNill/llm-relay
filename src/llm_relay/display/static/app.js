@@ -269,11 +269,9 @@
       var cumul = s.cumul_unique || 0;
       var modelWindow = s.model_window || 0;
       var officialCtx = s.official_context_window || 0;
-      var isCodex = s.provider === "openai-codex";
       var usagePct = Math.min(100, (cumul / ceiling) * 100);
-      var windowBase = modelWindow || officialCtx || ceiling;
-      var curPct = Math.min(100, (currentCtx / windowBase) * 100);
-      var peakPct = Math.min(100, (peakCtx / windowBase) * 100);
+      var curPct = Math.min(100, (currentCtx / ceiling) * 100);
+      var peakPct = Math.min(100, (peakCtx / ceiling) * 100);
 
       var promptText = s.last_prompt || "";
       var promptClass = promptText ? "prompt-block" : "prompt-block empty";
@@ -300,90 +298,62 @@
       }
 
       var ceilingLabel = formatTokens(ceiling);
-      var windowLabel = formatTokens(windowBase);
+      var nextThreshold = s.zone_a_next || s.zone_b_next || 0;
+      var estTokens = (s.composition && s.composition.est_tokens) ? s.composition.est_tokens : 0;
 
       var zoneClass = s.zone || "green";
       var pBadge = providerBadge(s.provider);
       var metricsHtml = "";
 
-      if (isCodex) {
-        metricsHtml =
-          '<div class="metric-row">' +
-            '<span class="metric-label">Current</span>' +
-            '<span class="metric-value">' + formatTokens(currentCtx) + '</span>' +
-            '<span class="metric-ceiling">/ ' + ceilingLabel + '</span>' +
-            '<span class="zone-badges">' +
-              zoneBadge(s.zone_a, "A:") +
-              zoneBadge(s.zone_b, "B:") +
-            '</span>' +
-          '</div>' +
-          '<div class="bar"><div class="bar-fill" style="width:' + Math.min(100, (currentCtx / ceiling) * 100) + '%"></div></div>' +
+      metricsHtml =
+        '<div class="metric-row">' +
+          '<span class="metric-label">Current</span>' +
+          '<span class="metric-value">' + formatTokens(currentCtx) + '</span>' +
+          '<span class="metric-ceiling">/ ' + ceilingLabel + '</span>' +
+          '<span class="zone-badges">' +
+            zoneBadge(s.zone_a, "A:") +
+            zoneBadge(s.zone_b, "B:") +
+          '</span>' +
+        '</div>' +
+        '<div class="bar"><div class="bar-fill" style="width:' + Math.min(100, (currentCtx / ceiling) * 100) + '%"></div></div>' +
 
-          '<div class="metric-row metric-row-sub">' +
-            '<span class="metric-label">Peak</span>' +
-            '<span class="metric-value">' + formatTokens(peakCtx) + '</span>' +
-            '<span class="metric-ceiling">/ ' + ceilingLabel + '</span>' +
-            '<span class="zone-badges">' +
-              zoneBadge(s.zone_a_peak, "A:") +
-              zoneBadge(s.zone_b_peak, "B:") +
-            '</span>' +
-          '</div>' +
-          '<div class="bar bar-peak"><div class="bar-fill" style="width:' + Math.min(100, (peakCtx / ceiling) * 100) + '%"></div></div>' +
+        '<div class="metric-row metric-row-sub">' +
+          '<span class="metric-label">Peak</span>' +
+          '<span class="metric-value">' + formatTokens(peakCtx) + '</span>' +
+          '<span class="metric-ceiling">/ ' + ceilingLabel + '</span>' +
+          '<span class="zone-badges">' +
+            zoneBadge(s.zone_a_peak, "A:") +
+            zoneBadge(s.zone_b_peak, "B:") +
+          '</span>' +
+        '</div>' +
+        '<div class="bar bar-peak"><div class="bar-fill" style="width:' + Math.min(100, (peakCtx / ceiling) * 100) + '%"></div></div>' +
 
-          '<div class="metric-small">' +
-            '<span>Recent5 ' + formatTokens(recentPeak) + '</span>' +
-            '<span>Cumul ' + formatTokens(cumul) + '</span>' +
-            (officialCtx ? '<span>Official ' + formatTokens(officialCtx) + '</span>' : '') +
-            (modelWindow ? '<span>Window ' + formatTokens(modelWindow) + '</span>' : '') +
-          '</div>';
-      } else {
-        metricsHtml =
-          '<div class="metric-row">' +
-            '<span class="metric-label">Current</span>' +
-            '<span class="metric-value">' + formatTokens(currentCtx) + '</span>' +
-            '<span class="metric-ceiling">/ ' + ceilingLabel + '</span>' +
-            '<span class="zone-badges">' +
-              zoneBadge(s.zone_a, "A:") +
-              zoneBadge(s.zone_b, "B:") +
-            '</span>' +
-          '</div>' +
-          '<div class="bar"><div class="bar-fill" style="width:' + Math.min(100, (currentCtx / ceiling) * 100) + '%"></div></div>' +
+        '<div class="metric-small">' +
+          '<span><span class="ml">Recent5</span> ' + formatTokens(recentPeak) + '</span>' +
+          '<span><span class="ml">Cumul</span> ' + formatTokens(cumul) + '</span>' +
+          (modelWindow ? '<span><span class="ml">Effective</span> ' + formatTokens(modelWindow) + '</span>' : '') +
+          (nextThreshold ? '<span><span class="ml">Next</span> ' + formatTokens(nextThreshold) + '</span>' : '') +
+          (estTokens ? '<span><span class="ml">Est</span> ' + formatTokens(estTokens) + '</span>' : '') +
+        '</div>';
 
-          '<div class="metric-row metric-row-sub">' +
-            '<span class="metric-label">Peak</span>' +
-            '<span class="metric-value">' + formatTokens(peakCtx) + '</span>' +
-            '<span class="metric-ceiling">/ ' + ceilingLabel + '</span>' +
-            '<span class="zone-badges">' +
-              zoneBadge(s.zone_a_peak, "A:") +
-              zoneBadge(s.zone_b_peak, "B:") +
-            '</span>' +
-          '</div>' +
-          '<div class="bar bar-peak"><div class="bar-fill" style="width:' + Math.min(100, (peakCtx / ceiling) * 100) + '%"></div></div>' +
-
-          '<div class="metric-small">' +
-            '<span>Recent5 ' + formatTokens(recentPeak) + '</span>' +
-            '<span>Cumul ' + formatTokens(cumul) + '</span>' +
-            (officialCtx ? '<span>Official ' + formatTokens(officialCtx) + '</span>' : '') +
-            (modelWindow ? '<span>Window ' + formatTokens(modelWindow) + '</span>' : '') +
-          '</div>';
-      }
-
-      // Cache hit rate + TTL tier badges (appended to metrics)
+      // Cache hit rate + TTL tier badges (always shown, N/A as placeholder)
       var cacheRate = s.cache_hit_rate;
       var ttlTier = s.ttl_tier;
-      if (cacheRate !== undefined || (ttlTier && ttlTier !== "unknown")) {
-        var cacheBadges = '<div class="metric-badges">';
-        if (cacheRate !== undefined) {
-          var cacheCls = cacheRate < 50 ? "badge-danger" : (cacheRate < 80 ? "badge-warn" : "badge-ok");
-          cacheBadges += '<span class="metric-badge ' + cacheCls + '" title="Cache hit rate">Cache ' + cacheRate + '%</span>';
-        }
-        if (ttlTier && ttlTier !== "unknown") {
-          var ttlCls = ttlTier === "1h" ? "badge-ok" : (ttlTier === "5m" ? "badge-warn" : "badge-info");
-          cacheBadges += '<span class="metric-badge ' + ttlCls + '" title="Cache TTL tier">TTL ' + ttlTier + '</span>';
-        }
-        cacheBadges += '</div>';
-        metricsHtml += cacheBadges;
+      var cacheBadges = '<div class="metric-badges">';
+      if (cacheRate !== undefined && cacheRate !== null) {
+        var cacheCls = cacheRate < 50 ? "badge-danger" : (cacheRate < 80 ? "badge-warn" : "badge-ok");
+        cacheBadges += '<span class="metric-badge ' + cacheCls + '" title="Cache hit rate">Cache ' + cacheRate + '%</span>';
+      } else {
+        cacheBadges += '<span class="metric-badge badge-muted" title="Cache hit rate">Cache —</span>';
       }
+      if (ttlTier && ttlTier !== "unknown") {
+        var ttlCls = ttlTier === "1h" ? "badge-ok" : (ttlTier === "5m" ? "badge-warn" : "badge-info");
+        cacheBadges += '<span class="metric-badge ' + ttlCls + '" title="Cache TTL tier">TTL ' + ttlTier + '</span>';
+      } else {
+        cacheBadges += '<span class="metric-badge badge-muted" title="Cache TTL tier">TTL —</span>';
+      }
+      cacheBadges += '</div>';
+      metricsHtml += cacheBadges;
 
       var compHtml = compositionHtml(s.composition);
 
@@ -402,7 +372,9 @@
         compHtml +
         '<div class="meta">' +
           '<span>' + formatDuration(duration) + ' elapsed</span>' +
+          '<span class="abs-time">start: ' + formatLastTs(s.first_ts) + '</span>' +
           '<span class="abs-time">last: ' + formatLastTs(s.last_ts) + '</span>' +
+          (s.last_prompt_ts ? '<span class="abs-time">prompt: ' + formatAbsTime(s.last_prompt_ts) + '</span>' : '') +
         '</div>' +
         warn +
       '</div>';

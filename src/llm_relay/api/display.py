@@ -59,36 +59,57 @@ _WRAPPER_PREFIXES = (
 
 
 def _codex_display_ceiling() -> int:
-    """Operator-facing cumulative ceiling for Codex session cards."""
-    return int(os.getenv("CODEX_TOKEN_DISPLAY_CEILING", os.getenv("CODEX_TOKEN_CEILING", "684000")))
+    """Operator-facing ceiling for Codex session cards.
+
+    Defaults to the official model context window (400K) so the progress bar
+    reflects real model capacity, not an arbitrary Zone-A threshold.
+    """
+    return int(os.getenv(
+        "CODEX_TOKEN_DISPLAY_CEILING",
+        str(_OPENAI_CODEX_OFFICIAL_CONTEXT_WINDOW),
+    ))
 
 
-def _codex_zone_ceiling(model_window: int) -> int:
-    """Runtime ceiling used for ratio-based Codex cumulative guard."""
-    fallback = model_window or 760000
-    return int(os.getenv("CODEX_TOKEN_ZONE_CEILING", str(fallback)))
+def _codex_zone_ceiling() -> int:
+    """Runtime ceiling for ratio-based Codex zone-B classification.
+
+    Uses the official model context window (400K) so zone-B percentages
+    align with zone-A absolute thresholds and the display progress bar.
+    """
+    return int(os.getenv(
+        "CODEX_TOKEN_ZONE_CEILING",
+        str(_OPENAI_CODEX_OFFICIAL_CONTEXT_WINDOW),
+    ))
 
 
 def _codex_classify_absolute(tokens: int) -> tuple[str, str, Optional[int], Optional[str]]:
-    """Classify Codex live context against fixed operator thresholds."""
-    yellow = int(os.getenv("CODEX_TOKEN_A_YELLOW", "272000"))
-    orange = int(os.getenv("CODEX_TOKEN_A_ORANGE", "418000"))
-    red = int(os.getenv("CODEX_TOKEN_A_RED", "684000"))
-    hard = int(os.getenv("CODEX_TOKEN_A_HARD", "760000"))
+    """Classify Codex live context against absolute operator thresholds.
+
+    Defaults calibrated to the official 400K context window:
+      Yellow 200K (50%) / Orange 280K (70%) / Red 360K (90%) / Hard 400K (100%).
+    """
+    yellow = int(os.getenv("CODEX_TOKEN_A_YELLOW", "200000"))
+    orange = int(os.getenv("CODEX_TOKEN_A_ORANGE", "280000"))
+    red = int(os.getenv("CODEX_TOKEN_A_RED", "360000"))
+    hard = int(os.getenv("CODEX_TOKEN_A_HARD", "400000"))
 
     if tokens >= hard:
-        return "hard", "차단", None, f"{hard // 1000}K current 초과. 즉시 세션 정리 필요."
+        return "hard", "차단", None, f"{hard // 1000}K 도달. 즉시 세션 정리 필요."
     if tokens >= red:
-        return "red", "위험", hard, f"{red // 1000}K current 도달. 세션 로테이션 필수."
+        return "red", "위험", hard, f"{red // 1000}K 도달. 세션 로테이션 필수."
     if tokens >= orange:
-        return "orange", "경고", red, f"{orange // 1000}K current 도달. 현재 작업 마무리 후 rotate."
+        return "orange", "경고", red, f"{orange // 1000}K 도달. 마무리 후 rotate."
     if tokens >= yellow:
-        return "yellow", "주의", orange, f"{yellow // 1000}K current 도달. 문서 업데이트 + rotate 준비."
+        return "yellow", "주의", orange, f"{yellow // 1000}K 도달. rotate 준비."
     return "green", "안전", yellow, None
 
 
 def _codex_classify_ratio(tokens: int, ceiling: int) -> tuple[str, str, Optional[int], Optional[str]]:
-    """Classify Codex live context as a ratio of the runtime ceiling."""
+    """Classify Codex live context as a ratio of the runtime ceiling.
+
+    Messages now show the *actual* ratio and token count so the operator
+    sees real numbers instead of the fixed threshold label.
+    """
     if ceiling <= 0:
         return "green", "안전", 0, None
 
@@ -96,21 +117,22 @@ def _codex_classify_ratio(tokens: int, ceiling: int) -> tuple[str, str, Optional
     orange_t = int(ceiling * 0.70)
     red_t = int(ceiling * 0.90)
     ratio = tokens / ceiling if ceiling else 0.0
+    pct = int(ratio * 100)
 
     if ratio >= 1.0:
-        return "hard", "차단", None, f"100% ({ceiling // 1000}K) 런타임 천장 도달. 즉시 세션 정리."
+        return "hard", "차단", None, f"{pct}% ({tokens // 1000}K/{ceiling // 1000}K) 천장 도달. 즉시 세션 정리."
     if ratio >= 0.90:
-        return "red", "위험", ceiling, f"90% ({red_t // 1000}K) 도달. 로테이션 필수."
+        return "red", "위험", ceiling, f"{pct}% ({tokens // 1000}K/{ceiling // 1000}K) 도달. 로테이션 필수."
     if ratio >= 0.70:
-        return "orange", "경고", red_t, f"70% ({orange_t // 1000}K) 도달. 마무리 후 rotate."
+        return "orange", "경고", red_t, f"{pct}% ({tokens // 1000}K/{ceiling // 1000}K) 도달. 마무리 후 rotate."
     if ratio >= 0.50:
-        return "yellow", "주의", orange_t, f"50% ({yellow_t // 1000}K) 도달. rotate 준비."
+        return "yellow", "주의", orange_t, f"{pct}% ({tokens // 1000}K/{ceiling // 1000}K) 도달. rotate 준비."
     return "green", "안전", yellow_t, None
 
 
-def _codex_compute_zone_bundle(current_ctx: int, peak_ctx: int, model_window: int) -> dict:
+def _codex_compute_zone_bundle(current_ctx: int, peak_ctx: int) -> dict:
     """Compute Codex-only live-context zones without affecting Claude/Gemini paths."""
-    zone_ceiling = _codex_zone_ceiling(model_window)
+    zone_ceiling = _codex_zone_ceiling()
     zone_a = _codex_classify_absolute(current_ctx)
     zone_b = _codex_classify_ratio(current_ctx, zone_ceiling)
     zone_a_peak = _codex_classify_absolute(peak_ctx)
@@ -801,6 +823,7 @@ def _parse_gemini_session_raw(path: Path) -> dict:
     current_ctx = 0
     peak_ctx = 0
     cumul_total = 0
+    recent_contexts = []  # type: list[int]
 
     def _process_msg(msg: dict) -> None:
         nonlocal user_turns, first_ts, last_ts, last_user_text, last_user_ts
@@ -828,6 +851,7 @@ def _parse_gemini_session_raw(path: Path) -> dict:
                 total_input_tokens += int(inp)
                 current_ctx = int(inp)
                 peak_ctx = max(peak_ctx, current_ctx)
+                recent_contexts.append(current_ctx)
             if isinstance(cached, (int, float)) and cached > 0:
                 total_cached_tokens += int(cached)
             if isinstance(total, (int, float)) and total > 0:
@@ -914,7 +938,7 @@ def _parse_gemini_session_raw(path: Path) -> dict:
         "last_user_ts": last_user_ts,
         "current_ctx": current_ctx,
         "peak_ctx": peak_ctx,
-        "recent_peak": peak_ctx,
+        "recent_peak": max(recent_contexts[-5:], default=0),
         "cumul_unique": cumul_total,
         "model_window": 0,
         "cache_hit_rate": cache_hit_rate,
@@ -1037,7 +1061,7 @@ def discover_external_cli_sessions(
 
             if provider.provider_id == "openai-codex":
                 display_ceiling = _codex_display_ceiling()
-                zones = _codex_compute_zone_bundle(current_ctx, peak_ctx, model_window)
+                zones = _codex_compute_zone_bundle(current_ctx, peak_ctx)
                 official_context_window = _OPENAI_CODEX_OFFICIAL_CONTEXT_WINDOW
                 official_max_output = _OPENAI_CODEX_OFFICIAL_MAX_OUTPUT
             else:
