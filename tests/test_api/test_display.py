@@ -224,7 +224,8 @@ class TestParseCodexSessionRaw:
         assert result["current_ctx"] == 2500
         assert result["peak_ctx"] == 2500
         assert result["recent_peak"] == 2500
-        assert result["cumul_unique"] == 4650
+        # cumul = sum of per-request (input + output) from last_token_usage
+        assert result["cumul_unique"] == (1000 + 50) + (2500 + 100)
         assert result["model_window"] == 258400
 
 
@@ -547,7 +548,8 @@ class TestDiscoverExternalAliveFilter:
         assert len(results) == 1
         assert results[0]["ceiling"] == 684000
         assert results[0]["current_ctx"] == 80000
-        assert results[0]["cumul_unique"] == 705000
+        # cumul from last_token_usage (input + output per request)
+        assert results[0]["cumul_unique"] == 80000 + 120
         assert results[0]["zone"] == "green"
         assert results[0]["zone_a"] == "green"
         assert results[0]["zone_b"] == "green"
