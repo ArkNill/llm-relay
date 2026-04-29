@@ -225,8 +225,7 @@
             + '<span>Peak <strong>' + fmtTokens(s.peak_ctx) + '</strong></span>'
             + '<span>Recent5 <strong>' + fmtTokens(s.recent_peak) + '</strong></span>'
             + '<span>Cumul <strong>' + fmtTokens(s.cumul_unique) + '</strong></span>'
-            + (s.official_context_window ? '<span>Official <strong>' + fmtTokens(s.official_context_window) + '</strong></span>' : '')
-            + (s.model_window ? '<span>Window <strong>' + fmtTokens(s.model_window) + '</strong></span>' : '')
+            + (s.model_window ? '<span>Effective <strong>' + fmtTokens(s.model_window) + '</strong></span>' : '')
             + '</div>';
         }
         var sourceBadge = s.history_source === "session_file"
