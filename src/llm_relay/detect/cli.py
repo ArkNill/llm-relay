@@ -9,7 +9,6 @@ import click
 
 from llm_relay.detect import __version__
 from llm_relay.detect.analyzer import analyze_all
-from llm_relay.detect.scanner import load_growthbook_config
 from llm_relay.formatters.json_fmt import JsonFormatter
 from llm_relay.providers import CLAUDE_CODE, detect_providers, get_provider, list_provider_ids
 
@@ -127,11 +126,8 @@ def scan(
     # Parse sessions
     parsed_sessions = [prov.parse_session(sf.path) for prov, sf in all_session_files]
 
-    # Load GrowthBook config (only relevant for Claude Code)
-    growthbook = load_growthbook_config() if any(p.provider_id == CLAUDE_CODE for p in providers) else None
-
     # Analyze
-    report = analyze_all(parsed_sessions, growthbook=growthbook, total_sessions=total)
+    report = analyze_all(parsed_sessions, total_sessions=total)
 
     # Format output
     if json_output:
