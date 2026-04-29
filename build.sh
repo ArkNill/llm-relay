@@ -3,7 +3,7 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-TOKPRESS_DIR="${TOKPRESS_DIR:-../tokpress}"
+TOKPRESS_DIR="${TOKPRESS_DIR:-$HOME/GitHub/tokpress}"
 
 echo "Vendoring tokpress from $TOKPRESS_DIR ..."
 rm -rf "$SCRIPT_DIR/vendor/tokpress"
