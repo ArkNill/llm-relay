@@ -14,10 +14,6 @@ from starlette.routing import Route
 
 logger = logging.getLogger(__name__)
 
-# Docker environment detection — liveness filtering is impossible inside a container
-# because /proc shows container processes, not host processes.
-_IN_DOCKER = os.path.exists("/.dockerenv") or os.getenv("CC_IN_DOCKER", "") == "1"
-
 
 def _json_response(data: Any, status: int = 200) -> Response:
     return Response(
@@ -105,8 +101,8 @@ async def _api_sessions(request: Request) -> Response:
 
 # Turn count is display-only and no longer drives zone judgment.
 # Zones are computed from current_ctx (token-based) via two independent scales:
-#   A) absolute thresholds  -- env CC_TOKEN_A_YELLOW/ORANGE/RED/HARD
-#   B) ratio-of-ceiling     -- env CC_TOKEN_CEILING (50/70/90/100 %)
+#   A) absolute thresholds  -- env LLM_TOKEN_A_YELLOW/ORANGE/RED/HARD
+#   B) ratio-of-ceiling     -- env LLM_TOKEN_CEILING (50/70/90/100 %)
 # Overall zone = worst of A and B (max).
 
 _ZONE_ORDER = {"green": 0, "yellow": 1, "orange": 2, "red": 3, "hard": 4}
@@ -117,57 +113,51 @@ def _classify_zone(turns: int) -> tuple:
 
     Not used by any endpoint anymore. Turn counts are display-only now.
     """
-    from llm_relay.i18n import t
-
     yellow = int(os.getenv("CC_TURN_YELLOW", "200"))
     orange = int(os.getenv("CC_TURN_ORANGE", "250"))
     red = int(os.getenv("CC_TURN_RED", "300"))
 
     if turns >= red:
-        return "red", t("zone.danger"), None, t("zone.turn.red", n=red)
+        return "red", "위험", None, f"{red}턴 초과. 품질 저하 가능성이 높습니다. 새 세션으로 전환하세요."
     if turns >= orange:
-        return "orange", t("zone.warning"), red, t("zone.turn.orange", n=orange)
+        return "orange", "경고", red, f"{orange}턴 도달. 품질 저하 구간 진입 임박. 로테이션을 권장합니다."
     if turns >= yellow:
-        return "yellow", t("zone.caution"), orange, t("zone.turn.yellow", n=yellow)
-    return "green", t("zone.safe"), yellow, None
+        return "yellow", "주의", orange, f"{yellow}턴 도달. 새 세션 준비를 권장합니다."
+    return "green", "안전", yellow, None
 
 
 def _classify_zone_absolute(tokens: int) -> tuple:
     """Zone A -- absolute token threshold classification.
 
-    Env: CC_TOKEN_A_YELLOW / _A_ORANGE / _A_RED / _A_HARD
+    Env: LLM_TOKEN_A_YELLOW / _A_ORANGE / _A_RED / _A_HARD
     Returns (zone, zone_label, next_threshold, message).
     """
-    from llm_relay.i18n import t
-
-    yellow = int(os.getenv("CC_TOKEN_A_YELLOW", "300000"))
-    orange = int(os.getenv("CC_TOKEN_A_ORANGE", "500000"))
-    red = int(os.getenv("CC_TOKEN_A_RED", "750000"))
-    hard = int(os.getenv("CC_TOKEN_A_HARD", "900000"))
+    yellow = int(os.getenv("LLM_TOKEN_A_YELLOW", "300000"))
+    orange = int(os.getenv("LLM_TOKEN_A_ORANGE", "500000"))
+    red = int(os.getenv("LLM_TOKEN_A_RED", "750000"))
+    hard = int(os.getenv("LLM_TOKEN_A_HARD", "900000"))
 
     if tokens >= hard:
-        return "hard", t("zone.blocked"), None, t("zone.abs.hard", n=hard // 1000)
+        return "hard", "차단", None, f"{hard // 1000}K 초과. 즉시 세션 정리 필요."
     if tokens >= red:
-        return "red", t("zone.danger"), hard, t("zone.abs.red", n=red // 1000)
+        return "red", "위험", hard, f"{red // 1000}K 도달. 세션 로테이션 필수."
     if tokens >= orange:
-        return "orange", t("zone.warning"), red, t("zone.abs.orange", n=orange // 1000)
+        return "orange", "경고", red, f"{orange // 1000}K 도달. 현재 작업 마무리 후 rotate."
     if tokens >= yellow:
-        return "yellow", t("zone.caution"), orange, t("zone.abs.yellow", n=yellow // 1000)
-    return "green", t("zone.safe"), yellow, None
+        return "yellow", "주의", orange, f"{yellow // 1000}K 도달. 문서 업데이트 + rotate 준비."
+    return "green", "안전", yellow, None
 
 
 def _classify_zone_ratio(tokens: int, ceiling: Optional[int] = None) -> tuple:
     """Zone B -- ratio-of-ceiling classification (50/70/90/100%).
 
-    Env: CC_TOKEN_CEILING (default 1,000,000 for local / 500,000 recommended for public)
+    Env: LLM_TOKEN_CEILING (default 1M for local / 500K recommended for public)
     Returns (zone, zone_label, next_threshold, message).
     """
-    from llm_relay.i18n import t
-
     if ceiling is None:
-        ceiling = int(os.getenv("CC_TOKEN_CEILING", "1000000"))
+        ceiling = int(os.getenv("LLM_TOKEN_CEILING", "1000000"))
     if ceiling <= 0:
-        return "green", t("zone.safe"), 0, None
+        return "green", "안전", 0, None
 
     yellow_t = int(ceiling * 0.50)
     orange_t = int(ceiling * 0.70)
@@ -175,23 +165,14 @@ def _classify_zone_ratio(tokens: int, ceiling: Optional[int] = None) -> tuple:
     ratio = tokens / ceiling if ceiling else 0.0
 
     if ratio >= 1.0:
-        return "hard", t("zone.blocked"), None, t("zone.ratio.hard", n=ceiling // 1000)
+        return "hard", "차단", None, f"100% ({ceiling // 1000}K) 천장 도달. 즉시 세션 정리."
     if ratio >= 0.90:
-        return "red", t("zone.danger"), ceiling, t("zone.ratio.red", n=red_t // 1000)
+        return "red", "위험", ceiling, f"90% ({red_t // 1000}K) 도달. 로테이션 필수."
     if ratio >= 0.70:
-        return "orange", t("zone.warning"), red_t, t("zone.ratio.orange", n=orange_t // 1000)
+        return "orange", "경고", red_t, f"70% ({orange_t // 1000}K) 도달. 마무리 후 rotate."
     if ratio >= 0.50:
-        return "yellow", t("zone.caution"), orange_t, t("zone.ratio.yellow", n=yellow_t // 1000)
-    return "green", t("zone.safe"), yellow_t, None
-
-
-async def _api_i18n(request: Request) -> Response:
-    """Return i18n message dict for the requested locale."""
-    from llm_relay.i18n import MESSAGES, get_lang
-
-    lang = request.query_params.get("lang", get_lang())
-    msgs = MESSAGES.get(lang, MESSAGES["en"])
-    return _json_response({"lang": lang, "messages": msgs})
+        return "yellow", "주의", orange_t, f"50% ({yellow_t // 1000}K) 도달. rotate 준비."
+    return "green", "안전", yellow_t, None
 
 
 def _overall_zone(zone_a: str, zone_b: str) -> str:
@@ -201,15 +182,15 @@ def _overall_zone(zone_a: str, zone_b: str) -> str:
     return zone_b
 
 
-def _compute_zone_bundle(current_ctx: int, peak_ctx: int) -> dict:
+def _compute_zone_bundle(current_ctx: int, peak_ctx: int, ceiling: Optional[int] = None) -> dict:
     """Compute Zone A/B on current_ctx (primary) + A/B on peak_ctx (reference).
 
     Returns a flat dict ready to be merged into the session response.
     """
     za_cur = _classify_zone_absolute(current_ctx)
-    zb_cur = _classify_zone_ratio(current_ctx)
+    zb_cur = _classify_zone_ratio(current_ctx, ceiling=ceiling)
     za_peak = _classify_zone_absolute(peak_ctx)
-    zb_peak = _classify_zone_ratio(peak_ctx)
+    zb_peak = _classify_zone_ratio(peak_ctx, ceiling=ceiling)
     overall = _overall_zone(za_cur[0], zb_cur[0])
 
     # Pick message from the worst-of-A/B on current_ctx
@@ -268,9 +249,10 @@ async def _api_turns(request: Request) -> Response:
             "recent_peak": data["recent_peak"],
             "cumul_unique": data["cumul_unique"],
             # Ceiling for ratio display on the client
-            "ceiling": int(os.getenv("CC_TOKEN_CEILING", "1000000")),
-            # Cache hit rate + TTL tier
+            "ceiling": int(os.getenv("LLM_TOKEN_CEILING", "1000000")),
+            # Cache hit rate
             "cache_hit_rate": cache["cache_hit_rate"],
+            # TTL tier
             "ttl_tier": ttl["tier"],
             # Zone bundle (zone, zone_a*, zone_b*, zone_{a,b}_peak, legacy message/next_threshold)
             **zones,
@@ -296,11 +278,11 @@ async def _api_turns_all(request: Request) -> Response:
         from llm_relay.proxy.db import get_all_session_terminals, get_all_turn_counts, get_conn
 
         window = float(request.query_params.get("window", "4"))
-        include_dead = request.query_params.get("include_dead", "0") == "1" or _IN_DOCKER
+        include_dead = request.query_params.get("include_dead", "0") == "1"
         conn = get_conn()
         rows = get_all_turn_counts(conn, window_hours=window)
         terminals = get_all_session_terminals(conn)
-        ceiling = int(os.getenv("CC_TOKEN_CEILING", "1000000"))
+        ceiling = int(os.getenv("LLM_TOKEN_CEILING", "1000000"))
 
         owned_cc_pids = collect_owned_cc_pids(terminals)
         now_ts = time.time()
@@ -308,7 +290,7 @@ async def _api_turns_all(request: Request) -> Response:
         sessions = []
         for r in rows:
             term = terminals.get(r["session_id"]) or {}
-            alive = _IN_DOCKER or check_cc_session_alive(term, r["last_ts"], owned_cc_pids, now_ts)
+            alive = check_cc_session_alive(term, r["last_ts"], owned_cc_pids, now_ts)
             if not alive and not include_dead:
                 continue
             duration_s = 0.0
@@ -417,11 +399,11 @@ async def _api_display(request: Request) -> Response:
         )
 
         window = float(request.query_params.get("window", "4"))
-        include_dead = request.query_params.get("include_dead", "0") == "1" or _IN_DOCKER
+        include_dead = request.query_params.get("include_dead", "0") == "1"
         conn = get_conn()
         rows = get_all_turn_counts(conn, window_hours=window)
         terminals = get_all_session_terminals(conn)
-        ceiling = int(os.getenv("CC_TOKEN_CEILING", "1000000"))
+        ceiling = int(os.getenv("LLM_TOKEN_CEILING", "1000000"))
 
         owned_cc_pids = collect_owned_cc_pids(terminals)
         now_ts = time.time()
@@ -429,7 +411,7 @@ async def _api_display(request: Request) -> Response:
         sessions = []
         for r in rows:
             term = terminals.get(r["session_id"]) or {}
-            alive = _IN_DOCKER or check_cc_session_alive(term, r["last_ts"], owned_cc_pids, now_ts)
+            alive = check_cc_session_alive(term, r["last_ts"], owned_cc_pids, now_ts)
             if not alive and not include_dead:
                 continue
 
@@ -466,9 +448,11 @@ async def _api_display(request: Request) -> Response:
                 "cc_pid": term.get("cc_pid"),
                 "term_pid": term.get("term_pid"),
                 "term_name": term.get("term_name"),
-                "connection_type": detect_connection_type(term.get("cc_pid") or 0),
-                "composition": _get_composition_safe(conn, r["session_id"]),
                 "alive": alive,
+                # Connection type (ssh, tmux, ssh+tmux, native, etc.)
+                "connection_type": detect_connection_type(term.get("cc_pid") or 0),
+                # Context composition (requires LLM_RELAY_HISTORY=1)
+                "composition": _get_composition_safe(conn, r["session_id"]),
             })
 
         # Merge Codex/Gemini sessions discovered from session files
@@ -578,7 +562,7 @@ async def _api_history_sessions(request: Request) -> Response:
         window = float(request.query_params.get("window", "24"))
         conn = get_conn()
         sessions = get_history_sessions(conn, window_hours=window)
-        ceiling = int(os.getenv("CC_TOKEN_CEILING", "1000000"))
+        ceiling = int(os.getenv("LLM_TOKEN_CEILING", "1000000"))
 
         for s in sessions:
             s["history_source"] = "proxy_db"
@@ -833,5 +817,4 @@ def get_api_routes() -> List[Route]:
         Route("/api/v1/history/{session_id}", _api_history_detail, methods=["GET"]),
         Route("/api/v1/history/{session_id}/compactions", _api_history_compactions, methods=["GET"]),
         Route("/api/v1/history/{session_id}/composition", _api_history_composition, methods=["GET"]),
-        Route("/api/v1/i18n", _api_i18n, methods=["GET"]),
     ]
