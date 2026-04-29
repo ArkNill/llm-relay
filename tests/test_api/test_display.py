@@ -11,6 +11,7 @@ from llm_relay.api.display import (
     _extract_prompt_from_gemini,
     _is_cli_process,
     _is_real_user_prompt,
+    _parse_codex_session_raw,
     find_claude_pid_by_tty,
     find_cli_pid_by_tty,
     get_last_user_prompt,
@@ -153,6 +154,78 @@ class TestExtractPromptCodex:
     def test_empty(self):
         result = _extract_prompt_from_codex([])
         assert result["text"] == ""
+
+
+# ── Codex raw session parsing ──
+
+class TestParseCodexSessionRaw:
+    def test_token_count_metrics(self, tmp_path):
+        session_file = tmp_path / "rollout-live.jsonl"
+        session_file.write_text(
+            "\n".join([
+                json.dumps({
+                    "timestamp": "2026-04-24T00:00:00Z",
+                    "type": "response_item",
+                    "payload": {
+                        "role": "user",
+                        "content": [{"text": "first prompt"}],
+                    },
+                }),
+                json.dumps({
+                    "timestamp": "2026-04-24T00:00:01Z",
+                    "type": "event_msg",
+                    "payload": {
+                        "type": "token_count",
+                        "info": {
+                            "total_token_usage": {
+                                "input_tokens": 1000,
+                                "cached_input_tokens": 200,
+                                "output_tokens": 50,
+                                "total_tokens": 1050,
+                            },
+                            "last_token_usage": {
+                                "input_tokens": 1000,
+                                "cached_input_tokens": 200,
+                                "output_tokens": 50,
+                                "total_tokens": 1050,
+                            },
+                            "model_context_window": 258400,
+                        },
+                    },
+                }),
+                json.dumps({
+                    "timestamp": "2026-04-24T00:00:02Z",
+                    "type": "event_msg",
+                    "payload": {
+                        "type": "token_count",
+                        "info": {
+                            "total_token_usage": {
+                                "input_tokens": 4500,
+                                "cached_input_tokens": 900,
+                                "output_tokens": 150,
+                                "total_tokens": 4650,
+                            },
+                            "last_token_usage": {
+                                "input_tokens": 2500,
+                                "cached_input_tokens": 700,
+                                "output_tokens": 100,
+                                "total_tokens": 2600,
+                            },
+                            "model_context_window": 258400,
+                        },
+                    },
+                }),
+            ]) + "\n"
+        )
+
+        result = _parse_codex_session_raw(session_file)
+        assert result["user_turns"] == 1
+        assert result["last_user_text"] == "first prompt"
+        assert result["current_ctx"] == 2500
+        assert result["peak_ctx"] == 2500
+        assert result["recent_peak"] == 2500
+        assert result["cumul_unique"] == 4650
+        assert result["model_window"] == 258400
 
 
 # ── Gemini prompt extraction ──
@@ -324,7 +397,7 @@ class TestCheckCcSessionAlive:
         assert disp.check_cc_session_alive(term, 100.0, set(), 1300.0) is False
 
 
-# ── _collect_open_session_paths ──
+# ── _collect_open_session_path_pids ──
 
 class TestCollectOpenSessionPaths:
     def _make_proc_with_fd(self, tmp_path, pid, target_path):
@@ -337,35 +410,35 @@ class TestCollectOpenSessionPaths:
         return proc_dir
 
     def test_finds_jsonl_fd(self, tmp_path):
-        from llm_relay.api.display import _collect_open_session_paths
+        from llm_relay.api.display import _collect_open_session_path_pids
         target = tmp_path / "session.jsonl"
         target.write_text("")
         proc_dir = self._make_proc_with_fd(tmp_path, 12345, target)
-        paths = _collect_open_session_paths(proc_dir)
+        paths = _collect_open_session_path_pids(proc_dir)
         assert str(target.resolve()) in paths
 
     def test_ignores_non_session_files(self, tmp_path):
-        from llm_relay.api.display import _collect_open_session_paths
+        from llm_relay.api.display import _collect_open_session_path_pids
         target = tmp_path / "log.txt"
         target.write_text("")
         proc_dir = self._make_proc_with_fd(tmp_path, 12345, target)
-        paths = _collect_open_session_paths(proc_dir)
+        paths = _collect_open_session_path_pids(proc_dir)
         assert str(target.resolve()) not in paths
 
     def test_skips_non_pid_entries(self, tmp_path):
-        from llm_relay.api.display import _collect_open_session_paths
+        from llm_relay.api.display import _collect_open_session_path_pids
         proc_dir = tmp_path / "proc"
         (proc_dir / "self").mkdir(parents=True)
         (proc_dir / "stat").write_text("")
         # Should not raise
-        assert _collect_open_session_paths(proc_dir) == set()
+        assert _collect_open_session_path_pids(proc_dir) == {}
 
     def test_finds_json_fd(self, tmp_path):
-        from llm_relay.api.display import _collect_open_session_paths
+        from llm_relay.api.display import _collect_open_session_path_pids
         target = tmp_path / "gemini-chat.json"
         target.write_text("")
         proc_dir = self._make_proc_with_fd(tmp_path, 12345, target)
-        paths = _collect_open_session_paths(proc_dir)
+        paths = _collect_open_session_path_pids(proc_dir)
         assert str(target.resolve()) in paths
 
 
@@ -400,7 +473,7 @@ class TestDiscoverExternalAliveFilter:
         )
         sf = self._make_session_file(tmp_path, "rollout-dead.jsonl", codex_jsonl)
         provider = self._make_provider("openai-codex", [sf])
-        monkeypatch.setattr(disp, "_collect_open_session_paths", lambda *a, **kw: set())
+        monkeypatch.setattr(disp, "_collect_open_session_path_pids", lambda *a, **kw: {})
         monkeypatch.setattr(
             "llm_relay.providers.get_all_providers", lambda: [provider], raising=False,
         )
@@ -416,7 +489,7 @@ class TestDiscoverExternalAliveFilter:
         )
         sf = self._make_session_file(tmp_path, "rollout-dead.jsonl", codex_jsonl)
         provider = self._make_provider("openai-codex", [sf])
-        monkeypatch.setattr(disp, "_collect_open_session_paths", lambda *a, **kw: set())
+        monkeypatch.setattr(disp, "_collect_open_session_path_pids", lambda *a, **kw: {})
         monkeypatch.setattr(
             "llm_relay.providers.get_all_providers", lambda: [provider], raising=False,
         )
@@ -434,8 +507,8 @@ class TestDiscoverExternalAliveFilter:
         sf = self._make_session_file(tmp_path, "rollout-live.jsonl", codex_jsonl)
         provider = self._make_provider("openai-codex", [sf])
         monkeypatch.setattr(
-            disp, "_collect_open_session_paths",
-            lambda *a, **kw: {str(sf.path.resolve())},
+            disp, "_collect_open_session_path_pids",
+            lambda *a, **kw: {str(sf.path.resolve()): 12345},
         )
         monkeypatch.setattr(
             "llm_relay.providers.get_all_providers", lambda: [provider], raising=False,
@@ -445,3 +518,35 @@ class TestDiscoverExternalAliveFilter:
         assert len(results) == 1
         assert results[0]["alive"] is True
         assert results[0]["provider"] == "openai-codex"
+
+    def test_codex_zone_uses_current_ctx_not_cumul_unique(self, tmp_path, monkeypatch):
+        import llm_relay.api.display as disp
+
+        codex_jsonl = (
+            '{"type":"response_item","timestamp":"2026-04-16T13:00:00Z",'
+            '"payload":{"role":"user","content":[{"text":"hi"}]}}\n'
+            '{"type":"event_msg","timestamp":"2026-04-16T13:00:01Z","payload":{"type":"token_count","info":'
+            '{"total_token_usage":{"input_tokens":700000,"cached_input_tokens":640000,"output_tokens":5000,"total_tokens":705000},'
+            '"last_token_usage":{"input_tokens":80000,"cached_input_tokens":75000,"output_tokens":120,"total_tokens":80120},'
+            '"model_context_window":760000}}}\n'
+        )
+        sf = self._make_session_file(tmp_path, "rollout-cumul.jsonl", codex_jsonl)
+        provider = self._make_provider("openai-codex", [sf])
+        monkeypatch.setenv("CODEX_TOKEN_DISPLAY_CEILING", "684000")
+        monkeypatch.setenv("CODEX_TOKEN_ZONE_CEILING", "760000")
+        monkeypatch.setattr(
+            disp, "_collect_open_session_path_pids",
+            lambda *a, **kw: {str(sf.path.resolve()): 12345},
+        )
+        monkeypatch.setattr(
+            "llm_relay.providers.get_all_providers", lambda: [provider], raising=False,
+        )
+
+        results = disp.discover_external_cli_sessions(window_hours=24)
+        assert len(results) == 1
+        assert results[0]["ceiling"] == 684000
+        assert results[0]["current_ctx"] == 80000
+        assert results[0]["cumul_unique"] == 705000
+        assert results[0]["zone"] == "green"
+        assert results[0]["zone_a"] == "green"
+        assert results[0]["zone_b"] == "green"
