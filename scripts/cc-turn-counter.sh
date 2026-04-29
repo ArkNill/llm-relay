@@ -8,8 +8,8 @@ set -euo pipefail
 # Disable via env var
 [ "${CC_TURN_COUNTER_DISABLED:-0}" = "1" ] && exit 0
 
-# Status file location — honor CLAUDE_CONFIG_DIR so claudeGt writes to ~/.claude-gt/
-# instead of leaking into stock ~/.claude/. Falls back to ~/.claude when unset (stock).
+# Status file location — honor CLAUDE_CONFIG_DIR for alternate config dirs.
+# Falls back to ~/.claude when unset (stock).
 STATUS_DIR="${CLAUDE_CONFIG_DIR:-${HOME}/.claude}"
 STATUS_FILE="${STATUS_DIR}/turn-status"
 
