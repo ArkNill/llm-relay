@@ -375,11 +375,11 @@ class TestLogRequestEphemeral:
 
 @pytest.fixture(autouse=True)
 def _zone_env(monkeypatch):
-    monkeypatch.setenv("CC_TOKEN_A_YELLOW", "300000")
-    monkeypatch.setenv("CC_TOKEN_A_ORANGE", "500000")
-    monkeypatch.setenv("CC_TOKEN_A_RED", "750000")
-    monkeypatch.setenv("CC_TOKEN_A_HARD", "900000")
-    monkeypatch.setenv("CC_TOKEN_CEILING", "1000000")
+    monkeypatch.setenv("LLM_TOKEN_A_YELLOW", "300000")
+    monkeypatch.setenv("LLM_TOKEN_A_ORANGE", "500000")
+    monkeypatch.setenv("LLM_TOKEN_A_RED", "750000")
+    monkeypatch.setenv("LLM_TOKEN_A_HARD", "900000")
+    monkeypatch.setenv("LLM_TOKEN_CEILING", "1000000")
 
 
 class TestQuotaEndpoint:

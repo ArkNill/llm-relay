@@ -13,7 +13,7 @@ from llm_relay.providers.base import ProviderAdapter
 
 
 def _find_gemini_home() -> Path:
-    override = os.environ.get("LLM_RELAY_GEMINI_HOME")
+    override = os.environ.get("CCPULSE_GEMINI_HOME")
     if override:
         return Path(override)
     return Path.home() / ".gemini"

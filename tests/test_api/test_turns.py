@@ -29,11 +29,11 @@ from llm_relay.proxy.db import (
 # Deterministic env for Zone A absolute-threshold tests (local defaults)
 @pytest.fixture(autouse=True)
 def _zone_env(monkeypatch):
-    monkeypatch.setenv("CC_TOKEN_A_YELLOW", "300000")
-    monkeypatch.setenv("CC_TOKEN_A_ORANGE", "500000")
-    monkeypatch.setenv("CC_TOKEN_A_RED", "750000")
-    monkeypatch.setenv("CC_TOKEN_A_HARD", "900000")
-    monkeypatch.setenv("CC_TOKEN_CEILING", "1000000")
+    monkeypatch.setenv("LLM_TOKEN_A_YELLOW", "300000")
+    monkeypatch.setenv("LLM_TOKEN_A_ORANGE", "500000")
+    monkeypatch.setenv("LLM_TOKEN_A_RED", "750000")
+    monkeypatch.setenv("LLM_TOKEN_A_HARD", "900000")
+    monkeypatch.setenv("LLM_TOKEN_CEILING", "1000000")
 
 
 # Default empty-metrics dict for mocking get_turn_count returns
@@ -606,7 +606,7 @@ class TestIsCcProcessAlive:
         pid_dir.mkdir(parents=True)
         (pid_dir / "cmdline").write_bytes(b"node\x00/usr/bin/claude\x00")
         (pid_dir / "comm").write_text("node")
-        monkeypatch.setenv("CC_HOST_PROC", str(proc_dir))
+        monkeypatch.setenv("LLM_RELAY_HOST_PROC", str(proc_dir))
         assert is_cc_process_alive(12345) is True
 
     def test_fake_proc_non_claude(self, tmp_path, monkeypatch):
@@ -617,7 +617,7 @@ class TestIsCcProcessAlive:
         pid_dir.mkdir(parents=True)
         (pid_dir / "cmdline").write_bytes(b"sshd\x00-D\x00")
         (pid_dir / "comm").write_text("sshd")
-        monkeypatch.setenv("CC_HOST_PROC", str(proc_dir))
+        monkeypatch.setenv("LLM_RELAY_HOST_PROC", str(proc_dir))
         assert is_cc_process_alive(12345) is False
 
 
@@ -792,7 +792,7 @@ class TestClassifyZoneAbsolute:
     def test_yellow(self):
         z, label, nxt, msg = _classify_zone_absolute(300_000)
         assert z == "yellow"
-        assert label == "caution"
+        assert label == "주의"
         assert nxt == 500_000
         assert msg is not None
 

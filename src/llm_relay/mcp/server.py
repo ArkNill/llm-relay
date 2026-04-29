@@ -308,15 +308,14 @@ def session_turns(session_id: str = "") -> str:
             data = get_turn_count(conn, session_id)
             turns = data["turns"]
             # Zone classification
-            from llm_relay.i18n import t
             if turns >= 300:
-                zone, zone_label = "red", t("zone.danger")
+                zone, zone_label = "red", "위험"
             elif turns >= 250:
-                zone, zone_label = "orange", t("zone.warning")
+                zone, zone_label = "orange", "경고"
             elif turns >= 200:
-                zone, zone_label = "yellow", t("zone.caution")
+                zone, zone_label = "yellow", "주의"
             else:
-                zone, zone_label = "green", t("zone.safe")
+                zone, zone_label = "green", "안전"
             duration_h = 0.0
             if data["first_ts"] and data["last_ts"]:
                 duration_h = (data["last_ts"] - data["first_ts"]) / 3600

@@ -139,7 +139,7 @@ def _probe_codex(binary_path: str) -> bool:
     if not os.path.isfile(auth_file):
         return False
     try:
-        with open(auth_file, encoding="utf-8") as f:
+        with open(auth_file) as f:
             content = f.read().strip()
             return len(content) > 10  # Non-empty auth file
     except OSError:
