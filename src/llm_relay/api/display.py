@@ -727,7 +727,7 @@ def _parse_codex_session_raw(path: Path) -> dict:
     total_cached_tokens = 0
 
     try:
-        for line in _tail_lines(path, max_bytes=512 * 1024):
+        for line in _tail_lines(path, max_bytes=4 * 1024 * 1024):
             line = line.strip()
             if not line:
                 continue
@@ -742,6 +742,23 @@ def _parse_codex_session_raw(path: Path) -> dict:
                 last_ts = ts
 
             entry_type = obj.get("type", "")
+            # Codex reuses the same JSONL file across exit/restart cycles.
+            # Each new run emits a fresh task_started event — reset accumulators
+            # so metrics reflect the current run, not the entire file history.
+            if entry_type == "event_msg":
+                payload_peek = obj.get("payload", {})
+                if payload_peek.get("type") == "task_started":
+                    user_turns = 0
+                    current_ctx = 0
+                    peak_ctx = 0
+                    recent_contexts.clear()
+                    cumul_unique = 0
+                    total_input_tokens = 0
+                    total_cached_tokens = 0
+                    first_ts = ts
+                    last_user_text = ""
+                    last_user_ts = None
+
             if entry_type == "response_item":
                 payload = obj.get("payload", {})
                 if payload.get("role") == "user":
@@ -765,8 +782,13 @@ def _parse_codex_session_raw(path: Path) -> dict:
                     if metrics.get("current_ctx"):
                         current_ctx = metrics["current_ctx"]
                         peak_ctx = max(peak_ctx, current_ctx)
-                    if metrics.get("cumul_unique"):
-                        cumul_unique = metrics["cumul_unique"]
+                        # Accumulate cumul from per-request last_token_usage
+                        # instead of total_token_usage (which doesn't reset
+                        # across Codex exit/restart within the same file).
+                        last_usage = payload.get("info", {}).get("last_token_usage", {})
+                        last_out = last_usage.get("output_tokens", 0)
+                        if isinstance(last_out, (int, float)):
+                            cumul_unique += current_ctx + int(last_out)
                     if metrics.get("model_window"):
                         model_window = metrics["model_window"]
                     # Cache stats from total_token_usage
