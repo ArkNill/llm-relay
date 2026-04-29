@@ -17,95 +17,103 @@
     <span id="health-badge" class="badge">loading...</span>
   </header>
 
-  <a id="anthropic-status-banner"
-     class="status-banner status-loading"
-     href="https://status.claude.com"
-     target="_blank"
-     rel="noopener noreferrer"
-     title="Click to open Anthropic status page in a new tab">
-    <span class="status-dot"></span>
-    <span class="status-text">checking Anthropic status…</span>
-    <span id="anthropic-status-incident" class="status-incident"></span>
-    <span id="anthropic-status-fetched" class="status-fetched"></span>
-  </a>
+  <div id="fetch-error-banner" style="display:none;background:#2e0f0f;color:#ff6b6b;padding:0.5rem 1rem;margin:0.4rem 1rem;border-radius:6px;font-size:0.85rem;border:1px solid #5a1c1c;"></div>
 
-  <a id="openai-status-banner"
-     class="status-banner status-loading"
-     href="https://status.openai.com"
-     target="_blank"
-     rel="noopener noreferrer"
-     title="Click to open OpenAI status page in a new tab">
-    <span class="status-dot"></span>
-    <span class="status-text">checking OpenAI status…</span>
-    <span id="openai-status-incident" class="status-incident"></span>
-    <span id="openai-status-fetched" class="status-fetched"></span>
-  </a>
+  <div class="status-row">
+    <a id="anthropic-status-banner"
+       class="status-banner status-loading"
+       href="https://status.claude.com"
+       target="_blank"
+       rel="noopener noreferrer"
+       title="Click to open Anthropic status page in a new tab">
+      <span class="status-dot"></span>
+      <span class="status-text">checking Anthropic status…</span>
+      <span id="anthropic-status-incident" class="status-incident"></span>
+      <span id="anthropic-status-fetched" class="status-fetched"></span>
+    </a>
 
-  <a id="gemini-status-banner"
-     class="status-banner status-loading"
-     href="https://status.cloud.google.com"
-     target="_blank"
-     rel="noopener noreferrer"
-     title="Click to open Google Cloud status page in a new tab">
-    <span class="status-dot"></span>
-    <span class="status-text">checking Gemini status…</span>
-    <span id="gemini-status-incident" class="status-incident"></span>
-    <span id="gemini-status-fetched" class="status-fetched"></span>
-  </a>
+    <a id="openai-status-banner"
+       class="status-banner status-loading"
+       href="https://status.openai.com"
+       target="_blank"
+       rel="noopener noreferrer"
+       title="Click to open OpenAI status page in a new tab">
+      <span class="status-dot"></span>
+      <span class="status-text">checking OpenAI status…</span>
+      <span id="openai-status-incident" class="status-incident"></span>
+      <span id="openai-status-fetched" class="status-fetched"></span>
+    </a>
 
-  <main>
-    <section id="turn-monitor">
-      <h2>Turn Monitor <span id="turn-updated" class="updated-ts"></span></h2>
-      <div id="turn-cards" class="turn-cards"></div>
-    </section>
+    <a id="gemini-status-banner"
+       class="status-banner status-loading"
+       href="https://status.cloud.google.com"
+       target="_blank"
+       rel="noopener noreferrer"
+       title="Click to open Google Cloud status page in a new tab">
+      <span class="status-dot"></span>
+      <span class="status-text">checking Gemini status…</span>
+      <span id="gemini-status-incident" class="status-incident"></span>
+      <span id="gemini-status-fetched" class="status-fetched"></span>
+    </a>
+  </div>
 
-    <section id="context-health">
-      <h2>Context Health</h2>
-      <div id="health-summary" class="stats-grid"></div>
-      <div id="health-sessions" class="health-cards"></div>
-    </section>
+  <main class="dashboard-grid">
+    <div class="col-left">
+      <section id="turn-monitor">
+        <h2>Turn Monitor <span id="turn-updated" class="updated-ts"></span></h2>
+        <div id="turn-cards" class="turn-cards"></div>
+      </section>
 
-    <section id="api-health">
-      <h2>API Health</h2>
-      <div class="api-health-grid">
-        <div id="quota-card" class="api-health-card">
-          <h3>Quota</h3>
-          <div id="quota-content" class="api-health-body">loading...</div>
+      <section id="context-health">
+        <h2>Context Health</h2>
+        <div id="health-summary" class="stats-grid"></div>
+        <div id="health-sessions" class="health-cards"></div>
+      </section>
+    </div>
+
+    <div class="col-right">
+      <section id="cli-status">
+        <h2>CLI Status</h2>
+        <div id="cli-cards" class="cards"></div>
+      </section>
+
+      <section id="api-health">
+        <h2>API Health</h2>
+        <div class="api-health-grid">
+          <div id="quota-card" class="api-health-card">
+            <h3>Quota</h3>
+            <div id="quota-content" class="api-health-body">loading...</div>
+          </div>
+          <div id="error-card" class="api-health-card">
+            <h3>Error Rate</h3>
+            <div id="error-content" class="api-health-body">loading...</div>
+          </div>
+          <div id="cache-card" class="api-health-card">
+            <h3>Cache Hit Rate</h3>
+            <div id="cache-content" class="api-health-body">loading...</div>
+          </div>
+          <div id="ttl-card" class="api-health-card">
+            <h3>TTL Tier</h3>
+            <div id="ttl-content" class="api-health-body">loading...</div>
+          </div>
         </div>
-        <div id="error-card" class="api-health-card">
-          <h3>Error Rate</h3>
-          <div id="error-content" class="api-health-body">loading...</div>
-        </div>
-        <div id="cache-card" class="api-health-card">
-          <h3>Cache Hit Rate</h3>
-          <div id="cache-content" class="api-health-body">loading...</div>
-        </div>
-        <div id="ttl-card" class="api-health-card">
-          <h3>TTL Tier</h3>
-          <div id="ttl-content" class="api-health-body">loading...</div>
-        </div>
-      </div>
-    </section>
+      </section>
 
-    <section id="cli-status">
-      <h2>CLI Status</h2>
-      <div id="cli-cards" class="cards"></div>
-    </section>
+      <section id="stats">
+        <h2>Delegation Stats</h2>
+        <div id="stats-content" class="stats-grid"></div>
+      </section>
 
-    <section id="stats">
-      <h2>Delegation Stats</h2>
-      <div id="stats-content" class="stats-grid"></div>
-    </section>
-
-    <section id="history">
-      <h2>Recent Delegations</h2>
-      <table id="history-table">
-        <thead>
-          <tr><th>Time</th><th>CLI</th><th>Status</th><th>Duration</th><th>Preview</th></tr>
-        </thead>
-        <tbody></tbody>
-      </table>
-    </section>
+      <section id="history">
+        <h2>Recent Delegations</h2>
+        <table id="history-table">
+          <thead>
+            <tr><th>Time</th><th>CLI</th><th>Status</th><th>Duration</th><th>Preview</th></tr>
+          </thead>
+          <tbody></tbody>
+        </table>
+      </section>
+    </div>
   </main>
 
   <div id="detail-overlay"></div>
