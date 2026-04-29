@@ -8,7 +8,7 @@ from pathlib import Path
 import pytest
 from helpers import make_entry, write_session_file
 
-from llm_relay.detect.scanner import discover_sessions, load_growthbook_config
+from llm_relay.detect.scanner import discover_sessions
 
 
 class TestDiscoverSessions:
@@ -77,32 +77,3 @@ class TestDiscoverSessions:
         assert len(results) == 2
 
 
-class TestLoadGrowthBook:
-    def test_loads_tengu_flags(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-        claude_json = tmp_path / ".claude.json"
-        claude_json.write_text(
-            json.dumps(
-                {
-                    "cachedGrowthBookFeatures": {
-                        "tengu_hawthorn_window": 200000,
-                        "tengu_pewter_kestrel": {"global": 50000, "Bash": 30000},
-                        "tengu_slate_heron": True,
-                        "tengu_sm_compact": False,
-                    }
-                }
-            )
-        )
-        monkeypatch.setattr("pathlib.Path.home", lambda: tmp_path)
-
-        config = load_growthbook_config()
-        assert config is not None
-        assert config.hawthorn_window == 200000
-        assert config.pewter_kestrel == {"global": 50000, "Bash": 30000}
-        assert config.slate_heron is True
-        assert config.sm_compact is False
-        assert len(config.raw_flags) == 4
-
-    def test_returns_none_when_missing(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-        monkeypatch.setattr("pathlib.Path.home", lambda: tmp_path)
-        config = load_growthbook_config()
-        assert config is None
