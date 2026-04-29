@@ -4,8 +4,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-from llm_relay import __version__  # single source from pyproject.toml
-
+__version__ = "0.2.0"
 __all__ = ["__version__", "get_all_detectors", "get_detectors_for_provider"]
 
 if TYPE_CHECKING:
@@ -32,6 +31,7 @@ def get_detectors_for_provider(provider_id: str) -> list[BaseDetector]:
 
     if provider_id == "claude-code":
         from llm_relay.detect.bloat import BloatDetector
+        from llm_relay.detect.growthbook import GrowthBookDetector
         from llm_relay.detect.microcompact import MicrocompactDetector
         from llm_relay.detect.orphan import OrphanDetector
         from llm_relay.detect.resume import ResumeDetector
@@ -44,6 +44,7 @@ def get_detectors_for_provider(provider_id: str) -> list[BaseDetector]:
             MicrocompactDetector(),
             BloatDetector(),
             ResumeDetector(),
+            GrowthBookDetector(),
             OrphanDetector(),
             StuckDetector(),
         ]

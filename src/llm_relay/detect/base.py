@@ -6,7 +6,7 @@ import abc
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
-    from llm_relay.detect.models import Finding, ParsedSession
+    from llm_relay.detect.models import Finding, GrowthBookConfig, ParsedSession
 
 
 class BaseDetector(abc.ABC):
@@ -16,6 +16,6 @@ class BaseDetector(abc.ABC):
     display_name: str
 
     @abc.abstractmethod
-    def check(self, session: ParsedSession) -> list[Finding]:
+    def check(self, session: ParsedSession, growthbook: GrowthBookConfig | None = None) -> list[Finding]:
         """Return findings for this session. Empty list = no issues."""
         ...
