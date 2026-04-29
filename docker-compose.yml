@@ -1,30 +1,34 @@
 services:
   llm-relay:
-    image: ghcr.io/arknill/llm-relay:latest
+    build:
+      context: .
+      dockerfile: Dockerfile
     container_name: llm-relay
     restart: unless-stopped
     ports:
-      - "127.0.0.1:8083:8083"
+      - "127.0.0.1:8080:8080"  # Claude Code: ANTHROPIC_BASE_URL=http://localhost:8080
+      - "127.0.0.1:8082:8080"  # Legacy compat
+      # - "<YOUR_TAILSCALE_IP>:8080:8080"  # Optional: bind to Tailscale IP for remote access
     volumes:
-      - llm-relay-data:/data
-      - ${HOME:-${USERPROFILE}}/.claude/projects:/data/claude-projects:ro
+      - ${HOME}/.cc-relay:/data/legacy  # Usage DB (migrated from cc-relay)
+      # Claude Code transcript JSONL (read-only, for display page last-user-prompt)
+      - ${HOME}/.claude/projects:/data/claude-projects:ro
+      - /proc:/host/proc:ro  # Host process inspection (display page liveness check)
+    # 2-tier env: .env.public (defaults) + .env.local (optional overrides)
+    env_file:
+      - .env.public
+      - path: .env.local
+        required: false
     environment:
-      - LLM_RELAY_UPSTREAM=https://api.anthropic.com
-      - LLM_RELAY_DB=/data/usage.db
-      - LLM_RELAY_HISTORY=1
-      - LLM_RELAY_SSE_PARSE_USAGE=1
-      - LLM_RELAY_SCAN_ENABLED=${LLM_RELAY_SCAN_ENABLED:-0}
-      - LLM_RELAY_TOKPRESS=${LLM_RELAY_TOKPRESS:-0}
-      - LLM_RELAY_CACHE_FIX=${LLM_RELAY_CACHE_FIX:-0}
-      - CC_TOKEN_A_YELLOW=${CC_TOKEN_A_YELLOW:-300000}
-      - CC_TOKEN_A_ORANGE=${CC_TOKEN_A_ORANGE:-500000}
-      - CC_TOKEN_A_RED=${CC_TOKEN_A_RED:-750000}
-      - CC_TOKEN_A_HARD=${CC_TOKEN_A_HARD:-900000}
-      - CC_TOKEN_CEILING=${CC_TOKEN_CEILING:-1000000}
-      - CC_CLAUDE_PROJECTS_DIR=/data/claude-projects
+      # Docker-only overrides (container-internal paths)
+      - LLM_RELAY_DB=/data/legacy/usage.db
+      - LLM_RELAY_PORT=8080
+      - LLM_RELAY_WARN_RATIO=50.0
+      - LLM_RELAY_CLAUDE_PROJECTS_DIR=/data/claude-projects
+      - LLM_RELAY_HOST_PROC=/host/proc
     mem_limit: 256m
     healthcheck:
-      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8083/_health')"]
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8080/_health')"]
       interval: 30s
       timeout: 5s
       retries: 3
@@ -34,6 +38,3 @@ services:
       options:
         max-size: "10m"
         max-file: "3"
-
-volumes:
-  llm-relay-data:

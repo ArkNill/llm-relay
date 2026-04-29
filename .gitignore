@@ -6,6 +6,7 @@ dist/
 build/
 .venv/
 .env
+.env.local
 *.db
 *.sqlite
 .pytest_cache/
@@ -13,16 +14,16 @@ build/
 .mypy_cache/
 vendor/
 
-# Investigation/evidence files (local-only analysis)
+# GrowthBook intercept (LOCAL-ONLY — DO NOT COMMIT)
+src/llm_relay/proxy/growthbook_intercept.py
+
+# Investigation/evidence/audit files (local-only analysis)
 docs/investigation-*
+docs/audit-*
 docs/evidence-*/
 
 # Backup files
 docker-compose.yml.bak*
-
-# Claude Code project files (local-only)
-CLAUDE.md
-PLAN.txt
 
 # Credential files
 *.key
