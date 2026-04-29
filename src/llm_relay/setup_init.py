@@ -1,8 +1,7 @@
-"""llm-relay init — diagnostic check and Docker setup guide.
+"""llm-relay init — one-command setup for new users.
 
-Detects installed CLIs, checks Docker status, and prints instructions
-for running llm-relay via Docker. Does NOT modify CC settings or start
-native servers.
+Detects installed CLIs, configures Claude Code proxy + MCP, initializes DB,
+starts the proxy, and verifies everything works.
 """
 
 from __future__ import annotations
@@ -13,8 +12,9 @@ import shutil
 import socket
 import subprocess
 import sys
+import time
 from pathlib import Path
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Tuple
 
 # ── Detection helpers ──
 
@@ -80,84 +80,186 @@ def _is_port_in_use(port: int) -> bool:
         return s.connect_ex(("127.0.0.1", port)) == 0
 
 
-def _check_docker() -> Dict[str, Any]:
-    """Check if Docker is installed and running."""
-    result = {"installed": False, "running": False, "compose": False, "version": None}
+def _find_available_port(start: int = 8083) -> int:
+    """Find the first available port starting from `start`."""
+    for port in range(start, start + 20):
+        if not _is_port_in_use(port):
+            return port
+    return start
 
-    docker_bin = shutil.which("docker")
-    if not docker_bin:
-        return result
-    result["installed"] = True
 
+# ── Configuration helpers ──
+
+
+def _read_json(path: Path) -> Dict[str, Any]:
+    """Read a JSON file, returning empty dict if missing or malformed."""
+    if not path.exists():
+        return {}
     try:
-        out = subprocess.run(
-            ["docker", "version", "--format", "{{.Server.Version}}"],
-            capture_output=True, text=True, timeout=5,
-            stdin=subprocess.DEVNULL,
-        )
-        if out.returncode == 0 and out.stdout.strip():
-            result["running"] = True
-            result["version"] = out.stdout.strip()
-    except (subprocess.TimeoutExpired, OSError):
-        pass
+        return json.loads(path.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError):
+        return {}
 
+
+def _write_json(path: Path, data: Dict[str, Any]) -> None:
+    """Write JSON with 2-space indent."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        json.dumps(data, indent=2, ensure_ascii=False) + "\n",
+        encoding="utf-8",
+    )
+
+
+def _configure_claude_code(port: int, dry_run: bool = False) -> List[str]:
+    """Configure Claude Code to use llm-relay proxy + MCP.
+
+    Merges into existing settings.json without overwriting other keys.
+    Returns a list of actions taken (for display).
+    """
+    settings_path = Path.home() / ".claude" / "settings.json"
+    actions = []
+
+    if not settings_path.parent.exists():
+        if dry_run:
+            actions.append("[dry-run] Would create ~/.claude/")
+        else:
+            settings_path.parent.mkdir(parents=True, exist_ok=True)
+            actions.append("Created ~/.claude/")
+
+    settings = _read_json(settings_path)
+    changed = False
+
+    # 1. Set ANTHROPIC_BASE_URL in env
+    env = settings.get("env", {})
+    if not isinstance(env, dict):
+        env = {}
+    base_url = "http://localhost:{}".format(port)
+    if env.get("ANTHROPIC_BASE_URL") != base_url:
+        env["ANTHROPIC_BASE_URL"] = base_url
+        settings["env"] = env
+        changed = True
+        actions.append("Set ANTHROPIC_BASE_URL={}".format(base_url))
+    else:
+        actions.append("ANTHROPIC_BASE_URL already set (skipped)")
+
+    # 2. Register MCP server
+    mcp_servers = settings.get("mcpServers", {})
+    if not isinstance(mcp_servers, dict):
+        mcp_servers = {}
+    mcp_entry = {"command": "llm-relay-mcp", "type": "stdio"}
+    if "llm-relay" not in mcp_servers:
+        mcp_servers["llm-relay"] = mcp_entry
+        settings["mcpServers"] = mcp_servers
+        changed = True
+        actions.append("Registered llm-relay MCP server (8 tools)")
+    else:
+        actions.append("MCP server already registered (skipped)")
+
+    if changed and not dry_run:
+        _write_json(settings_path, settings)
+
+    return actions
+
+
+# ── DB initialization ──
+
+
+def _init_db(db_dir: Path) -> str:
+    """Initialize the SQLite database."""
+    db_path = db_dir / "usage.db"
+    if db_path.exists():
+        size = db_path.stat().st_size
+        return "DB exists ({} bytes)".format(size)
+
+    db_dir.mkdir(parents=True, exist_ok=True)
     try:
-        out = subprocess.run(
-            ["docker", "compose", "version", "--short"],
-            capture_output=True, text=True, timeout=5,
-            stdin=subprocess.DEVNULL,
-        )
-        if out.returncode == 0:
-            result["compose"] = True
-    except (subprocess.TimeoutExpired, OSError):
-        pass
-
-    return result
+        from llm_relay.proxy.db import get_conn
+        conn = get_conn(db_path)
+        conn.close()
+        return "DB created at {}".format(db_path)
+    except ImportError:
+        return "DB directory created (proxy module not installed for schema init)"
 
 
-def _check_container() -> Dict[str, Any]:
-    """Check if llm-relay Docker container is running."""
-    result = {"running": False, "healthy": False, "port": None}
+# ── Config file ──
 
+
+def _write_config(db_dir: Path, port: int) -> str:
+    """Write a minimal config file for reference."""
+    config_path = db_dir / "config.json"
+    if config_path.exists():
+        return "Config exists (skipped)"
+
+    config = {
+        "port": port,
+        "history": True,
+        "created": time.strftime("%Y-%m-%dT%H:%M:%S"),
+    }
+    _write_json(config_path, config)
+    return "Config written to {}".format(config_path)
+
+
+# ── Server management ──
+
+
+def _start_server(port: int) -> Tuple[bool, str]:
+    """Start the proxy server in background."""
+    if _is_port_in_use(port):
+        # Verify it's llm-relay
+        try:
+            import urllib.request
+            resp = urllib.request.urlopen(
+                "http://localhost:{}/_health".format(port), timeout=3,
+            )
+            data = json.loads(resp.read())
+            if data.get("status") == "ok":
+                return True, "Already running on port {}".format(port)
+        except Exception:
+            pass
+        return False, "Port {} is in use by another process".format(port)
+
+    # Start uvicorn in background
     try:
-        out = subprocess.run(
-            ["docker", "ps", "--filter", "name=llm-relay", "--format",
-             "{{.Status}}\t{{.Ports}}"],
-            capture_output=True, text=True, timeout=5,
+        env = os.environ.copy()
+        env["LLM_RELAY_HISTORY"] = "1"
+
+        log_path = db_dir_for_env() / "server.log"
+        log_file = open(str(log_path), "a")  # noqa: SIM115
+
+        # Detach the server process so it survives parent exit.
+        # Windows: CREATE_NEW_PROCESS_GROUP; POSIX: start_new_session (setsid).
+        detach_kwargs = {}  # type: dict
+        if sys.platform == "win32":
+            detach_kwargs["creationflags"] = subprocess.CREATE_NEW_PROCESS_GROUP
+        else:
+            detach_kwargs["start_new_session"] = True
+
+        proc = subprocess.Popen(
+            [
+                sys.executable, "-m", "uvicorn",
+                "llm_relay.proxy.proxy:app",
+                "--host", "0.0.0.0",
+                "--port", str(port),
+                "--log-level", "info",
+            ],
+            env=env,
+            stdout=log_file,
+            stderr=log_file,
             stdin=subprocess.DEVNULL,
+            **detach_kwargs,
         )
-        if out.returncode == 0 and out.stdout.strip():
-            result["running"] = True
-            status_line = out.stdout.strip().split("\n")[0]
-            if "healthy" in status_line.lower():
-                result["healthy"] = True
-            # Extract port from "127.0.0.1:8080->8080/tcp"
-            ports_part = status_line.split("\t")[-1] if "\t" in status_line else ""
-            if ":" in ports_part and "->" in ports_part:
-                try:
-                    result["port"] = int(ports_part.split(":")[1].split("->")[0])
-                except (ValueError, IndexError):
-                    pass
-    except (subprocess.TimeoutExpired, OSError):
-        pass
 
-    # Fallback: try health endpoint on common ports
-    if result["running"] and not result["port"]:
-        for port in [8083, 8080]:
-            try:
-                import urllib.request
-                resp = urllib.request.urlopen(
-                    "http://localhost:{}/_health".format(port), timeout=3,
-                )
-                data = json.loads(resp.read())
-                if data.get("status") == "ok":
-                    result["port"] = port
-                    result["healthy"] = True
-                    break
-            except Exception:
-                continue
+        # Wait for startup
+        for _ in range(20):
+            time.sleep(0.5)
+            if _is_port_in_use(port):
+                return True, "Started on port {} (PID {})".format(port, proc.pid)
 
-    return result
+        return False, "Server started but not responding (check {})".format(log_path)
+    except FileNotFoundError:
+        return False, "uvicorn not found. Run: pip install llm-relay[proxy]"
+    except Exception as e:
+        return False, "Failed to start: {}".format(e)
 
 
 def db_dir_for_env() -> Path:
@@ -166,6 +268,37 @@ def db_dir_for_env() -> Path:
     if env_db:
         return Path(env_db).parent
     return Path.home() / ".llm-relay"
+
+
+# ── Health check ──
+
+
+def _health_check(port: int) -> Tuple[bool, Dict[str, Any]]:
+    """Run a comprehensive health check against the running server."""
+    results = {}
+    base = "http://localhost:{}".format(port)
+
+    endpoints = [
+        ("/_health", "proxy"),
+        ("/api/v1/health", "api"),
+        ("/api/v1/quota", "quota"),
+        ("/api/v1/errors", "errors"),
+        ("/api/v1/cache", "cache"),
+        ("/api/v1/ttl", "ttl"),
+    ]
+
+    all_ok = True
+    for path, name in endpoints:
+        try:
+            import urllib.request
+            resp = urllib.request.urlopen(base + path, timeout=5)
+            json.loads(resp.read())  # validate JSON response
+            results[name] = {"ok": True, "status": resp.status}
+        except Exception as e:
+            results[name] = {"ok": False, "error": str(e)}
+            all_ok = False
+
+    return all_ok, results
 
 
 # ── Main init function ──
@@ -177,18 +310,20 @@ def run_init(
     dry_run: bool = False,
     verbose: bool = False,
 ) -> Dict[str, Any]:
-    """Run diagnostic checks and print Docker setup instructions.
+    """Run the full initialization sequence.
 
     Returns a summary dict with all results.
     """
     summary = {
         "version": None,
         "clis": [],
-        "docker": None,
-        "container": None,
+        "db": None,
+        "config": None,
+        "claude_code": [],
+        "server": None,
+        "health": None,
         "port": port,
         "urls": {},
-        "next_steps": [],
     }
 
     try:
@@ -200,69 +335,68 @@ def run_init(
     # Step 1: Detect CLIs
     summary["clis"] = _detect_clis()
 
-    # Step 2: Check Docker
-    summary["docker"] = _check_docker()
-
-    # Step 3: Check running container
-    summary["container"] = _check_container()
-
-    # Step 4: Determine next steps
-    next_steps = []
-
-    if not summary["docker"]["installed"]:
-        next_steps.append("Install Docker: https://docs.docker.com/get-docker/")
-    elif not summary["docker"]["running"]:
-        next_steps.append("Start Docker Desktop or Docker Engine")
-    elif not summary["docker"]["compose"]:
-        next_steps.append("Install Docker Compose: https://docs.docker.com/compose/install/")
-
-    if summary["docker"]["installed"] and summary["docker"]["running"]:
-        if not summary["container"]["running"]:
-            next_steps.append(
-                "Download docker-compose.yml and start:"
-                "\n    curl -sL https://raw.githubusercontent.com/"
-                "ArkNill/llm-relay/main/docker-compose.yml -o docker-compose.yml"
-                "\n    docker compose up -d"
+    # Step 2: Find port
+    if _is_port_in_use(port):
+        # Check if it's already llm-relay
+        try:
+            import urllib.request
+            resp = urllib.request.urlopen(
+                "http://localhost:{}/_health".format(port), timeout=3,
             )
-        elif not summary["container"]["healthy"]:
-            next_steps.append("Container running but not healthy. Check: docker logs llm-relay")
+            data = json.loads(resp.read())
+            if data.get("status") == "ok":
+                summary["server"] = "Already running on port {}".format(port)
+            else:
+                port = _find_available_port(port + 1)
+                summary["port"] = port
+        except Exception:
+            port = _find_available_port(port + 1)
+            summary["port"] = port
 
-    if summary["container"]["running"] and summary["container"]["healthy"]:
-        p = summary["container"]["port"] or port
-        summary["port"] = p
-        summary["urls"] = {
-            "dashboard": "http://localhost:{}/dashboard/".format(p),
-            "display": "http://localhost:{}/display/".format(p),
-            "history": "http://localhost:{}/history/".format(p),
-        }
-        # Check if CC is configured to use the proxy
-        cc_settings = Path.home() / ".claude" / "settings.json"
-        cc_configured = False
-        if cc_settings.exists():
-            try:
-                data = json.loads(cc_settings.read_text(encoding="utf-8"))
-                env = data.get("env", {})
-                base_url = env.get("ANTHROPIC_BASE_URL", "")
-                if "localhost:{}".format(p) in base_url:
-                    cc_configured = True
-            except (json.JSONDecodeError, OSError):
-                pass
-
-        if not cc_configured:
-            settings_path = "~/.claude/settings.json"
-            if sys.platform == "win32":
-                settings_path = "%USERPROFILE%\\.claude\\settings.json"
-            next_steps.append(
-                "To route Claude Code through the proxy, add to {}:"
-                '\n    "env": {{ "ANTHROPIC_BASE_URL": "http://localhost:{}" }}'.format(
-                    settings_path, p
-                )
-            )
+    # Step 3: Initialize DB
+    db_dir = db_dir_for_env()
+    if not dry_run:
+        summary["db"] = _init_db(db_dir)
     else:
-        next_steps.append(
-            "After starting, open: http://localhost:{}/dashboard/".format(port)
-        )
+        summary["db"] = "[dry-run] Would init DB at {}".format(db_dir / "usage.db")
 
-    summary["next_steps"] = next_steps
+    # Step 4: Write config
+    if not dry_run:
+        summary["config"] = _write_config(db_dir, port)
+    else:
+        summary["config"] = "[dry-run] Would write config"
+
+    # Step 5: Configure Claude Code
+    has_cc = any(c["id"] == "claude-code" for c in summary["clis"])
+    if has_cc:
+        summary["claude_code"] = _configure_claude_code(port, dry_run=dry_run)
+    else:
+        summary["claude_code"] = ["Claude Code not detected (skipped)"]
+
+    # Step 6: Start server
+    if not skip_server and not dry_run:
+        ok, msg = _start_server(port)
+        summary["server"] = msg
+        if not ok:
+            summary["health"] = "Skipped (server not running)"
+            summary["urls"] = {}
+            return summary
+    elif dry_run:
+        summary["server"] = "[dry-run] Would start server on port {}".format(port)
+
+    # Step 7: Health check
+    if not skip_server and not dry_run:
+        all_ok, results = _health_check(port)
+        summary["health"] = results
+    else:
+        summary["health"] = "Skipped"
+
+    # Step 8: URLs
+    summary["urls"] = {
+        "dashboard": "http://localhost:{}/dashboard/".format(port),
+        "display": "http://localhost:{}/display/".format(port),
+        "history": "http://localhost:{}/history/".format(port),
+        "proxy": "http://localhost:{}".format(port),
+    }
 
     return summary
