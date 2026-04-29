@@ -127,6 +127,8 @@
     var maxResultPct = 0;
     var maxResultSid = "";
 
+    var worstSnrSession = null;
+    var maxResultSession = null;
     withComp.forEach(function (s) {
       var c = s.composition;
       var snr = c.snr || 0;
@@ -134,12 +136,14 @@
       if (snr < worstSnr) {
         worstSnr = snr;
         worstSnrSid = s.session_id;
+        worstSnrSession = s;
       }
       totalDupes += c.duplicate_read_count || 0;
       var resultPct = (c.categories && c.categories.tool_result) ? c.categories.tool_result.pct : 0;
       if (resultPct > maxResultPct) {
         maxResultPct = resultPct;
         maxResultSid = s.session_id;
+        maxResultSession = s;
       }
     });
 
@@ -149,7 +153,7 @@
     // Summary boxes (reuse stats-grid pattern)
     summaryEl.innerHTML = [
       { value: avgSnr.toFixed(2), label: "Avg SNR", cls: avgSnrCls },
-      { value: worstSnr.toFixed(2), label: "Worst (" + worstSnrSid.substring(0, 8) + ")", cls: worstSnr < 0.3 ? "danger" : (worstSnr < 0.5 ? "warn" : "") },
+      { value: worstSnr.toFixed(2), label: "Worst (" + sidLabel(worstSnrSession || worstSnrSid) + ")", cls: worstSnr < 0.3 ? "danger" : (worstSnr < 0.5 ? "warn" : "") },
       { value: totalDupes, label: "Dup Reads" },
       { value: maxResultPct.toFixed(1) + "%", label: "Max Result%", cls: maxResultPct > 50 ? "warn" : "" },
     ].map(function (b) {
@@ -190,7 +194,7 @@
         : '';
 
       return '<div class="' + rowCls + '">' +
-        '<span class="sid">' + s.session_id.substring(0, 8) + '</span>' +
+        '<span class="sid">' + sidLabel(s) + '</span>' +
         '<span class="metric"><span class="metric-label">SNR</span><span class="' + snrCls + '">' + snr.toFixed(2) + '</span></span>' +
         '<span class="metric"><span class="metric-label">Result</span><span class="' + resultCls + '">' + resultPct.toFixed(1) + '%</span></span>' +
         dupesHtml +
@@ -224,20 +228,20 @@
 
     // Diff check — skip DOM update if data unchanged (ZBook GPU load mitigation)
     var hash = data.sessions.map(function (s) {
-      return s.session_id + ":" + s.turns + ":" + s.zone;
+      return s.session_id + ":" + s.turns + ":" + s.zone + ":" + (s.term_name || "");
     }).join("|");
     if (hash === lastTurnHash) return;
     lastTurnHash = hash;
 
     var now = Date.now() / 1000;
     container.innerHTML = data.sessions.map(function (s) {
-      var sidShort = s.session_id.substring(0, 8);
+      var label = sidLabel(s);
       var duration = s.duration_s || 0;
       var idleS = now - (s.last_ts || now);
       var pct = Math.min(100, (s.turns / 300) * 100);
       var msg = s.message ? '<div class="message">' + s.message + '</div>' : '';
       return '<div class="turn-card zone-' + s.zone + '">' +
-        '<div class="sid">' + sidShort + '</div>' +
+        '<div class="sid">' + label + '</div>' +
         '<div class="turn-count">' + s.turns + '<span class="label">/ 300</span></div>' +
         '<div class="meta">' +
           '<span>' + formatDuration(duration) + ' elapsed</span>' +
@@ -347,6 +351,15 @@
   function escapeHtml(s) {
     if (!s) return "";
     return s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
+  }
+
+  // Render "<8-char sid> · <term_name>" when term_name is present, else just the sid.
+  // Accepts a session object (preferred) or a bare sid string for back-compat.
+  function sidLabel(sessionOrSid, termName) {
+    var sid = (typeof sessionOrSid === "string") ? sessionOrSid : sessionOrSid.session_id;
+    var name = (typeof sessionOrSid === "string") ? termName : sessionOrSid.term_name;
+    var short = sid.substring(0, 8);
+    return name ? short + " · " + escapeHtml(name) : short;
   }
 
   document.getElementById("panel-close").addEventListener("click", closeDetailPanel);
