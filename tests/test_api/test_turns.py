@@ -26,14 +26,18 @@ from llm_relay.proxy.db import (
 )
 
 
-# Deterministic env for Zone A absolute-threshold tests (local defaults)
+# Deterministic env for Zone A absolute-threshold tests.
+# Module-level _CACHED_TOKEN_* are evaluated once at import, so env-only
+# monkeypatching has no effect.  Patch the cached values directly.
 @pytest.fixture(autouse=True)
 def _zone_env(monkeypatch):
-    monkeypatch.setenv("LLM_TOKEN_A_YELLOW", "300000")
-    monkeypatch.setenv("LLM_TOKEN_A_ORANGE", "500000")
-    monkeypatch.setenv("LLM_TOKEN_A_RED", "750000")
-    monkeypatch.setenv("LLM_TOKEN_A_HARD", "900000")
-    monkeypatch.setenv("LLM_TOKEN_CEILING", "1000000")
+    import llm_relay.api.routes as _routes
+
+    monkeypatch.setattr(_routes, "_CACHED_TOKEN_A_YELLOW", 500_000)
+    monkeypatch.setattr(_routes, "_CACHED_TOKEN_A_ORANGE", 700_000)
+    monkeypatch.setattr(_routes, "_CACHED_TOKEN_A_RED", 900_000)
+    monkeypatch.setattr(_routes, "_CACHED_TOKEN_A_HARD", 1_000_000)
+    monkeypatch.setattr(_routes, "_CACHED_TOKEN_CEILING", 1_000_000)
 
 
 # Default empty-metrics dict for mocking get_turn_count returns
@@ -337,15 +341,15 @@ class TestTurnsEndpoint:
         mock_conn.return_value = MagicMock()
         mock_count.return_value = _empty_metrics(
             turns=100, first_ts=1000.0, last_ts=8000.0,
-            current_ctx=800_000, peak_ctx=850_000,
+            current_ctx=920_000, peak_ctx=950_000,
         )
         client = TestClient(_make_app())
         resp = client.get("/api/v1/turns/heavy-session")
         data = resp.json()
-        # 800K → Zone A red (≥750K), Zone B orange (≥70%) → overall red
+        # 920K → Zone A red (≥900K), Zone B red (≥90%) → overall red
         assert data["zone"] == "red"
         assert data["zone_a"] == "red"
-        assert data["zone_b"] == "orange"
+        assert data["zone_b"] == "red"
         assert data["message"] is not None
 
     @patch("llm_relay.proxy.db.get_ttl_tier", return_value=_TTL_UNKNOWN)
@@ -356,12 +360,12 @@ class TestTurnsEndpoint:
         mock_conn.return_value = MagicMock()
         mock_count.return_value = _empty_metrics(
             turns=100, first_ts=1000.0, last_ts=8000.0,
-            current_ctx=950_000, peak_ctx=950_000,
+            current_ctx=1_000_000, peak_ctx=1_000_000,
         )
         client = TestClient(_make_app())
         resp = client.get("/api/v1/turns/over-limit")
         data = resp.json()
-        # 950K → Zone A hard (≥900K), overall hard
+        # 1M → Zone A hard (≥1M), overall hard
         assert data["zone"] == "hard"
         assert data["zone_a"] == "hard"
 
@@ -385,7 +389,7 @@ class TestTurnsAllEndpoint:
             _empty_metrics(turns=42, first_ts=1000.0, last_ts=2000.0,
                            current_ctx=50_000, peak_ctx=80_000) | {"session_id": "sid-1"},
             _empty_metrics(turns=100, first_ts=500.0, last_ts=3000.0,
-                           current_ctx=820_000, peak_ctx=850_000) | {"session_id": "sid-2"},
+                           current_ctx=920_000, peak_ctx=950_000) | {"session_id": "sid-2"},
         ]
         mock_terms.return_value = {
             "sid-1": {"cc_pid": 1000, "tty": "/dev/pts/1"},
@@ -397,11 +401,11 @@ class TestTurnsAllEndpoint:
         data = resp.json()
         assert data["count"] == 2
         assert data["sessions"][0]["zone"] == "green"
-        assert data["sessions"][1]["zone"] == "red"  # 820K → Zone A red
+        assert data["sessions"][1]["zone"] == "red"  # 920K → Zone A red (≥900K)
         assert data["sessions"][1]["zone_a"] == "red"
         assert data["sessions"][1]["message"] is not None
         assert data["sessions"][0]["current_ctx"] == 50_000
-        assert data["sessions"][1]["peak_ctx"] == 850_000
+        assert data["sessions"][1]["peak_ctx"] == 950_000
         assert data["sessions"][0]["alive"] is True
 
     @patch("llm_relay.proxy.db.get_conn")
@@ -782,39 +786,39 @@ class TestClassifyZoneAbsolute:
     def test_green(self):
         z, label, nxt, msg = _classify_zone_absolute(0)
         assert z == "green"
-        assert nxt == 300_000
+        assert nxt == 500_000
         assert msg is None
 
     def test_green_just_below_yellow(self):
-        z, *_ = _classify_zone_absolute(299_999)
+        z, *_ = _classify_zone_absolute(499_999)
         assert z == "green"
 
     def test_yellow(self):
-        z, label, nxt, msg = _classify_zone_absolute(300_000)
+        z, label, nxt, msg = _classify_zone_absolute(500_000)
         assert z == "yellow"
         assert label == "주의"
-        assert nxt == 500_000
+        assert nxt == 700_000
         assert msg is not None
 
     def test_yellow_mid(self):
-        z, *_ = _classify_zone_absolute(420_000)
+        z, *_ = _classify_zone_absolute(620_000)
         assert z == "yellow"
 
     def test_orange(self):
-        z, *_ = _classify_zone_absolute(500_000)
+        z, *_ = _classify_zone_absolute(700_000)
         assert z == "orange"
 
     def test_red(self):
-        z, label, nxt, _ = _classify_zone_absolute(750_000)
+        z, label, nxt, _ = _classify_zone_absolute(900_000)
         assert z == "red"
-        assert nxt == 900_000
+        assert nxt == 1_000_000
 
     def test_red_between_hard(self):
-        z, *_ = _classify_zone_absolute(800_000)
+        z, *_ = _classify_zone_absolute(950_000)
         assert z == "red"
 
     def test_hard(self):
-        z, label, nxt, msg = _classify_zone_absolute(900_000)
+        z, label, nxt, msg = _classify_zone_absolute(1_000_000)
         assert z == "hard"
         assert nxt is None
         assert msg is not None
@@ -897,38 +901,38 @@ class TestComputeZoneBundle:
         assert bundle["message"] is None
 
     def test_yellow_via_absolute(self):
-        bundle = _compute_zone_bundle(current_ctx=320_000, peak_ctx=320_000)
-        # 320K: A=yellow (≥300K), B=green (<500K)
+        bundle = _compute_zone_bundle(current_ctx=520_000, peak_ctx=520_000)
+        # 520K: A=yellow (≥500K), B=yellow (≥50%). Aligned.
         assert bundle["zone_a"] == "yellow"
-        assert bundle["zone_b"] == "green"
-        assert bundle["zone"] == "yellow"  # max(yellow, green)
+        assert bundle["zone_b"] == "yellow"
+        assert bundle["zone"] == "yellow"
 
     def test_orange_via_absolute(self):
-        bundle = _compute_zone_bundle(current_ctx=520_000, peak_ctx=600_000)
-        # 520K current: A=orange (≥500K), B=yellow (≥50%)
-        # 600K peak: A=orange, B=yellow
+        bundle = _compute_zone_bundle(current_ctx=720_000, peak_ctx=800_000)
+        # 720K current: A=orange (≥700K), B=orange (≥70%)
+        # 800K peak: A=orange, B=orange
         assert bundle["zone"] == "orange"
         assert bundle["zone_a"] == "orange"
-        assert bundle["zone_b"] == "yellow"
+        assert bundle["zone_b"] == "orange"
         assert bundle["zone_a_peak"] == "orange"
-        assert bundle["zone_b_peak"] == "yellow"
+        assert bundle["zone_b_peak"] == "orange"
 
     def test_peak_higher_than_current(self):
         # User /compact'd → current dropped but peak preserved
-        bundle = _compute_zone_bundle(current_ctx=50_000, peak_ctx=800_000)
+        bundle = _compute_zone_bundle(current_ctx=50_000, peak_ctx=950_000)
         assert bundle["zone"] == "green"  # current judgment
-        assert bundle["zone_a_peak"] == "red"  # 800K peak is red
-        assert bundle["zone_b_peak"] == "orange"  # 80% of 1M
+        assert bundle["zone_a_peak"] == "red"  # 950K peak is red (≥900K)
+        assert bundle["zone_b_peak"] == "red"  # 95% of 1M
 
     def test_hard_stop_via_current(self):
-        bundle = _compute_zone_bundle(current_ctx=950_000, peak_ctx=950_000)
+        bundle = _compute_zone_bundle(current_ctx=1_000_000, peak_ctx=1_000_000)
         assert bundle["zone"] == "hard"
         assert bundle["zone_a"] == "hard"
         assert bundle["message"] is not None
         assert bundle["next_threshold"] is None
 
     def test_b_stricter_than_a(self):
-        # At 700K with 1M ceiling: A=orange (≥500K), B=orange (≥70%). Equal.
+        # At 700K with 1M ceiling: A=orange (≥700K), B=orange (≥70%). Aligned.
         bundle = _compute_zone_bundle(current_ctx=700_000, peak_ctx=700_000)
         assert bundle["zone"] == "orange"
         assert bundle["zone_a"] == "orange"
