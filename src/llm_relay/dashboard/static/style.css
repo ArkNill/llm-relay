@@ -1,6 +1,22 @@
 * { margin: 0; padding: 0; box-sizing: border-box; }
-body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, monospace; background: #0d1117; color: #c9d1d9; padding: 1.5rem; max-width: 960px; margin: 0 auto; }
-header { display: flex; align-items: center; gap: 1rem; margin-bottom: 2rem; border-bottom: 1px solid #21262d; padding-bottom: 1rem; }
+body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, monospace; background: #0d1117; color: #c9d1d9; padding: 1.5rem 2rem; max-width: 1600px; width: 95vw; margin: 0 auto; }
+header { display: flex; align-items: center; gap: 1rem; margin-bottom: 1rem; border-bottom: 1px solid #21262d; padding-bottom: 1rem; }
+
+/* Status banners — horizontal row */
+.status-row { display: flex; gap: 0.5rem; margin-bottom: 1.2rem; flex-wrap: wrap; }
+.status-row .status-banner { flex: 1; min-width: 250px; margin: 0; }
+
+/* 2-column dashboard layout */
+.dashboard-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 1.5rem; }
+.dashboard-grid .col-left, .dashboard-grid .col-right { min-width: 0; }
+/* Left column gets a right border as visual divider */
+.dashboard-grid .col-left { padding-right: 1.5rem; border-right: 1px solid #21262d; }
+/* Stack to single column on narrow screens */
+@media (max-width: 1024px) {
+  .dashboard-grid { grid-template-columns: 1fr; }
+  .dashboard-grid .col-left { padding-right: 0; border-right: none; }
+  .status-row { flex-direction: column; }
+}
 h1 { font-size: 1.4rem; color: #58a6ff; }
 .nav-links { display: flex; gap: 0.6rem; }
 .nav-links a { font-size: 0.8rem; color: #8b949e; text-decoration: none; padding: 0.25rem 0.6rem; border: 1px solid #30363d; border-radius: 6px; transition: all 0.15s; }
@@ -120,7 +136,7 @@ tr.clickable { cursor: pointer; }
   align-items: center;
   gap: 0.6rem;
   padding: 0.5rem 1rem;
-  margin: 0.4rem 1rem 0.6rem 1rem;
+  margin: 0.4rem 0 0.6rem 0;
   border-radius: 6px;
   font-size: 0.85rem;
   text-decoration: none;
