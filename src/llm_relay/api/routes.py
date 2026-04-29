@@ -798,23 +798,32 @@ async def _api_history_composition(request: Request) -> Response:
         return _json_response({"error": str(e)}, status=500)
 
 
-# ── GET /api/v1/anthropic-status — proxied + cached upstream status ──
+# ── Upstream provider status (proxied + 60s-cached) ──
 
-# Module-level cache: (expiry_epoch, payload). Refreshed via 60s TTL.
-_anthropic_status_cache: Optional[tuple] = None
-_ANTHROPIC_STATUS_TTL_S = 60.0
+_STATUS_TTL_S = 60.0
+
+# Per-provider cache: {provider: (expiry_epoch, payload)}
+_status_cache = {}  # type: dict
+
 _ANTHROPIC_STATUS_URL = os.getenv(
     "LLM_RELAY_ANTHROPIC_STATUS_URL",
     "https://status.claude.com/api/v2/summary.json",
 )
+_OPENAI_STATUS_URL = os.getenv(
+    "LLM_RELAY_OPENAI_STATUS_URL",
+    "https://status.openai.com/api/v2/summary.json",
+)
+_GEMINI_STATUS_URL = os.getenv(
+    "LLM_RELAY_GEMINI_STATUS_URL",
+    "https://status.cloud.google.com/incidents.json",
+)
 
 
-def _fetch_anthropic_status_sync(now: float) -> dict:
-    """Blocking fetch of Anthropic status; runs in thread pool via asyncio.to_thread."""
+def _fetch_statuspage_sync(url: str, source_url: str, label: str, now: float) -> dict:
+    """Fetch from Statuspage.io-compatible API (Anthropic, OpenAI)."""
     try:
         req = urllib.request.Request(
-            _ANTHROPIC_STATUS_URL,
-            headers={"Accept": "application/json", "User-Agent": "llm-relay-dashboard"},
+            url, headers={"Accept": "application/json", "User-Agent": "llm-relay-dashboard"},
         )
         with urllib.request.urlopen(req, timeout=5) as resp:
             payload = json.loads(resp.read())
@@ -834,37 +843,103 @@ def _fetch_anthropic_status_sync(now: float) -> dict:
                 for i in incidents
             ],
             "last_fetched": now,
-            "source_url": "https://status.claude.com",
+            "source_url": source_url,
             "fetch_ok": True,
         }
-    except Exception as exc:  # noqa: BLE001 — surface any failure to UI
-        logger.debug("Anthropic status fetch failed: %s", exc)
+    except Exception as exc:  # noqa: BLE001
+        logger.debug("%s status fetch failed: %s", label, exc)
         return {
             "indicator": "unknown",
             "description": "Status fetch failed",
             "incidents": [],
             "last_fetched": now,
-            "source_url": "https://status.claude.com",
+            "source_url": source_url,
             "fetch_ok": False,
             "error": str(exc)[:200],
         }
 
 
-async def _api_anthropic_status(request: Request) -> Response:
-    """Return Anthropic API status with 60s in-memory cache.
+def _fetch_google_status_sync(url: str, now: float) -> dict:
+    """Fetch from Google Cloud Status API and normalize to Statuspage.io shape."""
+    try:
+        req = urllib.request.Request(
+            url, headers={"Accept": "application/json", "User-Agent": "llm-relay-dashboard"},
+        )
+        with urllib.request.urlopen(req, timeout=5) as resp:
+            all_incidents = json.loads(resp.read())
+        # Filter active incidents related to Vertex AI / Gemini / AI Platform
+        ai_keywords = ("vertex", "gemini", "ai platform", "generative", "aiplatform")
+        active = []
+        for inc in (all_incidents if isinstance(all_incidents, list) else []):
+            if inc.get("end"):
+                continue
+            desc = (inc.get("external_desc", "") + " " + inc.get("service_name", "")).lower()
+            if any(kw in desc for kw in ai_keywords) or inc.get("service_name", "") == "Multiple Products":
+                severity = inc.get("severity", "low")
+                active.append({
+                    "name": inc.get("external_desc", "")[:120],
+                    "status": inc.get("status_impact", ""),
+                    "impact": {"high": "major", "medium": "minor", "low": "minor"}.get(severity, "minor"),
+                    "updated_at": inc.get("modified", ""),
+                    "shortlink": "",
+                })
+        severity_map = {"major": 3, "minor": 1}
+        worst = max((severity_map.get(a["impact"], 0) for a in active), default=0)
+        indicator = {3: "major", 1: "minor"}.get(worst, "none")
+        return {
+            "indicator": indicator,
+            "description": "All Systems Operational" if indicator == "none" else active[0]["name"] if active else "",
+            "incidents": active[:5],
+            "last_fetched": now,
+            "source_url": "https://status.cloud.google.com",
+            "fetch_ok": True,
+        }
+    except Exception as exc:  # noqa: BLE001
+        logger.debug("Gemini status fetch failed: %s", exc)
+        return {
+            "indicator": "unknown",
+            "description": "Status fetch failed",
+            "incidents": [],
+            "last_fetched": now,
+            "source_url": "https://status.cloud.google.com",
+            "fetch_ok": False,
+            "error": str(exc)[:200],
+        }
 
-    Proxies https://status.claude.com/api/v2/summary.json so the dashboard
-    can render an upstream-status tile without each tab hammering the
-    Anthropic status page directly.
-    """
-    global _anthropic_status_cache
+
+async def _api_provider_status(provider: str, fetch_fn, request: Request) -> Response:
+    """Generic cached status endpoint."""
     now = time.time()
-    if _anthropic_status_cache is not None and _anthropic_status_cache[0] > now:
-        return _json_response(_anthropic_status_cache[1])
-
-    data = await asyncio.to_thread(_fetch_anthropic_status_sync, now)
-    _anthropic_status_cache = (now + _ANTHROPIC_STATUS_TTL_S, data)
+    cached = _status_cache.get(provider)
+    if cached is not None and cached[0] > now:
+        return _json_response(cached[1])
+    data = await asyncio.to_thread(fetch_fn, now)
+    _status_cache[provider] = (now + _STATUS_TTL_S, data)
     return _json_response(data)
+
+
+async def _api_anthropic_status(request: Request) -> Response:
+    return await _api_provider_status(
+        "anthropic",
+        lambda now: _fetch_statuspage_sync(_ANTHROPIC_STATUS_URL, "https://status.claude.com", "Anthropic", now),
+        request,
+    )
+
+
+async def _api_openai_status(request: Request) -> Response:
+    return await _api_provider_status(
+        "openai",
+        lambda now: _fetch_statuspage_sync(_OPENAI_STATUS_URL, "https://status.openai.com", "OpenAI", now),
+        request,
+    )
+
+
+async def _api_gemini_status(request: Request) -> Response:
+    return await _api_provider_status(
+        "gemini",
+        lambda now: _fetch_google_status_sync(_GEMINI_STATUS_URL, now),
+        request,
+    )
 
 
 def get_api_routes() -> List[Route]:
@@ -890,6 +965,8 @@ def get_api_routes() -> List[Route]:
         Route("/api/v1/history/{session_id}", _api_history_detail, methods=["GET"]),
         Route("/api/v1/history/{session_id}/compactions", _api_history_compactions, methods=["GET"]),
         Route("/api/v1/history/{session_id}/composition", _api_history_composition, methods=["GET"]),
-        # Upstream Anthropic status (proxied + cached 60s)
+        # Upstream provider status (proxied + cached 60s)
         Route("/api/v1/anthropic-status", _api_anthropic_status, methods=["GET"]),
+        Route("/api/v1/openai-status", _api_openai_status, methods=["GET"]),
+        Route("/api/v1/gemini-status", _api_gemini_status, methods=["GET"]),
     ]

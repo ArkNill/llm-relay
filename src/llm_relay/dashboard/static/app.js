@@ -28,8 +28,8 @@
     badge.className = "badge badge-" + (data.status === "ok" ? "ok" : "degraded");
   }
 
-  // Map Anthropic status indicator → CSS state class + human label
-  var ANTHROPIC_STATUS_LABELS = {
+  // Status indicator labels (shared by all providers)
+  var STATUS_LABELS = {
     none: "API operational",
     minor: "Minor disruption",
     major: "Major outage",
@@ -38,24 +38,23 @@
     unknown: "Status unavailable",
   };
 
-  async function loadAnthropicStatus() {
-    var banner = document.getElementById("anthropic-status-banner");
+  function renderStatusBanner(bannerId, incidentId, fetchedId, providerLabel, data) {
+    var banner = document.getElementById(bannerId);
     var textEl = banner.querySelector(".status-text");
-    var incidentEl = document.getElementById("anthropic-status-incident");
-    var fetchedEl = document.getElementById("anthropic-status-fetched");
-    var data = await fetchJSON("/anthropic-status");
+    var incidentEl = document.getElementById(incidentId);
+    var fetchedEl = document.getElementById(fetchedId);
     if (!data) {
       banner.className = "status-banner status-unknown";
-      textEl.textContent = "Anthropic status: unavailable";
+      textEl.textContent = providerLabel + " status: unavailable";
       incidentEl.textContent = "";
       fetchedEl.textContent = "";
       return;
     }
     var indicator = data.indicator || "unknown";
-    var label = ANTHROPIC_STATUS_LABELS[indicator] || ("Status: " + indicator);
+    var label = STATUS_LABELS[indicator] || ("Status: " + indicator);
     var description = data.description || "";
     banner.className = "status-banner status-" + indicator;
-    textEl.textContent = "Anthropic: " + label + (description && indicator !== "none" ? " — " + description : "");
+    textEl.textContent = providerLabel + ": " + label + (description && indicator !== "none" ? " — " + description : "");
     if (data.incidents && data.incidents.length > 0) {
       var top = data.incidents[0];
       var bits = [top.name];
@@ -65,11 +64,22 @@
     } else {
       incidentEl.textContent = "";
     }
-    if (data.last_fetched) {
-      fetchedEl.textContent = "fetched " + timeAgo(data.last_fetched);
-    } else {
-      fetchedEl.textContent = "";
-    }
+    fetchedEl.textContent = data.last_fetched ? "fetched " + timeAgo(data.last_fetched) : "";
+  }
+
+  async function loadAnthropicStatus() {
+    var data = await fetchJSON("/anthropic-status");
+    renderStatusBanner("anthropic-status-banner", "anthropic-status-incident", "anthropic-status-fetched", "Anthropic", data);
+  }
+
+  async function loadOpenAIStatus() {
+    var data = await fetchJSON("/openai-status");
+    renderStatusBanner("openai-status-banner", "openai-status-incident", "openai-status-fetched", "OpenAI", data);
+  }
+
+  async function loadGeminiStatus() {
+    var data = await fetchJSON("/gemini-status");
+    renderStatusBanner("gemini-status-banner", "gemini-status-incident", "gemini-status-fetched", "Gemini", data);
   }
 
   async function loadCLIStatus() {
@@ -503,6 +513,8 @@
   // Initial load
   loadHealth();
   loadAnthropicStatus();
+  loadOpenAIStatus();
+  loadGeminiStatus();
   loadCLIStatus();
   loadStats();
   loadHistory();
@@ -523,7 +535,7 @@
     }
     if (otherInterval === null) {
       otherInterval = setInterval(function () {
-        loadHealth(); loadAnthropicStatus(); loadStats(); loadHistory();
+        loadHealth(); loadAnthropicStatus(); loadOpenAIStatus(); loadGeminiStatus(); loadStats(); loadHistory();
         loadQuota(); loadErrors(); loadCache(); loadTTL();
       }, 30000);
     }
