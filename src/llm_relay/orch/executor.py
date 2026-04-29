@@ -31,7 +31,7 @@ _DEFAULT_TIMEOUT = int(os.environ.get("LLM_RELAY_ORCH_EXEC_TIMEOUT", "120"))
 # script exists and is executable.
 _CODEX_GH_TOKEN_SCRIPT = os.environ.get(
     "LLM_RELAY_CODEX_GH_TOKEN_SCRIPT",
-    os.path.expanduser("~/.claude/github-apps/generate-token.sh"),
+    os.path.expanduser("~/.llm-relay/github-apps/generate-token.sh"),
 )
 _CODEX_GH_TOKEN_AGENT = os.environ.get("LLM_RELAY_CODEX_GH_AGENT", "codex-reviewer")
 _CODEX_GH_TOKEN_TTL_S = 3000  # 50 min cache; tokens themselves expire at 60
