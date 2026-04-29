@@ -77,20 +77,20 @@ def _codex_classify_absolute(tokens: int) -> tuple[str, str, Optional[int], Opti
     hard = int(os.getenv("CODEX_TOKEN_A_HARD", "760000"))
 
     if tokens >= hard:
-        return "hard", "차단", None, f"{hard // 1000}K current 초과. 즉시 세션 정리 필요."
+        return "hard", "blocked", None, f"Exceeded {hard // 1000}K current. Immediate session cleanup required."
     if tokens >= red:
-        return "red", "위험", hard, f"{red // 1000}K current 도달. 세션 로테이션 필수."
+        return "red", "danger", hard, f"Reached {red // 1000}K current. Session rotation required."
     if tokens >= orange:
-        return "orange", "경고", red, f"{orange // 1000}K current 도달. 현재 작업 마무리 후 rotate."
+        return "orange", "warning", red, f"Reached {orange // 1000}K current. Finish current work then rotate."
     if tokens >= yellow:
-        return "yellow", "주의", orange, f"{yellow // 1000}K current 도달. 문서 업데이트 + rotate 준비."
-    return "green", "안전", yellow, None
+        return "yellow", "caution", orange, f"Reached {yellow // 1000}K current. Update docs and prepare to rotate."
+    return "green", "safe", yellow, None
 
 
 def _codex_classify_ratio(tokens: int, ceiling: int) -> tuple[str, str, Optional[int], Optional[str]]:
     """Classify Codex live context as a ratio of the runtime ceiling."""
     if ceiling <= 0:
-        return "green", "안전", 0, None
+        return "green", "safe", 0, None
 
     yellow_t = int(ceiling * 0.50)
     orange_t = int(ceiling * 0.70)
@@ -98,14 +98,14 @@ def _codex_classify_ratio(tokens: int, ceiling: int) -> tuple[str, str, Optional
     ratio = tokens / ceiling if ceiling else 0.0
 
     if ratio >= 1.0:
-        return "hard", "차단", None, f"100% ({ceiling // 1000}K) 런타임 천장 도달. 즉시 세션 정리."
+        return "hard", "blocked", None, f"100% ({ceiling // 1000}K) runtime ceiling reached. Immediate session cleanup."
     if ratio >= 0.90:
-        return "red", "위험", ceiling, f"90% ({red_t // 1000}K) 도달. 로테이션 필수."
+        return "red", "danger", ceiling, f"90% ({red_t // 1000}K) reached. Rotation required."
     if ratio >= 0.70:
-        return "orange", "경고", red_t, f"70% ({orange_t // 1000}K) 도달. 마무리 후 rotate."
+        return "orange", "warning", red_t, f"70% ({orange_t // 1000}K) reached. Finish then rotate."
     if ratio >= 0.50:
-        return "yellow", "주의", orange_t, f"50% ({yellow_t // 1000}K) 도달. rotate 준비."
-    return "green", "안전", yellow_t, None
+        return "yellow", "caution", orange_t, f"50% ({yellow_t // 1000}K) reached. Prepare to rotate."
+    return "green", "safe", yellow_t, None
 
 
 def _codex_compute_zone_bundle(current_ctx: int, peak_ctx: int, model_window: int) -> dict:
