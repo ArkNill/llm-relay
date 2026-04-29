@@ -299,6 +299,8 @@ async def _api_turns_all(request: Request) -> Response:
             zones = _compute_zone_bundle(r["current_ctx"], r["peak_ctx"])
             sessions.append({
                 "session_id": r["session_id"],
+                "term_name": term.get("term_name"),
+                "tty": term.get("tty"),
                 "turns": r["turns"],
                 "first_ts": r["first_ts"],
                 "last_ts": r["last_ts"],
