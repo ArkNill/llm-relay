@@ -37,8 +37,8 @@ src/llm_relay/
 ## 운영
 
 ```
-# Docker 프록시 (cc-relay 대체, port 8080 + 8082)
-# DB: ~/.cc-relay/usage.db 직접 이어쓰기
+# Docker 프록시 (port 8080)
+# DB: ~/.llm-relay/usage.db
 docker compose up -d
 
 # API + 대시보드 (ZBook 다이렉트, port 8083)
@@ -95,7 +95,7 @@ grep -rn "1,000,000\|999999\|keepRecent.*999\|gap.*9999\|intercept\.py\|inject\.
 ## 공개 준비 검증 (2026-04-15)
 
 - ruff 린트 0 에러 (79개 수정: cc_relay→llm_relay 11곳, Py3.9 호환, import 정리)
-- 481 tests pass (4/28, v0.8.6: composition 22 + per-tool detail 8 tests)
+- 481 tests pass (4/29, v0.9.0: LLM_ env rename + 2-tier .env + composition)
 - 시크릿/하드코딩 0건, .gitignore 정상
 - display 페이지 CC+Codex+Gemini 3 CLI 통합 표시 완료 (composition 파이차트, cache hit rate, duplicate reads, TTY/conn_type/term_name, 도구별 호출횟수, exec 성공률, thinking count)
 - Codex/Gemini는 프록시 DB 미경유 → provider 어댑터 직접 세션 파일 탐색으로 병합
