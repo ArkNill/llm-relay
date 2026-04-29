@@ -161,7 +161,10 @@ def _classify_zone(turns: int) -> tuple:
     if turns >= red:
         return "red", "danger", None, f"Exceeded {red} turns. Quality degradation likely. Switch to a new session."
     if turns >= orange:
-        return "orange", "warning", red, f"Reached {orange} turns. Approaching quality degradation. Rotation recommended."
+        return "orange", "warning", red, (
+            f"Reached {orange} turns. "
+            "Approaching quality degradation. Rotation recommended."
+        )
     if turns >= yellow:
         return "yellow", "caution", orange, f"Reached {yellow} turns. Prepare a new session."
     return "green", "safe", yellow, None
