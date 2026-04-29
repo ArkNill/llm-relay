@@ -4,8 +4,8 @@ build-backend = "hatchling.build"
 
 [project]
 name = "llm-relay"
-version = "0.8.6"
-description = "Unified LLM usage management — API proxy, session diagnostics, multi-CLI orchestration."
+version = "0.8.0"
+description = "Unified LLM usage management — API proxy, session diagnostics, multi-CLI orchestration. Mirror Agent open-network DLC."
 readme = "README.md"
 license = "MIT"
 requires-python = ">=3.9"
@@ -23,7 +23,7 @@ keywords = [
     "session-health",
 ]
 classifiers = [
-    "Development Status :: 4 - Beta",
+    "Development Status :: 3 - Alpha",
     "Intended Audience :: Developers",
     "Intended Audience :: End Users/Desktop",
     "License :: OSI Approved :: MIT License",
