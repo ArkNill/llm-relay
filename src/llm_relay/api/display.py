@@ -2,41 +2,50 @@
 
 Lightweight tail-based JSONL parsing for real-time dashboard display.
 Supports Claude Code, OpenAI Codex, and Gemini CLI sessions.
-Also provides CLI process liveness check via /proc (Linux) or psutil (Windows).
+Also provides cross-platform CLI process liveness check.
 """
 
 from __future__ import annotations
 
 import json
 import os
-import sys
 import time as _time
 from pathlib import Path
 from typing import Optional
 
+from llm_relay.api._compat import (
+    _is_cli_process_name as _is_cli_process,  # noqa: F401 (re-exported for tests)
+)
+from llm_relay.api._compat import (
+    collect_open_session_path_pids as _collect_open_session_path_pids,
+)
+from llm_relay.api._compat import (
+    find_cli_pid_by_tty,
+    is_cli_process_alive,
+)
+from llm_relay.api._compat import (
+    get_parent_comm_chain as _get_parent_comm_chain,
+)
+from llm_relay.api._compat import (
+    get_process_terminal_name as _get_process_terminal_name,
+)
+from llm_relay.api._compat import (
+    get_process_tty as _get_process_tty,
+)
+from llm_relay.api._compat import (
+    read_proc_environ as _read_proc_environ,
+)
 from llm_relay.detect.scanner import find_projects_dir
 
-_IS_LINUX = sys.platform.startswith("linux")
+# Official OpenAI public limit for GPT-5.5 Thinking Pro / GPT-5 Codex-class
+# models: 400k context with 128k max output, leaving 272k input context.
+_OPENAI_CODEX_OFFICIAL_CONTEXT_WINDOW = 400_000
+_OPENAI_CODEX_OFFICIAL_MAX_OUTPUT = 128_000
+_OPENAI_CODEX_OFFICIAL_INPUT_WINDOW = (
+    _OPENAI_CODEX_OFFICIAL_CONTEXT_WINDOW - _OPENAI_CODEX_OFFICIAL_MAX_OUTPUT
+)
 
-# Known CLI binary names for process detection
-_CLI_PROCESS_NAMES = {"claude", "codex", "gemini", "node", "bun", "deno"}
-
-# Lazy psutil import for non-Linux platforms
-_psutil = None
-_psutil_checked = False
-
-
-def _get_psutil():
-    """Soft-import psutil. Returns module or None."""
-    global _psutil, _psutil_checked
-    if not _psutil_checked:
-        try:
-            import psutil
-            _psutil = psutil
-        except ImportError:
-            _psutil = None
-        _psutil_checked = True
-    return _psutil
+_CODEX_ZONE_ORDER = {"green": 0, "yellow": 1, "orange": 2, "red": 3, "hard": 4}
 
 # Filters for non-user-input messages that live under type=="user"
 _WRAPPER_PREFIXES = (
@@ -47,6 +56,90 @@ _WRAPPER_PREFIXES = (
     "<tool_use_error",
     "<user-prompt-submit-hook",
 )
+
+
+def _codex_display_ceiling() -> int:
+    """Operator-facing cumulative ceiling for Codex session cards."""
+    return int(os.getenv("CODEX_TOKEN_DISPLAY_CEILING", os.getenv("CODEX_TOKEN_CEILING", "684000")))
+
+
+def _codex_zone_ceiling(model_window: int) -> int:
+    """Runtime ceiling used for ratio-based Codex cumulative guard."""
+    fallback = model_window or 760000
+    return int(os.getenv("CODEX_TOKEN_ZONE_CEILING", str(fallback)))
+
+
+def _codex_classify_absolute(tokens: int) -> tuple[str, str, Optional[int], Optional[str]]:
+    """Classify Codex live context against fixed operator thresholds."""
+    yellow = int(os.getenv("CODEX_TOKEN_A_YELLOW", "272000"))
+    orange = int(os.getenv("CODEX_TOKEN_A_ORANGE", "418000"))
+    red = int(os.getenv("CODEX_TOKEN_A_RED", "684000"))
+    hard = int(os.getenv("CODEX_TOKEN_A_HARD", "760000"))
+
+    if tokens >= hard:
+        return "hard", "차단", None, f"{hard // 1000}K current 초과. 즉시 세션 정리 필요."
+    if tokens >= red:
+        return "red", "위험", hard, f"{red // 1000}K current 도달. 세션 로테이션 필수."
+    if tokens >= orange:
+        return "orange", "경고", red, f"{orange // 1000}K current 도달. 현재 작업 마무리 후 rotate."
+    if tokens >= yellow:
+        return "yellow", "주의", orange, f"{yellow // 1000}K current 도달. 문서 업데이트 + rotate 준비."
+    return "green", "안전", yellow, None
+
+
+def _codex_classify_ratio(tokens: int, ceiling: int) -> tuple[str, str, Optional[int], Optional[str]]:
+    """Classify Codex live context as a ratio of the runtime ceiling."""
+    if ceiling <= 0:
+        return "green", "안전", 0, None
+
+    yellow_t = int(ceiling * 0.50)
+    orange_t = int(ceiling * 0.70)
+    red_t = int(ceiling * 0.90)
+    ratio = tokens / ceiling if ceiling else 0.0
+
+    if ratio >= 1.0:
+        return "hard", "차단", None, f"100% ({ceiling // 1000}K) 런타임 천장 도달. 즉시 세션 정리."
+    if ratio >= 0.90:
+        return "red", "위험", ceiling, f"90% ({red_t // 1000}K) 도달. 로테이션 필수."
+    if ratio >= 0.70:
+        return "orange", "경고", red_t, f"70% ({orange_t // 1000}K) 도달. 마무리 후 rotate."
+    if ratio >= 0.50:
+        return "yellow", "주의", orange_t, f"50% ({yellow_t // 1000}K) 도달. rotate 준비."
+    return "green", "안전", yellow_t, None
+
+
+def _codex_compute_zone_bundle(current_ctx: int, peak_ctx: int, model_window: int) -> dict:
+    """Compute Codex-only live-context zones without affecting Claude/Gemini paths."""
+    zone_ceiling = _codex_zone_ceiling(model_window)
+    zone_a = _codex_classify_absolute(current_ctx)
+    zone_b = _codex_classify_ratio(current_ctx, zone_ceiling)
+    zone_a_peak = _codex_classify_absolute(peak_ctx)
+    zone_b_peak = _codex_classify_ratio(peak_ctx, zone_ceiling)
+    zone = zone_a[0] if _CODEX_ZONE_ORDER[zone_a[0]] >= _CODEX_ZONE_ORDER[zone_b[0]] else zone_b[0]
+
+    if _CODEX_ZONE_ORDER[zone_a[0]] >= _CODEX_ZONE_ORDER[zone_b[0]]:
+        message = zone_a[3]
+        next_threshold = zone_a[2]
+    else:
+        message = zone_b[3]
+        next_threshold = zone_b[2]
+
+    return {
+        "zone": zone,
+        "zone_a": zone_a[0],
+        "zone_a_label": zone_a[1],
+        "zone_a_message": zone_a[3],
+        "zone_a_next": zone_a[2],
+        "zone_b": zone_b[0],
+        "zone_b_label": zone_b[1],
+        "zone_b_message": zone_b[3],
+        "zone_b_next": zone_b[2],
+        # Keep legacy fields populated for consumers that still read them.
+        "zone_a_peak": zone_a_peak[0],
+        "zone_b_peak": zone_b_peak[0],
+        "message": message,
+        "next_threshold": next_threshold,
+    }
 
 
 def _extract_text(content) -> str:
@@ -95,32 +188,32 @@ def _get_projects_dirs(projects_dir: Optional[Path] = None) -> list:
     """Return candidate session directories for all supported CLIs.
 
     Searches:
-      - Claude Code: ~/.claude/projects/ + ~/.claude-gt/projects/ + env override
+      - Claude Code: ~/.claude/projects/ + alternate config dirs + env override
       - Codex: ~/.codex/sessions/
       - Gemini: ~/.gemini/tmp/*/chats/
     """
     if projects_dir is not None:
         return [projects_dir]
     dirs: list[Path] = []
-    env_path = os.getenv("CC_CLAUDE_PROJECTS_DIR")
+    env_path = os.getenv("LLM_RELAY_CLAUDE_PROJECTS_DIR")
     if env_path:
         dirs.append(Path(env_path))
     # Claude Code -- stock
     stock = find_projects_dir()
     if stock.is_dir() and stock not in dirs:
         dirs.append(stock)
-    # Claude Code -- claudeGt isolated
+    # Claude Code -- alternate config dir
     gt = Path.home() / ".claude-gt" / "projects"
     if gt.is_dir() and gt not in dirs:
         dirs.append(gt)
     # Codex -- sessions dir
-    codex_env = os.environ.get("LLM_RELAY_CODEX_HOME")
+    codex_env = os.environ.get("CCPULSE_CODEX_HOME")
     codex_base = Path(codex_env) if codex_env else Path.home() / ".codex"
     codex_sessions = codex_base / "sessions"
     if codex_sessions.is_dir() and codex_sessions not in dirs:
         dirs.append(codex_sessions)
     # Gemini -- tmp/*/chats dirs
-    gemini_env = os.environ.get("LLM_RELAY_GEMINI_HOME")
+    gemini_env = os.environ.get("CCPULSE_GEMINI_HOME")
     gemini_home = Path(gemini_env) if gemini_env else Path.home() / ".gemini"
     gemini_tmp = gemini_home / "tmp"
     if gemini_tmp.is_dir():
@@ -416,491 +509,9 @@ def get_last_user_prompt(session_id: str, projects_dir: Optional[Path] = None) -
         return _extract_prompt_from_cc(lines)
 
 
-def _get_proc_dir() -> Path:
-    """Return the /proc directory path (host /proc if mounted, else local).
-
-    Only meaningful on Linux. Windows callers should check _IS_LINUX first.
-    """
-    env_path = os.getenv("CC_HOST_PROC")
-    if env_path:
-        return Path(env_path)
-    return Path("/proc")
-
-
-def _is_cli_process(comm: str, cmdline: str) -> bool:
-    """Check if a process name or cmdline matches any known CLI tool."""
-    comm_lower = comm.lower()
-    cmdline_lower = cmdline.lower()
-    for name in _CLI_PROCESS_NAMES:
-        if comm_lower == name or name in cmdline_lower:
-            return True
-    return False
-
-
-def find_cli_pid_by_tty(tty: Optional[str]) -> Optional[int]:
-    """Find a running CLI process (claude/codex/gemini) on a given TTY.
-
-    Linux: scans /proc/*/stat for TTY major/minor matching.
-    Windows: TTY concept does not apply -- always returns None.
-
-    Args:
-        tty: TTY path like "/dev/pts/8" or "pts/8".
-
-    Returns:
-        PID of the matching CLI process, or None if not found.
-    """
-    if not tty:
-        return None
-
-    if not _IS_LINUX:
-        return None
-
-    tty_short = tty.replace("/dev/", "")
-    if not tty_short:
-        return None
-
-    proc_dir = _get_proc_dir()
-    try:
-        for entry in proc_dir.iterdir():
-            if not entry.name.isdigit():
-                continue
-            try:
-                cmdline_path = entry / "cmdline"
-                if not cmdline_path.exists():
-                    continue
-                cmdline = cmdline_path.read_bytes().decode("utf-8", errors="replace")
-                comm = ""
-                comm_path = entry / "comm"
-                if comm_path.exists():
-                    comm = comm_path.read_text(errors="replace").strip()
-                if not _is_cli_process(comm, cmdline):
-                    continue
-                stat_path = entry / "stat"
-                if not stat_path.exists():
-                    continue
-                stat_content = stat_path.read_text(errors="replace")
-                rparen = stat_content.rfind(")")
-                if rparen == -1:
-                    continue
-                fields = stat_content[rparen + 1:].split()
-                if len(fields) < 5:
-                    continue
-                tty_nr = int(fields[4])
-                major = (tty_nr >> 8) & 0xff
-                minor = (tty_nr & 0xff) | ((tty_nr >> 12) & 0xfff00)
-                if major == 136:
-                    candidate = "pts/{}".format(minor)
-                elif major == 4:
-                    candidate = "tty{}".format(minor)
-                else:
-                    continue
-                if candidate == tty_short:
-                    return int(entry.name)
-            except (OSError, ValueError, PermissionError):
-                continue
-    except OSError:
-        pass
-    return None
-
-
-def is_cli_process_alive(pid: Optional[int]) -> bool:
-    """Check if a process is alive and is a known CLI instance.
-
-    Linux: reads /proc/PID/cmdline.
-    Windows/macOS: uses psutil.Process(pid).cmdline().
-
-    Args:
-        pid: Process ID to check. Returns False if None or invalid.
-
-    Returns:
-        True if the process exists and looks like a CLI tool, False otherwise.
-    """
-    if not pid or pid <= 0:
-        return False
-
-    if _IS_LINUX:
-        proc_dir = _get_proc_dir() / str(pid)
-        if not proc_dir.exists():
-            return False
-        try:
-            cmdline_path = proc_dir / "cmdline"
-            if not cmdline_path.exists():
-                return False
-            cmdline = cmdline_path.read_bytes().decode("utf-8", errors="replace")
-            comm = ""
-            comm_path = proc_dir / "comm"
-            if comm_path.exists():
-                comm = comm_path.read_text(errors="replace").strip()
-            return _is_cli_process(comm, cmdline)
-        except (OSError, PermissionError):
-            return False
-
-    # Non-Linux: psutil fallback
-    psutil = _get_psutil()
-    if psutil is None:
-        return False
-    try:
-        proc = psutil.Process(pid)
-        if not proc.is_running():
-            return False
-        cmdline = " ".join(proc.cmdline())
-        comm = proc.name()
-        return _is_cli_process(comm, cmdline)
-    except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess, OSError):
-        return False
-
-
 # Backward-compatible aliases
 find_claude_pid_by_tty = find_cli_pid_by_tty
 is_cc_process_alive = is_cli_process_alive
-
-
-# ── CC session liveness helpers (shared by /display and /turns endpoints) ──
-
-def collect_owned_cc_pids(terminals: dict) -> set:
-    """Return the set of cc_pids from terminals whose process is currently alive.
-
-    Used as the "claimed PID" set when deciding whether to fall back to TTY
-    lookup for a session whose registered cc_pid is dead — a TTY-discovered
-    PID is only valid if it isn't already claimed by another live session.
-    """
-    owned: set = set()
-    for term in terminals.values():
-        pid = term.get("cc_pid")
-        if pid and is_cc_process_alive(pid):
-            owned.add(pid)
-    return owned
-
-
-def check_cc_session_alive(
-    term: dict,
-    last_ts: Optional[float],
-    owned_cc_pids: set,
-    now_ts: float,
-    stale_tty_window_s: int = 600,
-) -> bool:
-    """Decide whether a CC session is alive given its terminal record.
-
-    Two-tier check:
-    1. Registered cc_pid is alive -> alive (source of truth).
-    2. cc_pid dead/missing, but the session was active within
-       stale_tty_window_s AND a claude process exists on its TTY whose PID
-       is not already claimed by another live registered session -> alive
-       (handles intermediate shell-process PID drift without resurrecting
-       long-dead sessions when a new CC reuses the same /dev/pts/N).
-    """
-    if not term:
-        return False
-    cc_pid = term.get("cc_pid")
-    tty = term.get("tty")
-    if cc_pid and is_cc_process_alive(cc_pid):
-        return True
-    if tty and last_ts and (now_ts - last_ts) < stale_tty_window_s:
-        real_pid = find_claude_pid_by_tty(tty)
-        if real_pid and real_pid not in owned_cc_pids:
-            return True
-    return False
-
-
-# ── External CLI (Codex/Gemini) liveness via open file descriptors ──
-
-def _collect_open_session_paths(proc_dir: Optional[Path] = None) -> set:
-    """Return resolved paths of session JSONL/JSON files held open by any process.
-
-    Codex/Gemini transcripts persist on disk after the CLI exits, so file
-    mtime is not a reliable liveness signal. Instead we check whether any
-    process currently has the transcript open as a file descriptor.
-
-    Linux: reads /proc/*/fd symlinks.
-    Windows: uses psutil to enumerate open files across all processes.
-    """
-    open_paths: set = set()
-
-    if _IS_LINUX:
-        if proc_dir is None:
-            proc_dir = _get_proc_dir()
-        try:
-            entries = list(proc_dir.iterdir())
-        except OSError:
-            return open_paths
-        for entry in entries:
-            if not entry.name.isdigit():
-                continue
-            fd_dir = entry / "fd"
-            try:
-                fds = list(fd_dir.iterdir())
-            except (OSError, PermissionError):
-                continue
-            for fd in fds:
-                try:
-                    target = os.readlink(str(fd))
-                except OSError:
-                    continue
-                if not (target.endswith(".jsonl") or target.endswith(".json")):
-                    continue
-                try:
-                    resolved = str(Path(target).resolve())
-                except OSError:
-                    resolved = target
-                open_paths.add(resolved)
-        return open_paths
-
-    # Non-Linux: psutil fallback
-    psutil = _get_psutil()
-    if psutil is None:
-        return open_paths
-    try:
-        for proc in psutil.process_iter(["pid"]):
-            try:
-                for f in proc.open_files():
-                    if f.path.endswith(".jsonl") or f.path.endswith(".json"):
-                        try:
-                            resolved = str(Path(f.path).resolve())
-                        except OSError:
-                            resolved = f.path
-                        open_paths.add(resolved)
-            except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess, OSError):
-                continue
-    except (psutil.Error, OSError):
-        pass
-    return open_paths
-
-
-def _parse_codex_session_raw(path: Path) -> dict:
-    """Parse a Codex JSONL session file directly.
-
-    Returns: {"user_turns": int, "first_ts": str|None, "last_ts": str|None}
-    """
-    user_turns = 0
-    first_ts = None
-    last_ts = None
-    last_user_text = ""
-    last_user_ts = None
-
-    try:
-        for line in _tail_lines(path, max_bytes=512 * 1024):
-            line = line.strip()
-            if not line:
-                continue
-            try:
-                obj = json.loads(line)
-            except (json.JSONDecodeError, ValueError):
-                continue
-            ts = obj.get("timestamp")
-            if ts and first_ts is None:
-                first_ts = ts
-            if ts:
-                last_ts = ts
-
-            entry_type = obj.get("type", "")
-            if entry_type == "response_item":
-                payload = obj.get("payload", {})
-                if payload.get("role") == "user":
-                    user_turns += 1
-                    content = payload.get("content", [])
-                    for part in content:
-                        if isinstance(part, dict):
-                            text = part.get("text", "")
-                            if text and _is_real_user_prompt(text):
-                                last_user_text = text.strip()[:500]
-                                last_user_ts = ts
-            elif entry_type == "event_msg":
-                payload = obj.get("payload", {})
-                if payload.get("type") == "user_message":
-                    text = payload.get("text", payload.get("message", ""))
-                    if isinstance(text, str) and _is_real_user_prompt(text):
-                        last_user_text = text.strip()[:500]
-                        last_user_ts = ts
-    except OSError:
-        pass
-
-    return {
-        "user_turns": user_turns,
-        "first_ts": first_ts,
-        "last_ts": last_ts,
-        "last_user_text": last_user_text,
-        "last_user_ts": last_user_ts,
-    }
-
-
-def _parse_gemini_session_raw(path: Path) -> dict:
-    """Parse a Gemini session JSON file directly.
-
-    Gemini uses {sessionId, messages: [{type, content}]} format.
-
-    Returns: {"user_turns": int, "first_ts": str|None, "last_ts": str|None}
-    """
-    user_turns = 0
-    first_ts = None
-    last_ts = None
-    last_user_text = ""
-    last_user_ts = None
-
-    try:
-        content = path.read_text(encoding="utf-8", errors="replace").strip()
-        if not content:
-            return {"user_turns": 0, "first_ts": None, "last_ts": None,
-                    "last_user_text": "", "last_user_ts": None}
-
-        data = json.loads(content)
-
-        # Handle nested messages format: {messages: [{type, content}]}
-        if isinstance(data, dict):
-            first_ts = data.get("startTime")
-            last_ts = data.get("lastUpdated")
-            messages = data.get("messages", [])
-        elif isinstance(data, list):
-            messages = data
-        else:
-            messages = []
-
-        for msg in messages:
-            if not isinstance(msg, dict):
-                continue
-            msg_type = msg.get("type", msg.get("role", ""))
-            ts = msg.get("timestamp", msg.get("createdAt"))
-            if ts and first_ts is None:
-                first_ts = ts
-            if ts:
-                last_ts = ts
-
-            if msg_type == "user":
-                user_turns += 1
-                # Content can be string or list of parts
-                msg_content = msg.get("content", msg.get("text", ""))
-                if isinstance(msg_content, list):
-                    for part in msg_content:
-                        if isinstance(part, dict):
-                            text = part.get("text", "")
-                            if text and _is_real_user_prompt(text):
-                                last_user_text = text.strip()[:500]
-                                last_user_ts = ts
-                elif isinstance(msg_content, str) and _is_real_user_prompt(msg_content):
-                    last_user_text = msg_content.strip()[:500]
-                    last_user_ts = ts
-    except (OSError, json.JSONDecodeError):
-        pass
-
-    return {
-        "user_turns": user_turns,
-        "first_ts": first_ts,
-        "last_ts": last_ts,
-        "last_user_text": last_user_text,
-        "last_user_ts": last_user_ts,
-    }
-
-
-def discover_external_cli_sessions(
-    window_hours: float = 4.0,
-    include_dead: bool = False,
-) -> list:
-    """Discover active Codex/Gemini sessions not tracked by the proxy DB.
-
-    Directly parses session files (not using provider parsers, which may not
-    match the actual on-disk format for display purposes). A session is
-    considered alive only if its transcript file is currently held open by
-    some process — after the CLI exits the kernel releases the fd and the
-    session is filtered out unless include_dead=True.
-
-    Args:
-        window_hours: Only include sessions modified within this time window.
-        include_dead: When True, return dead sessions too with alive=False.
-    """
-    import time
-
-    cutoff = time.time() - (window_hours * 3600)
-    results: list = []
-
-    try:
-        from llm_relay.providers import get_all_providers
-    except ImportError:
-        return results
-
-    open_paths = _collect_open_session_paths()
-
-    for provider in get_all_providers():
-        if provider.provider_id == "claude-code":
-            continue
-
-        try:
-            sessions = provider.discover_sessions(limit=20)
-        except Exception:
-            continue
-
-        for sf in sessions:
-            if sf.mtime < cutoff:
-                continue
-
-            try:
-                resolved = str(sf.path.resolve())
-            except OSError:
-                resolved = str(sf.path)
-            alive = resolved in open_paths
-            if not alive and not include_dead:
-                continue
-
-            # Parse directly based on provider type
-            if provider.provider_id == "openai-codex":
-                info = _parse_codex_session_raw(sf.path)
-            elif provider.provider_id == "gemini-cli":
-                info = _parse_gemini_session_raw(sf.path)
-            else:
-                continue
-
-            user_turns = info["user_turns"]
-            if user_turns == 0:
-                continue
-
-            first_ts = _iso_to_epoch(info["first_ts"]) if info["first_ts"] else None
-            last_ts = _iso_to_epoch(info["last_ts"]) if info["last_ts"] else None
-
-            duration_s = 0.0
-            if first_ts and last_ts:
-                duration_s = last_ts - first_ts
-
-            results.append({
-                "session_id": sf.session_id,
-                "provider": provider.provider_id,
-                "provider_name": provider.display_name,
-                "turns": user_turns,
-                "first_ts": first_ts,
-                "last_ts": last_ts,
-                "duration_s": round(duration_s, 1),
-                "current_ctx": 0,
-                "peak_ctx": 0,
-                "recent_peak": 0,
-                "cumul_unique": 0,
-                "ceiling": 0,
-                "abs_zone": "unknown",
-                "abs_color": "gray",
-                "ratio_zone": "unknown",
-                "ratio_color": "gray",
-                "last_prompt": info["last_user_text"],
-                "last_prompt_ts": info["last_user_ts"],
-                "tty": None,
-                "cc_pid": None,
-                "term_pid": None,
-                "term_name": None,
-                "alive": alive,
-            })
-
-    return results
-
-
-def _iso_to_epoch(ts: str) -> Optional[float]:
-    """Best-effort ISO 8601 timestamp to epoch seconds."""
-    if not ts:
-        return None
-    from datetime import datetime, timezone
-    try:
-        # Handle Z suffix
-        ts = ts.replace("Z", "+00:00")
-        dt = datetime.fromisoformat(ts)
-        if dt.tzinfo is None:
-            dt = dt.replace(tzinfo=timezone.utc)
-        return dt.timestamp()
-    except (ValueError, OSError):
-        return None
 
 
 # ── Connection type detection ──
@@ -908,88 +519,6 @@ def _iso_to_epoch(ts: str) -> Optional[float]:
 # Cache: pid -> (timestamp, result)
 _conn_type_cache: dict = {}
 _CONN_CACHE_TTL = 60.0  # seconds
-
-
-def _read_proc_environ(pid: int) -> dict:
-    """Read a process's environment variables.
-
-    Linux: reads /proc/PID/environ.
-    Windows/macOS: uses psutil.Process(pid).environ().
-    """
-    if _IS_LINUX:
-        proc_dir = _get_proc_dir() / str(pid)
-        environ_path = proc_dir / "environ"
-        try:
-            raw = environ_path.read_bytes()
-            result = {}
-            for entry in raw.split(b"\x00"):
-                if b"=" in entry:
-                    key, _, val = entry.partition(b"=")
-                    result[key.decode("utf-8", errors="replace")] = val.decode("utf-8", errors="replace")
-            return result
-        except (OSError, PermissionError):
-            return {}
-
-    psutil = _get_psutil()
-    if psutil is None:
-        return {}
-    try:
-        return psutil.Process(pid).environ()
-    except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess, OSError):
-        return {}
-
-
-def _get_parent_comm_chain(pid: int, max_depth: int = 10) -> list:
-    """Walk parent process chain and return list of (pid, comm) tuples.
-
-    Linux: reads /proc/PID/status recursively.
-    Windows/macOS: uses psutil.Process(pid).ppid() + .name().
-    """
-    if _IS_LINUX:
-        proc_dir = _get_proc_dir()
-        chain = []
-        current = pid
-        for _ in range(max_depth):
-            try:
-                status_path = proc_dir / str(current) / "status"
-                if not status_path.exists():
-                    break
-                ppid = None
-                comm = ""
-                for line in status_path.read_text(errors="replace").splitlines():
-                    if line.startswith("Name:\t"):
-                        comm = line[6:].strip()
-                    elif line.startswith("PPid:\t"):
-                        ppid = int(line[6:].strip())
-                if ppid is None or ppid <= 1:
-                    if comm:
-                        chain.append((current, comm))
-                    break
-                chain.append((current, comm))
-                current = ppid
-            except (OSError, ValueError, PermissionError):
-                break
-        return chain
-
-    psutil = _get_psutil()
-    if psutil is None:
-        return []
-    chain = []
-    current = pid
-    try:
-        for _ in range(max_depth):
-            proc = psutil.Process(current)
-            comm = proc.name()
-            ppid = proc.ppid()
-            if ppid is None or ppid <= 1:
-                if comm:
-                    chain.append((current, comm))
-                break
-            chain.append((current, comm))
-            current = ppid
-    except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess, OSError):
-        pass
-    return chain
 
 
 def detect_connection_type(pid: int) -> str:
@@ -1048,3 +577,540 @@ def detect_connection_type(pid: int) -> str:
     _conn_type_cache[pid] = (now, result)
     return result
 
+
+# ── CC session liveness helpers (shared by /display and /turns endpoints) ──
+
+def collect_owned_cc_pids(terminals: dict) -> set:
+    """Return the set of cc_pids from terminals whose process is currently alive.
+
+    Used as the "claimed PID" set when deciding whether to fall back to TTY
+    lookup for a session whose registered cc_pid is dead — a TTY-discovered
+    PID is only valid if it isn't already claimed by another live session.
+    """
+    owned: set = set()
+    for term in terminals.values():
+        pid = term.get("cc_pid")
+        if pid and is_cc_process_alive(pid):
+            owned.add(pid)
+    return owned
+
+
+def check_cc_session_alive(
+    term: dict,
+    last_ts: Optional[float],
+    owned_cc_pids: set,
+    now_ts: float,
+    stale_tty_window_s: int = 600,
+) -> bool:
+    """Decide whether a CC session is alive given its terminal record.
+
+    Two-tier check:
+    1. Registered cc_pid is alive -> alive (source of truth).
+    2. cc_pid dead/missing, but the session was active within
+       stale_tty_window_s AND a claude process exists on its TTY whose PID
+       is not already claimed by another live registered session -> alive
+       (handles intermediate shell-process PID drift without resurrecting
+       long-dead sessions when a new CC reuses the same /dev/pts/N).
+    """
+    if not term:
+        return False
+    cc_pid = term.get("cc_pid")
+    tty = term.get("tty")
+    if cc_pid and is_cc_process_alive(cc_pid):
+        return True
+    if tty and last_ts and (now_ts - last_ts) < stale_tty_window_s:
+        real_pid = find_claude_pid_by_tty(tty)
+        if real_pid and real_pid not in owned_cc_pids:
+            return True
+    return False
+
+
+# ── External CLI (Codex/Gemini) liveness via open file descriptors ──
+
+
+def _to_int(value) -> int:
+    """Best-effort int conversion for provider usage counters."""
+    if isinstance(value, bool):
+        return int(value)
+    if isinstance(value, int):
+        return value
+    if isinstance(value, float):
+        return int(value)
+    if isinstance(value, str):
+        try:
+            return int(float(value))
+        except ValueError:
+            return 0
+    return 0
+
+
+def _usage_total(usage: dict) -> int:
+    """Return provider-reported total_tokens, or compute a conservative total."""
+    total = _to_int(usage.get("total_tokens"))
+    if total:
+        return total
+    return (
+        _to_int(usage.get("input_tokens"))
+        + _to_int(usage.get("output_tokens"))
+        + _to_int(usage.get("reasoning_output_tokens"))
+    )
+
+
+def _context_tokens_from_openai_usage(usage: dict) -> int:
+    """Return the prompt/context tokens for a Codex token_count usage record."""
+    return _to_int(usage.get("input_tokens"))
+
+
+def _extract_codex_token_metrics(payload: dict, recent_contexts: list[int]) -> dict:
+    """Extract display metrics from a Codex event_msg token_count payload."""
+    info = payload.get("info", {})
+    if not isinstance(info, dict):
+        return {}
+
+    last_usage = info.get("last_token_usage", {})
+    total_usage = info.get("total_token_usage", {})
+    if not isinstance(last_usage, dict):
+        last_usage = {}
+    if not isinstance(total_usage, dict):
+        total_usage = {}
+
+    current_ctx = _context_tokens_from_openai_usage(last_usage)
+    if current_ctx:
+        recent_contexts.append(current_ctx)
+
+    metrics = {
+        "current_ctx": current_ctx,
+        "cumul_unique": _usage_total(total_usage),
+        "model_window": _to_int(info.get("model_context_window")),
+    }
+    return {k: v for k, v in metrics.items() if v}
+
+
+def _parse_codex_session_raw(path: Path) -> dict:
+    """Parse a Codex JSONL session file directly.
+
+    Returns user turn, prompt, timestamp, and token display metrics.
+    """
+    user_turns = 0
+    first_ts = None
+    last_ts = None
+    last_user_text = ""
+    last_user_ts = None
+    current_ctx = 0
+    peak_ctx = 0
+    recent_contexts: list[int] = []
+    cumul_unique = 0
+    model_window = 0
+    total_input_tokens = 0
+    total_cached_tokens = 0
+
+    try:
+        for line in _tail_lines(path, max_bytes=512 * 1024):
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                obj = json.loads(line)
+            except (json.JSONDecodeError, ValueError):
+                continue
+            ts = obj.get("timestamp")
+            if ts and first_ts is None:
+                first_ts = ts
+            if ts:
+                last_ts = ts
+
+            entry_type = obj.get("type", "")
+            if entry_type == "response_item":
+                payload = obj.get("payload", {})
+                if payload.get("role") == "user":
+                    user_turns += 1
+                    content = payload.get("content", [])
+                    for part in content:
+                        if isinstance(part, dict):
+                            text = part.get("text", "")
+                            if text and _is_real_user_prompt(text):
+                                last_user_text = text.strip()[:500]
+                                last_user_ts = ts
+            elif entry_type == "event_msg":
+                payload = obj.get("payload", {})
+                if payload.get("type") == "user_message":
+                    text = payload.get("text", payload.get("message", ""))
+                    if isinstance(text, str) and _is_real_user_prompt(text):
+                        last_user_text = text.strip()[:500]
+                        last_user_ts = ts
+                elif payload.get("type") == "token_count":
+                    metrics = _extract_codex_token_metrics(payload, recent_contexts)
+                    if metrics.get("current_ctx"):
+                        current_ctx = metrics["current_ctx"]
+                        peak_ctx = max(peak_ctx, current_ctx)
+                    if metrics.get("cumul_unique"):
+                        cumul_unique = metrics["cumul_unique"]
+                    if metrics.get("model_window"):
+                        model_window = metrics["model_window"]
+                    # Cache stats from total_token_usage
+                    info = payload.get("info")
+                    if isinstance(info, dict):
+                        usage = info.get("total_token_usage", {})
+                        if isinstance(usage, dict):
+                            inp = usage.get("input_tokens", 0)
+                            cached = usage.get("cached_input_tokens", 0)
+                            if isinstance(inp, (int, float)) and inp > 0:
+                                total_input_tokens = int(inp)
+                            if isinstance(cached, (int, float)) and cached > 0:
+                                total_cached_tokens = int(cached)
+    except OSError:
+        pass
+
+    recent_peak = max(recent_contexts[-5:], default=0)
+
+    cache_hit_rate = None  # type: Optional[float]
+    if total_input_tokens > 0:
+        cache_hit_rate = round(total_cached_tokens / total_input_tokens * 100, 2)
+
+    return {
+        "user_turns": user_turns,
+        "first_ts": first_ts,
+        "last_ts": last_ts,
+        "last_user_text": last_user_text,
+        "last_user_ts": last_user_ts,
+        "current_ctx": current_ctx,
+        "peak_ctx": peak_ctx,
+        "recent_peak": recent_peak,
+        "cumul_unique": cumul_unique,
+        "model_window": model_window,
+        "cache_hit_rate": cache_hit_rate,
+    }
+
+
+def _parse_gemini_session_raw(path: Path) -> dict:
+    """Parse a Gemini session file (JSON or JSONL) directly.
+
+    Supports:
+      - Legacy JSON: [{type, message}] or {messages: [{type, content}]}
+      - New JSONL: one JSON object per line (session header + messages + $set updates)
+
+    Returns: {"user_turns": int, "first_ts": str|None, "last_ts": str|None, ...}
+    """
+    user_turns = 0
+    first_ts = None
+    last_ts = None
+    last_user_text = ""
+    last_user_ts = None
+    total_input_tokens = 0
+    total_cached_tokens = 0
+    current_ctx = 0
+    peak_ctx = 0
+    cumul_total = 0
+
+    def _process_msg(msg: dict) -> None:
+        nonlocal user_turns, first_ts, last_ts, last_user_text, last_user_ts
+        nonlocal total_input_tokens, total_cached_tokens
+        nonlocal current_ctx, peak_ctx, cumul_total
+        if not isinstance(msg, dict):
+            return
+        # Skip $set metadata entries
+        if "$set" in msg:
+            return
+        msg_type = msg.get("type", msg.get("role", ""))
+        ts = msg.get("timestamp", msg.get("createdAt"))
+        if ts and first_ts is None:
+            first_ts = ts
+        if ts:
+            last_ts = ts
+
+        # Token usage (new JSONL format)
+        tokens = msg.get("tokens")
+        if isinstance(tokens, dict):
+            inp = tokens.get("input", 0)
+            cached = tokens.get("cached", 0)
+            total = tokens.get("total", 0)
+            if isinstance(inp, (int, float)) and inp > 0:
+                total_input_tokens += int(inp)
+                current_ctx = int(inp)
+                peak_ctx = max(peak_ctx, current_ctx)
+            if isinstance(cached, (int, float)) and cached > 0:
+                total_cached_tokens += int(cached)
+            if isinstance(total, (int, float)) and total > 0:
+                cumul_total += int(total)
+
+        if msg_type == "user":
+            user_turns += 1
+            msg_content = msg.get("content", msg.get("text", msg.get("message", "")))
+            if isinstance(msg_content, list):
+                for part in msg_content:
+                    if isinstance(part, dict):
+                        text = part.get("text", "")
+                        if text and _is_real_user_prompt(text):
+                            last_user_text = text.strip()[:500]
+                            last_user_ts = ts
+            elif isinstance(msg_content, str) and _is_real_user_prompt(msg_content):
+                last_user_text = msg_content.strip()[:500]
+                last_user_ts = ts
+
+    try:
+        raw = path.read_text(encoding="utf-8", errors="replace").strip()
+        if not raw:
+            return {"user_turns": 0, "first_ts": None, "last_ts": None,
+                    "last_user_text": "", "last_user_ts": None}
+
+        # Detect format: JSONL (multiple lines, first line is session header)
+        # vs JSON (single object/array)
+        is_jsonl = str(path).endswith(".jsonl")
+        if not is_jsonl:
+            # Also detect JSONL by checking if first line is a valid JSON object
+            # and there are more lines
+            first_newline = raw.find("\n")
+            if first_newline > 0:
+                try:
+                    first_obj = json.loads(raw[:first_newline])
+                    if isinstance(first_obj, dict) and "sessionId" in first_obj:
+                        is_jsonl = True
+                except (json.JSONDecodeError, ValueError):
+                    pass
+
+        if is_jsonl:
+            for line in raw.split("\n"):
+                stripped = line.strip()
+                if not stripped:
+                    continue
+                try:
+                    obj = json.loads(stripped)
+                except (json.JSONDecodeError, ValueError):
+                    continue
+                if not isinstance(obj, dict):
+                    continue
+                # Session header
+                if "sessionId" in obj and "type" not in obj:
+                    if obj.get("startTime"):
+                        first_ts = obj["startTime"]
+                    if obj.get("lastUpdated"):
+                        last_ts = obj["lastUpdated"]
+                    continue
+                _process_msg(obj)
+        else:
+            data = json.loads(raw)
+            if isinstance(data, dict):
+                first_ts = data.get("startTime")
+                last_ts = data.get("lastUpdated")
+                messages = data.get("messages", [])
+            elif isinstance(data, list):
+                messages = data
+            else:
+                messages = []
+            for msg in messages:
+                _process_msg(msg)
+    except (OSError, json.JSONDecodeError):
+        pass
+
+    cache_hit_rate = None  # type: Optional[float]
+    if total_input_tokens > 0:
+        cache_hit_rate = round(total_cached_tokens / total_input_tokens * 100, 2)
+
+    return {
+        "user_turns": user_turns,
+        "first_ts": first_ts,
+        "last_ts": last_ts,
+        "last_user_text": last_user_text,
+        "last_user_ts": last_user_ts,
+        "current_ctx": current_ctx,
+        "peak_ctx": peak_ctx,
+        "recent_peak": peak_ctx,
+        "cumul_unique": cumul_total,
+        "model_window": 0,
+        "cache_hit_rate": cache_hit_rate,
+    }
+
+
+def _find_cli_pid(name: str) -> int:
+    """Find a running CLI process PID by binary name (e.g., 'gemini', 'codex').
+
+    Searches /proc or psutil for processes whose cmdline contains the CLI binary.
+    Returns the PID or 0 if not found.
+    """
+    import subprocess
+
+    try:
+        out = subprocess.run(
+            ["pgrep", "-f", f"bin/{name}"],
+            capture_output=True, text=True, timeout=5,
+            stdin=subprocess.DEVNULL,
+        )
+        for line in out.stdout.strip().split("\n"):
+            line = line.strip()
+            if line.isdigit():
+                return int(line)
+    except (OSError, subprocess.TimeoutExpired):
+        pass
+    return 0
+
+
+def discover_external_cli_sessions(
+    window_hours: float = 4.0,
+    include_dead: bool = False,
+    check_open_fds: bool = True,
+) -> list:
+    """Discover active Codex/Gemini sessions not tracked by the proxy DB.
+
+    Directly parses session files (not using provider parsers, which may not
+    match the actual on-disk format for display purposes). A session is
+    considered alive only if its transcript file is currently held open by
+    some process — after the CLI exits the kernel releases the fd and the
+    session is filtered out unless include_dead=True.
+
+    Args:
+        window_hours: Only include sessions modified within this time window.
+        include_dead: When True, return dead sessions too with alive=False.
+        check_open_fds: When False, skip /proc fd scanning and mark sessions dead.
+    """
+    import time
+
+    cutoff = time.time() - (window_hours * 3600)
+    results: list = []
+
+    try:
+        from llm_relay.providers import get_all_providers
+    except ImportError:
+        return results
+
+    path_pids = _collect_open_session_path_pids() if check_open_fds else {}
+    open_paths = set(path_pids.keys())
+
+    # Gemini CLI doesn't hold session files open (write-and-close).
+    # Detect running gemini processes and associate with the most recent session.
+    gemini_pid = _find_cli_pid("gemini") if check_open_fds else 0
+
+    for provider in get_all_providers():
+        if provider.provider_id == "claude-code":
+            continue
+
+        try:
+            sessions = provider.discover_sessions(limit=20)
+        except Exception:
+            continue
+
+        # For Gemini: mark the most recent session as alive if gemini process exists
+        gemini_newest_assigned = False
+
+        for sf in sessions:
+            if sf.mtime < cutoff:
+                continue
+
+            try:
+                resolved = str(sf.path.resolve())
+            except OSError:
+                resolved = str(sf.path)
+            alive = resolved in open_paths if check_open_fds else False
+            cli_pid = path_pids.get(resolved, 0) if alive else 0
+
+            # Gemini fallback: assign running gemini pid to newest session
+            if not alive and provider.provider_id == "gemini-cli" and gemini_pid and not gemini_newest_assigned:
+                alive = True
+                cli_pid = gemini_pid
+                gemini_newest_assigned = True
+
+            if not alive and not include_dead:
+                continue
+
+            # Parse directly based on provider type
+            if provider.provider_id == "openai-codex":
+                info = _parse_codex_session_raw(sf.path)
+            elif provider.provider_id == "gemini-cli":
+                info = _parse_gemini_session_raw(sf.path)
+            else:
+                continue
+
+            user_turns = info["user_turns"]
+            if user_turns == 0:
+                continue
+
+            first_ts = _iso_to_epoch(info["first_ts"]) if info["first_ts"] else None
+            last_ts = _iso_to_epoch(info["last_ts"]) if info["last_ts"] else None
+
+            duration_s = 0.0
+            if first_ts and last_ts:
+                duration_s = last_ts - first_ts
+
+            current_ctx = info.get("current_ctx", 0)
+            peak_ctx = info.get("peak_ctx", 0)
+            cumul_unique = info.get("cumul_unique", 0)
+            model_window = info.get("model_window", 0)
+
+            if provider.provider_id == "openai-codex":
+                display_ceiling = _codex_display_ceiling()
+                zones = _codex_compute_zone_bundle(current_ctx, peak_ctx, model_window)
+                official_context_window = _OPENAI_CODEX_OFFICIAL_CONTEXT_WINDOW
+                official_max_output = _OPENAI_CODEX_OFFICIAL_MAX_OUTPUT
+            else:
+                display_ceiling = int(os.getenv("LLM_TOKEN_CEILING", "1000000"))
+                official_context_window = 0
+                official_max_output = 0
+                try:
+                    from llm_relay.api.routes import _compute_zone_bundle
+
+                    zones = _compute_zone_bundle(current_ctx, peak_ctx, ceiling=display_ceiling)
+                except Exception:
+                    zones = {
+                        "zone": "green",
+                        "zone_a": "green",
+                        "zone_b": "green",
+                        "zone_a_peak": "green",
+                        "zone_b_peak": "green",
+                        "message": None,
+                        "next_threshold": None,
+                    }
+
+            # Composition analysis from session file
+            composition = None  # type: Optional[dict]
+            try:
+                from llm_relay.proxy.composition import analyze_file_composition
+
+                composition = analyze_file_composition(str(sf.path), provider.provider_id)
+            except Exception:
+                pass
+
+            results.append({
+                "session_id": sf.session_id,
+                "provider": provider.provider_id,
+                "provider_name": provider.display_name,
+                "turns": user_turns,
+                "first_ts": first_ts,
+                "last_ts": last_ts,
+                "duration_s": round(duration_s, 1),
+                "current_ctx": current_ctx,
+                "peak_ctx": peak_ctx,
+                "recent_peak": info.get("recent_peak", 0),
+                "cumul_unique": cumul_unique,
+                "ceiling": display_ceiling,
+                "model_window": model_window,
+                "official_context_window": official_context_window,
+                "official_max_output": official_max_output,
+                **zones,
+                "last_prompt": info["last_user_text"],
+                "last_prompt_ts": info["last_user_ts"],
+                "cache_hit_rate": info.get("cache_hit_rate"),
+                "tty": _get_process_tty(cli_pid) if cli_pid else None,
+                "cc_pid": cli_pid,
+                "term_pid": None,
+                "term_name": _get_process_terminal_name(cli_pid) if cli_pid else None,
+                "connection_type": detect_connection_type(cli_pid) if cli_pid else "unknown",
+                "composition": composition,
+                "alive": alive,
+            })
+
+    return results
+
+
+def _iso_to_epoch(ts: str) -> Optional[float]:
+    """Best-effort ISO 8601 timestamp to epoch seconds."""
+    if not ts:
+        return None
+    from datetime import datetime, timezone
+    try:
+        # Handle Z suffix
+        ts = ts.replace("Z", "+00:00")
+        dt = datetime.fromisoformat(ts)
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        return dt.timestamp()
+    except (ValueError, OSError):
+        return None
