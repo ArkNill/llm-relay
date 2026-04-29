@@ -2,12 +2,26 @@
 (function () {
   const API = window.location.origin + "/api/v1";
 
+  var _fetchErrorShown = false;
   async function fetchJSON(path) {
     try {
       const resp = await fetch(API + path);
+      if (_fetchErrorShown) {
+        _fetchErrorShown = false;
+        var errBanner = document.getElementById("fetch-error-banner");
+        if (errBanner) errBanner.style.display = "none";
+      }
       return await resp.json();
     } catch (e) {
       console.error("Fetch failed:", path, e);
+      if (!_fetchErrorShown) {
+        _fetchErrorShown = true;
+        var errBanner = document.getElementById("fetch-error-banner");
+        if (errBanner) {
+          errBanner.textContent = "Dashboard connection lost — retrying...";
+          errBanner.style.display = "block";
+        }
+      }
       return null;
     }
   }
