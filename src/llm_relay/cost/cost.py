@@ -87,7 +87,7 @@ def estimate_session_cost(
     requests: list[dict],
     model_key: str = "model",
 ) -> CostEstimate:
-    """Sum costs across multiple request records (from cc-relay DB rows)."""
+    """Sum costs across multiple request records (from llm-relay DB rows)."""
     total = CostEstimate(model="mixed", input_cost=0, output_cost=0, cache_create_cost=0, cache_read_cost=0)
     for r in requests:
         est = estimate_cost(

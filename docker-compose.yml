@@ -10,7 +10,7 @@ services:
       - "127.0.0.1:8082:8080"  # Legacy compat
       # - "<YOUR_TAILSCALE_IP>:8080:8080"  # Optional: bind to Tailscale IP for remote access
     volumes:
-      - ${HOME}/.cc-relay:/data/legacy  # Usage DB (migrated from cc-relay)
+      - ${HOME}/.llm-relay:/data/legacy  # Usage DB
       # Claude Code transcript JSONL (read-only, for display page last-user-prompt)
       - ${HOME}/.claude/projects:/data/claude-projects:ro
       - /proc:/host/proc:ro  # Host process inspection (display page liveness check)

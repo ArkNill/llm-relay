@@ -30,7 +30,7 @@ CREATE INDEX IF NOT EXISTS idx_deleg_ts ON delegations(ts);
 CREATE INDEX IF NOT EXISTS idx_deleg_cli ON delegations(cli_id);
 """
 
-DEFAULT_DB = Path(os.getenv("LLM_RELAY_DB", str(Path.home() / ".cc-relay" / "usage.db")))
+DEFAULT_DB = Path(os.getenv("LLM_RELAY_DB", str(Path.home() / ".llm-relay" / "usage.db")))
 
 
 def get_orch_conn(db_path: Optional[Path] = None) -> sqlite3.Connection:

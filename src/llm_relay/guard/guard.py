@@ -16,7 +16,7 @@ import time
 from dataclasses import dataclass, field
 from pathlib import Path
 
-logger = logging.getLogger("cc-relay.guard")
+logger = logging.getLogger("llm-relay.guard")
 
 
 @dataclass
@@ -38,7 +38,7 @@ class GuardConfig:
     enabled: bool = False
     mode: str = "passive"  # "passive" (log only) | "active" (can modify)
     interval_s: int = 30
-    checkpoint_dir: Path = field(default_factory=lambda: Path.home() / ".cc-relay" / "checkpoints")
+    checkpoint_dir: Path = field(default_factory=lambda: Path.home() / ".llm-relay" / "checkpoints")
 
     # 4-tier thresholds (% of estimated context window)
     # Using 200K as baseline context window size in chars
