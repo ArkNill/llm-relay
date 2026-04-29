@@ -347,5 +347,4 @@ def run_doctor(fix: bool = False) -> DoctorReport:
         result = check_fn()
         report.results.append(result)
 
-    # TODO: implement --fix for fixable issues
     return report
