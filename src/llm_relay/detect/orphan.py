@@ -6,14 +6,14 @@ Absorbs the two-pass correlation algorithm from kolkov/ccdiag.
 from __future__ import annotations
 
 from llm_relay.detect.base import BaseDetector
-from llm_relay.detect.models import Finding, ParsedSession, Severity
+from llm_relay.detect.models import Finding, GrowthBookConfig, ParsedSession, Severity
 
 
 class OrphanDetector(BaseDetector):
     detector_id = "orphan"
     display_name = "Orphan Tool Calls"
 
-    def check(self, session: ParsedSession) -> list[Finding]:
+    def check(self, session: ParsedSession, growthbook: GrowthBookConfig | None = None) -> list[Finding]:
         # Pass 1: index tool_use and tool_result by ID
         tool_uses: dict[str, tuple[int, str]] = {}   # tool_use_id → (entry_idx, tool_name)
         tool_results: dict[str, int] = {}              # tool_use_id → entry_idx
@@ -71,7 +71,7 @@ class OrphanDetector(BaseDetector):
                 ),
                 recommendation=(
                     "Orphan tool_use blocks can cause 400 errors on --resume. "
-                    "Consider running llm-relay doctor --fix to clean them up."
+                    "Consider running ccpulse doctor --fix to clean them up."
                 ),
                 evidence=[f"tool_use id={tid[:16]} name={name}" for tid, name, _ in orphan_uses[:5]],
             ))

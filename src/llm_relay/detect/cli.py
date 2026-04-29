@@ -9,6 +9,7 @@ import click
 
 from llm_relay.detect import __version__
 from llm_relay.detect.analyzer import analyze_all
+from llm_relay.detect.scanner import load_growthbook_config
 from llm_relay.formatters.json_fmt import JsonFormatter
 from llm_relay.providers import CLAUDE_CODE, detect_providers, get_provider, list_provider_ids
 
@@ -126,8 +127,11 @@ def scan(
     # Parse sessions
     parsed_sessions = [prov.parse_session(sf.path) for prov, sf in all_session_files]
 
+    # Load GrowthBook config (only relevant for Claude Code)
+    growthbook = load_growthbook_config() if any(p.provider_id == CLAUDE_CODE for p in providers) else None
+
     # Analyze
-    report = analyze_all(parsed_sessions, total_sessions=total)
+    report = analyze_all(parsed_sessions, growthbook=growthbook, total_sessions=total)
 
     # Format output
     if json_output:
@@ -228,21 +232,6 @@ def doctor(fix: bool) -> None:
 @click.option("--workers", "-w", default=1, type=int, help="Number of worker processes.")
 def serve(host: str, port: int, workers: int) -> None:
     """Start the proxy server with dashboard and display pages."""
-    if sys.platform == "win32":
-        click.echo(click.style("Error: ", fg="red") + "Native serve is not supported on Windows.")
-        click.echo()
-        click.echo("Why: Windows lacks /proc, so process liveness detection falls back")
-        click.echo("to psutil which scans all running processes via NT system calls.")
-        click.echo("This makes the 2-second dashboard polling unacceptably slow.")
-        click.echo("Docker runs Linux internally, so /proc works at native speed.")
-        click.echo()
-        click.echo("Use Docker instead:")
-        click.echo("  curl -sL https://raw.githubusercontent.com/ArkNill/llm-relay/")
-        click.echo("    main/docker-compose.yml -o docker-compose.yml")
-        click.echo("  docker compose up -d")
-        click.echo("  llm-relay connect")
-        raise SystemExit(1)
-
     try:
         import uvicorn
     except ImportError:
@@ -387,179 +376,6 @@ def init(port: int, skip_server: bool, dry_run: bool) -> None:
     if dry_run:
         click.echo()
         click.echo("(dry run — no changes were made)")
-
-
-@cli.command()
-@click.option("--port", "-p", default=8083, type=int, help="Proxy port (default: 8083).")
-def connect(port: int) -> None:
-    """Connect Claude Code, Codex, and Gemini to the llm-relay proxy.
-
-    \b
-    Sets ANTHROPIC_BASE_URL / OPENAI_BASE_URL in each CLI's settings
-    so API requests route through the proxy. Does NOT start a server.
-    Run 'llm-relay disconnect' to undo.
-    """
-    import json
-
-    base_url = "http://localhost:{}".format(port)
-    connected = []
-
-    # Claude Code — ~/.claude/settings.json → env.ANTHROPIC_BASE_URL
-    cc_settings = Path.home() / ".claude" / "settings.json"
-    if (Path.home() / ".claude").exists():
-        data = {}
-        if cc_settings.exists():
-            try:
-                data = json.loads(cc_settings.read_text(encoding="utf-8"))
-            except (json.JSONDecodeError, OSError):
-                data = {}
-        env = data.get("env", {})
-        if not isinstance(env, dict):
-            env = {}
-        env["ANTHROPIC_BASE_URL"] = base_url
-        data["env"] = env
-        cc_settings.write_text(
-            json.dumps(data, indent=2, ensure_ascii=False) + "\n",
-            encoding="utf-8",
-        )
-        connected.append(("Claude Code", str(cc_settings), "ANTHROPIC_BASE_URL"))
-
-    # Codex CLI — ~/.codex/settings.json → env.OPENAI_BASE_URL
-    codex_dir = Path.home() / ".codex"
-    if codex_dir.exists():
-        codex_settings = codex_dir / "settings.json"
-        data = {}
-        if codex_settings.exists():
-            try:
-                data = json.loads(codex_settings.read_text(encoding="utf-8"))
-            except (json.JSONDecodeError, OSError):
-                data = {}
-        env = data.get("env", {})
-        if not isinstance(env, dict):
-            env = {}
-        env["OPENAI_BASE_URL"] = base_url
-        data["env"] = env
-        codex_settings.write_text(
-            json.dumps(data, indent=2, ensure_ascii=False) + "\n",
-            encoding="utf-8",
-        )
-        connected.append(("Codex CLI", str(codex_settings), "OPENAI_BASE_URL"))
-
-    # Gemini CLI — ~/.gemini/settings.json → env.GEMINI_API_BASE_URL
-    gemini_dir = Path.home() / ".gemini"
-    if gemini_dir.exists():
-        gemini_settings = gemini_dir / "settings.json"
-        data = {}
-        if gemini_settings.exists():
-            try:
-                data = json.loads(gemini_settings.read_text(encoding="utf-8"))
-            except (json.JSONDecodeError, OSError):
-                data = {}
-        env = data.get("env", {})
-        if not isinstance(env, dict):
-            env = {}
-        env["GEMINI_API_BASE_URL"] = base_url
-        data["env"] = env
-        gemini_settings.write_text(
-            json.dumps(data, indent=2, ensure_ascii=False) + "\n",
-            encoding="utf-8",
-        )
-        connected.append(("Gemini CLI", str(gemini_settings), "GEMINI_API_BASE_URL"))
-
-    if connected:
-        click.echo("Connected to proxy at {}:".format(base_url))
-        for name, path, var in connected:
-            click.echo("  {} {} ({} in {})".format(
-                click.style("OK", fg="green"), name, var, path,
-            ))
-        click.echo()
-        click.echo("To undo: llm-relay disconnect")
-    else:
-        click.echo(click.style("No CLI config directories found.", fg="yellow"))
-
-
-@cli.command()
-def disconnect() -> None:
-    """Disconnect Claude Code, Codex, and Gemini from the llm-relay proxy.
-
-    \b
-    Removes ANTHROPIC_BASE_URL / OPENAI_BASE_URL from each CLI's settings.
-    CLIs will revert to direct API connections.
-    """
-    import json
-
-    disconnected = []
-
-    # Claude Code — remove ANTHROPIC_BASE_URL
-    cc_settings = Path.home() / ".claude" / "settings.json"
-    if cc_settings.exists():
-        try:
-            data = json.loads(cc_settings.read_text(encoding="utf-8"))
-            env = data.get("env", {})
-            if isinstance(env, dict) and "ANTHROPIC_BASE_URL" in env:
-                del env["ANTHROPIC_BASE_URL"]
-                if not env:
-                    del data["env"]
-                else:
-                    data["env"] = env
-                cc_settings.write_text(
-                    json.dumps(data, indent=2, ensure_ascii=False) + "\n",
-                    encoding="utf-8",
-                )
-                disconnected.append(("Claude Code", str(cc_settings)))
-        except (json.JSONDecodeError, OSError):
-            click.echo(click.style("  Warning: could not parse {}".format(cc_settings), fg="yellow"))
-
-    # Codex CLI — remove OPENAI_BASE_URL
-    codex_settings = Path.home() / ".codex" / "settings.json"
-    if codex_settings.exists():
-        try:
-            data = json.loads(codex_settings.read_text(encoding="utf-8"))
-            env = data.get("env", {})
-            if isinstance(env, dict) and "OPENAI_BASE_URL" in env:
-                del env["OPENAI_BASE_URL"]
-                if not env:
-                    del data["env"]
-                else:
-                    data["env"] = env
-                codex_settings.write_text(
-                    json.dumps(data, indent=2, ensure_ascii=False) + "\n",
-                    encoding="utf-8",
-                )
-                disconnected.append(("Codex CLI", str(codex_settings)))
-        except (json.JSONDecodeError, OSError):
-            click.echo(click.style("  Warning: could not parse {}".format(codex_settings), fg="yellow"))
-
-    # Gemini CLI — remove GEMINI_API_BASE_URL
-    gemini_settings = Path.home() / ".gemini" / "settings.json"
-    if gemini_settings.exists():
-        try:
-            data = json.loads(gemini_settings.read_text(encoding="utf-8"))
-            env = data.get("env", {})
-            if isinstance(env, dict) and "GEMINI_API_BASE_URL" in env:
-                del env["GEMINI_API_BASE_URL"]
-                if not env:
-                    del data["env"]
-                else:
-                    data["env"] = env
-                gemini_settings.write_text(
-                    json.dumps(data, indent=2, ensure_ascii=False) + "\n",
-                    encoding="utf-8",
-                )
-                disconnected.append(("Gemini CLI", str(gemini_settings)))
-        except (json.JSONDecodeError, OSError):
-            click.echo(click.style("  Warning: could not parse {}".format(gemini_settings), fg="yellow"))
-
-    if disconnected:
-        click.echo("Disconnected from proxy:")
-        for name, path in disconnected:
-            click.echo("  {} {} ({})".format(
-                click.style("OK", fg="green"), name, path,
-            ))
-        click.echo()
-        click.echo("CLIs will now connect directly to their APIs.")
-    else:
-        click.echo("Nothing to disconnect (no proxy settings found).")
 
 
 def main() -> None:
