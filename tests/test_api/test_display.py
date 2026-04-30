@@ -224,7 +224,8 @@ class TestParseCodexSessionRaw:
         assert result["current_ctx"] == 2500
         assert result["peak_ctx"] == 2500
         assert result["recent_peak"] == 2500
-        assert result["cumul_unique"] == 4650
+        # cumul = sum of per-request (input + output) from last_token_usage
+        assert result["cumul_unique"] == (1000 + 50) + (2500 + 100)
         assert result["model_window"] == 258400
 
 
@@ -520,6 +521,7 @@ class TestDiscoverExternalAliveFilter:
         assert results[0]["provider"] == "openai-codex"
 
     def test_codex_zone_uses_current_ctx_not_cumul_unique(self, tmp_path, monkeypatch):
+        """Zone classification must use current_ctx, not cumul_unique."""
         import llm_relay.api.display as disp
 
         codex_jsonl = (
@@ -546,7 +548,130 @@ class TestDiscoverExternalAliveFilter:
         assert len(results) == 1
         assert results[0]["ceiling"] == 684000
         assert results[0]["current_ctx"] == 80000
-        assert results[0]["cumul_unique"] == 705000
+        # cumul from last_token_usage (input + output per request)
+        assert results[0]["cumul_unique"] == 80000 + 120
         assert results[0]["zone"] == "green"
         assert results[0]["zone_a"] == "green"
         assert results[0]["zone_b"] == "green"
+
+    def test_codex_default_ceiling_is_official_400k(self, tmp_path, monkeypatch):
+        """Without env overrides, display & zone ceilings default to Official 400K."""
+        import llm_relay.api.display as disp
+
+        codex_jsonl = (
+            '{"type":"response_item","timestamp":"2026-04-16T13:00:00Z",'
+            '"payload":{"role":"user","content":[{"text":"hi"}]}}\n'
+            '{"type":"event_msg","timestamp":"2026-04-16T13:00:01Z","payload":{"type":"token_count","info":'
+            '{"total_token_usage":{"input_tokens":300000,"cached_input_tokens":250000,"output_tokens":5000,"total_tokens":305000},'
+            '"last_token_usage":{"input_tokens":80000,"cached_input_tokens":75000,"output_tokens":120,"total_tokens":80120},'
+            '"model_context_window":258400}}}\n'
+        )
+        sf = self._make_session_file(tmp_path, "rollout-default.jsonl", codex_jsonl)
+        provider = self._make_provider("openai-codex", [sf])
+        # Do NOT set CODEX_TOKEN_DISPLAY_CEILING or CODEX_TOKEN_ZONE_CEILING
+        monkeypatch.delenv("CODEX_TOKEN_DISPLAY_CEILING", raising=False)
+        monkeypatch.delenv("CODEX_TOKEN_ZONE_CEILING", raising=False)
+        monkeypatch.setattr(
+            disp, "_collect_open_session_path_pids",
+            lambda *a, **kw: {str(sf.path.resolve()): 12345},
+        )
+        monkeypatch.setattr(
+            "llm_relay.providers.get_all_providers", lambda: [provider], raising=False,
+        )
+
+        results = disp.discover_external_cli_sessions(window_hours=24)
+        assert len(results) == 1
+        # Display ceiling = Official 400K (not 684K)
+        assert results[0]["ceiling"] == 400000
+        # current_ctx=80K → 20% of 400K → green for both zones
+        assert results[0]["zone"] == "green"
+        assert results[0]["zone_a"] == "green"
+        assert results[0]["zone_b"] == "green"
+        # model_window is still passed through as metadata
+        assert results[0]["model_window"] == 258400
+
+    def test_codex_zone_b_independent_of_model_window(self, tmp_path, monkeypatch):
+        """Zone B must use the official ceiling, not the model_context_window."""
+        import llm_relay.api.display as disp
+
+        # current_ctx=206K, model_window=258K
+        # Old behavior: 206/258 = 80% → orange (wrong)
+        # New behavior: 206/400 = 52% → yellow (correct)
+        codex_jsonl = (
+            '{"type":"response_item","timestamp":"2026-04-16T13:00:00Z",'
+            '"payload":{"role":"user","content":[{"text":"check"}]}}\n'
+            '{"type":"event_msg","timestamp":"2026-04-16T13:00:01Z","payload":{"type":"token_count","info":'
+            '{"total_token_usage":{"input_tokens":600000,"cached_input_tokens":400000,"output_tokens":8000,"total_tokens":608000},'
+            '"last_token_usage":{"input_tokens":206000,"cached_input_tokens":180000,"output_tokens":500,"total_tokens":206500},'
+            '"model_context_window":258400}}}\n'
+        )
+        sf = self._make_session_file(tmp_path, "rollout-206k.jsonl", codex_jsonl)
+        provider = self._make_provider("openai-codex", [sf])
+        monkeypatch.delenv("CODEX_TOKEN_DISPLAY_CEILING", raising=False)
+        monkeypatch.delenv("CODEX_TOKEN_ZONE_CEILING", raising=False)
+        monkeypatch.setattr(
+            disp, "_collect_open_session_path_pids",
+            lambda *a, **kw: {str(sf.path.resolve()): 12345},
+        )
+        monkeypatch.setattr(
+            "llm_relay.providers.get_all_providers", lambda: [provider], raising=False,
+        )
+
+        results = disp.discover_external_cli_sessions(window_hours=24)
+        assert len(results) == 1
+        assert results[0]["current_ctx"] == 206000
+        # Zone A: 206K >= 200K (yellow) — recalibrated threshold
+        assert results[0]["zone_a"] == "yellow"
+        # Zone B: 206K / 400K = 51.5% → yellow (>= 50%)
+        assert results[0]["zone_b"] == "yellow"
+        assert results[0]["zone"] == "yellow"
+
+    def test_codex_zone_a_boundary_transitions(self, monkeypatch):
+        """Zone A thresholds: 200K/280K/360K/400K."""
+        import llm_relay.api.display as disp
+
+        monkeypatch.delenv("CODEX_TOKEN_A_YELLOW", raising=False)
+        monkeypatch.delenv("CODEX_TOKEN_A_ORANGE", raising=False)
+        monkeypatch.delenv("CODEX_TOKEN_A_RED", raising=False)
+        monkeypatch.delenv("CODEX_TOKEN_A_HARD", raising=False)
+
+        # Below yellow
+        assert disp._codex_classify_absolute(199999)[0] == "green"
+        # Exactly at yellow
+        assert disp._codex_classify_absolute(200000)[0] == "yellow"
+        # Below orange
+        assert disp._codex_classify_absolute(279999)[0] == "yellow"
+        # Exactly at orange
+        assert disp._codex_classify_absolute(280000)[0] == "orange"
+        # Below red
+        assert disp._codex_classify_absolute(359999)[0] == "orange"
+        # Exactly at red
+        assert disp._codex_classify_absolute(360000)[0] == "red"
+        # Below hard
+        assert disp._codex_classify_absolute(399999)[0] == "red"
+        # Exactly at hard
+        assert disp._codex_classify_absolute(400000)[0] == "hard"
+
+    def test_codex_zone_b_message_shows_actual_ratio(self, monkeypatch):
+        """Zone B messages must show the actual current ratio, not a fixed label."""
+        import llm_relay.api.display as disp
+
+        monkeypatch.delenv("CODEX_TOKEN_ZONE_CEILING", raising=False)
+
+        ceiling = 400000
+        tokens = 206000  # 51.5%
+        result = disp._codex_classify_ratio(tokens, ceiling)
+        assert result[0] == "yellow"
+        msg = result[3]
+        # Message should contain "51%" (actual ratio) and "206K/400K"
+        assert "51%" in msg
+        assert "206K" in msg
+        assert "400K" in msg
+
+        # 75% test
+        tokens_orange = 300000  # 75%
+        result_orange = disp._codex_classify_ratio(tokens_orange, ceiling)
+        assert result_orange[0] == "orange"
+        msg_orange = result_orange[3]
+        assert "75%" in msg_orange
+        assert "300K" in msg_orange

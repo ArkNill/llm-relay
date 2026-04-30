@@ -1,6 +1,6 @@
 """CC cache fix -- normalize request body for stable prompt caching.
 
-Fixes two classes of cache invalidation:
+Fixes two classes of cache invalidation that GrowthBook override cannot address:
   - Type 1: Tool ordering jitter (MCP tools register async → non-deterministic order)
   - Type 3: Missing TTL on ephemeral cache_control blocks
 
