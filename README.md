@@ -13,7 +13,8 @@ Unified LLM usage management — API proxy, session diagnostics, multi-CLI orche
 - **Cost**: Per-1% cost calculation and rate-limit header analysis
 - **Orch**: Multi-CLI orchestration (Claude Code, Codex CLI, Gemini CLI)
 - **Display**: Multi-CLI session monitor with provider badges and liveness detection
-- **MCP**: 7 tools via stdio transport (cli_delegate, cli_status, cli_probe, orch_delegate, orch_history, relay_stats, session_turns)
+- **I18n**: Multi-language support (English, Korean) with browser auto-detection and `LLM_RELAY_LANG` env
+- **MCP**: 8 tools via stdio transport (cli_delegate, cli_status, cli_probe, orch_delegate, orch_history, relay_stats, session_turns, session_history)
 
 ## Install
 

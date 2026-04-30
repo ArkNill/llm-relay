@@ -6,7 +6,8 @@
 - 12-strategy pruning (gentle/standard/aggressive tiers)
 - Multi-CLI orchestration: Claude Code, Codex CLI, Gemini CLI
 - Web display: `/dashboard/` + `/display/` with provider badges (CC/Codex/Gemini), alive-only by default (`?include_dead=1` to override)
-- MCP: 7 tools (cli_delegate, cli_status, cli_probe, orch_delegate, orch_history, relay_stats, session_turns)
+- I18n: en/ko locale support (LLM_RELAY_LANG env + browser auto-detect on web)
+- MCP: 8 tools (cli_delegate, cli_status, cli_probe, orch_delegate, orch_history, relay_stats, session_turns, session_history)
 ```bash
 llm-relay scan          # 8-detector session health check
 llm-relay doctor        # 7-check configuration health
