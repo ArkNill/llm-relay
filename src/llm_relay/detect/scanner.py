@@ -8,6 +8,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from llm_relay.detect.models import GrowthBookConfig
+
 
 def find_claude_home() -> Path:
     """Locate the Claude Code data directory."""
@@ -92,6 +94,49 @@ def discover_sessions(
 def total_session_size(sessions: list[SessionFile]) -> int:
     return sum(s.size_bytes for s in sessions)
 
+
+def load_growthbook_config() -> GrowthBookConfig | None:
+    """Extract GrowthBook feature flags from ~/.claude.json."""
+    claude_json_path = find_claude_home().parent / ".claude.json"
+    # Also check home directory directly
+    alt_path = Path.home() / ".claude.json"
+
+    target = None
+    for p in [claude_json_path, alt_path]:
+        if p.is_file():
+            target = p
+            break
+
+    if target is None:
+        return None
+
+    try:
+        with open(target, encoding="utf-8") as f:
+            data = json.load(f)
+    except (json.JSONDecodeError, OSError):
+        return None
+
+    features: dict[str, Any] = data.get("cachedGrowthBookFeatures", {})
+    if not features:
+        return None
+
+    config = GrowthBookConfig(raw_flags={})
+
+    for key, value in features.items():
+        if "hawthorn" in key:
+            config.hawthorn_window = value if isinstance(value, int) else None
+        elif "pewter" in key and "kestrel" in key:
+            config.pewter_kestrel = value if isinstance(value, dict) else None
+        elif "slate" in key and "heron" in key:
+            config.slate_heron = value
+        elif "sm_compact" in key and "config" not in key:
+            config.sm_compact = value
+
+        # Keep all tengu_ flags
+        if key.startswith("tengu_") or "tengu" in key.lower():
+            config.raw_flags[key] = value
+
+    return config
 
 
 def load_stats_cache() -> dict[str, Any] | None:
