@@ -61,7 +61,7 @@ Then open:
 ### MCP server
 
 ```bash
-llm-relay-mcp               # stdio transport, 7 tools
+llm-relay-mcp               # stdio transport, 8 tools
 ```
 
 ### API proxy for Claude Code

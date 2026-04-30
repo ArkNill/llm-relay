@@ -4,4 +4,4 @@ Unified LLM usage management — API proxy, session diagnostics, multi-CLI orche
 Part of the Mirror Agent ecosystem (open-network DLC).
 """
 
-__version__ = "0.7.1"
+__version__ = "0.9.2"

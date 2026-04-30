@@ -42,7 +42,7 @@ src/llm_relay/
 ├── mcp/                     [NEW] FastMCP server (optional dep: mcp[cli])
 │   ├── __init__.py          — run_server() entry point
 │   ├── __main__.py          — python -m llm_relay.mcp
-│   └── server.py            — 6 MCP tools
+│   └── server.py            — 8 MCP tools
 │
 ├── api/                     [NEW] HTTP API (starlette, reuses proxy dep)
 │   ├── __init__.py
@@ -157,7 +157,7 @@ CREATE INDEX IF NOT EXISTS idx_deleg_ts ON delegations(ts);
 CREATE INDEX IF NOT EXISTS idx_deleg_cli ON delegations(cli_id);
 ```
 
-### mcp/server.py — 6 MCP Tools
+### mcp/server.py — 8 MCP Tools
 
 | Tool | Purpose | Read-only |
 |------|---------|-----------|
@@ -271,7 +271,7 @@ servers:
 ## Implementation Phases
 
 1. **orch module** (stdlib only) — models, discovery, executor, db, router, tests ✅
-2. **MCP server** (fastmcp) — 6 tools, pyproject.toml, tests ✅
+2. **MCP server** (fastmcp) — 8 tools, pyproject.toml, tests ✅
 3. **API endpoints** (starlette) — 6 GET routes, tests ✅
 4. **Dashboard SPA** — static HTML+JS+CSS bundle ✅
 5. **Unified serve** — proxy.py Mount integration ✅
@@ -322,7 +322,7 @@ Scenario 2 blocker: `inference.py:_get_tiers()` hardcoded DGX+Desktop tiers, ign
 | test_orch/test_executor.py | 27 | cmd build, output parsing, subprocess mock |
 | test_orch/test_db.py | 10 | schema, CRUD, aggregation |
 | test_orch/test_router.py | 13 | strategy selection, fallback, DB failure |
-| test_mcp/test_server.py | 14 | 6 tools, error handling, mock CLI |
+| test_mcp/test_server.py | 14 | 8 tools, error handling, mock CLI |
 | test_api/test_routes.py | 6 | HTTP endpoints, error responses |
 | (existing) | 44 | detectors, parser, scanner |
 | **Total** | **135** | — |

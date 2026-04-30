@@ -61,7 +61,7 @@ docker compose up -d
 ### MCP 서버
 
 ```bash
-llm-relay-mcp               # stdio 전송, 7개 도구
+llm-relay-mcp               # stdio 전송, 8개 도구
 ```
 
 ### Claude Code API 프록시

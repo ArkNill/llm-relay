@@ -2,6 +2,32 @@
 
 All notable changes to llm-relay are documented here.
 
+## [0.9.2] - 2026-04-30
+
+### Added
+- **I18n**: Lightweight en/ko locale support via `i18n.py` message catalog (27 keys)
+  - Backend: `t()` translation function wired into all zone classifiers (routes.py, display.py, mcp/server.py)
+  - Frontend: `msg()` helper with browser `navigator.language` auto-detection (dashboard, display, history)
+  - API: `/api/v1/i18n?lang=ko` endpoint for frontend message loading
+  - Env: `LLM_RELAY_LANG` (default `en`)
+- **MCP tool**: `session_history` — conversation replay with turn filtering (8 tools total)
+- **Auto-load .env**: Native uvicorn startup now reads `.env.public` → `.env.local` automatically (Docker `env_file` parity)
+
+### Fixed
+- Hardcoded Korean zone labels replaced with i18n `t()` calls (PR #12/#13 by @cnighswonger)
+- Composition pie chart missing after native restart (LLM_RELAY_HISTORY not loaded without .env autoload)
+
+## [0.9.1] - 2026-04-29
+
+### Added
+- **Zone A↔B alignment**: Recalibrated CC/Codex dual-zone thresholds
+- **Codex 400K unification**: Official context window constants
+- **Display enhancements**: Placeholders, font normalization, dead code removal
+- 3-provider status tiles (Anthropic/OpenAI/Gemini) on dashboard
+- `term_name` surfacing on `/turns` + dashboard render
+- GH App token injection for Codex via `cli_delegate`
+- API parameter validation (`_ParamError` → 400)
+
 ## [0.7.1] - 2026-04-26
 
 ### Added
