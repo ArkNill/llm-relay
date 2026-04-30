@@ -40,7 +40,7 @@ section { margin-bottom: 2rem; }
 .card .activity { color: #58a6ff; font-weight: 500; }
 .card .pulse { display: inline-block; width: 6px; height: 6px; border-radius: 50%; background: #3fb950; margin-left: 0.4rem; animation: pulse-dot 2s ease-in-out infinite; }
 @keyframes pulse-dot { 0%, 100% { opacity: 1; } 50% { opacity: 0.3; } }
-.stats-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); gap: 0.6rem; }
+.stats-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); gap: 0.6rem; margin-bottom: 1rem; }
 .stat-box { background: #161b22; border: 1px solid #21262d; border-radius: 6px; padding: 0.8rem; text-align: center; }
 .stat-box .value { font-size: 1.5rem; font-weight: 700; color: #58a6ff; }
 .stat-box .label { font-size: 0.88rem; color: #8b949e; margin-top: 0.2rem; }
@@ -151,9 +151,16 @@ tr.clickable { cursor: pointer; }
   border-radius: 50%;
   flex-shrink: 0;
 }
-.status-banner .status-text { font-weight: 600; }
-.status-banner .status-incident { color: #c9d1d9; flex: 1; font-size: 0.88rem; }
-.status-banner .status-fetched { color: #8b949e; font-size: 0.88rem; flex-shrink: 0; }
+.status-banner { flex-wrap: wrap; }
+.status-banner .status-text { font-weight: 600; flex: 1 1 auto; min-width: 0; }
+.status-banner .status-fetched { color: #8b949e; font-size: 0.88rem; flex-shrink: 0; order: 1; }
+.status-banner .status-incident { color: #c9d1d9; font-size: 0.88rem; order: 2; }
+.status-banner .status-incident:not(:empty) {
+  flex-basis: 100%;
+  margin-left: 1.2rem;       /* indent past the dot */
+  margin-top: 0.3rem;
+  line-height: 1.4;
+}
 
 /* Indicator → color mapping (matches Anthropic's status page semantics) */
 .status-banner.status-none      { background: #0e2a14; color: #6ee06e; border-color: #1f4d2a; }
