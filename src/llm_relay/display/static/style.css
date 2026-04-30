@@ -17,26 +17,26 @@ header {
   padding-bottom: 0.8rem;
   border-bottom: 1px solid #21262d;
 }
-h1 { font-size: 1.3rem; color: #58a6ff; font-weight: 600; }
+h1 { font-size: 1.5rem; color: #58a6ff; font-weight: 600; }
 .nav-links { display: flex; gap: 0.6rem; }
-.nav-links a { font-size: 0.8rem; color: #8b949e; text-decoration: none; padding: 0.25rem 0.6rem; border: 1px solid #30363d; border-radius: 6px; transition: all 0.15s; }
+.nav-links a { font-size: 0.92rem; color: #8b949e; text-decoration: none; padding: 0.25rem 0.6rem; border: 1px solid #30363d; border-radius: 6px; transition: all 0.15s; }
 .nav-links a:hover { color: #58a6ff; border-color: #58a6ff; }
-.updated-ts { font-size: 0.75rem; color: #6e7681; }
+.updated-ts { font-size: 0.83rem; color: #6e7681; }
 
 main { margin-bottom: 2rem; }
 
 .session-cards {
   display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(340px, 1fr));
-  gap: 1rem;
+  grid-template-columns: repeat(auto-fill, minmax(380px, 1fr));
+  gap: 1.1rem;
 }
 
 .session-card {
   background: #161b22;
   border: 1px solid #21262d;
   border-radius: 4px;
-  padding: 1rem 1.2rem;
-  border-left: 2px solid #3fb950;
+  padding: 1.1rem 1.3rem;
+  border-left: 3px solid #3fb950;
   transition: border-color 0.3s;
   display: flex;
   flex-direction: column;
@@ -65,14 +65,14 @@ main { margin-bottom: 2rem; }
 }
 .sid {
   font-family: ui-monospace, "SF Mono", Menlo, monospace;
-  font-size: 0.85rem;
+  font-size: 0.92rem;
   color: #8b949e;
   letter-spacing: 0.02em;
 }
 .tty-badge {
   display: inline-block;
   font-family: ui-monospace, "SF Mono", Menlo, monospace;
-  font-size: 0.7rem;
+  font-size: 0.88rem;
   color: #58a6ff;
   background: rgba(88, 166, 255, 0.08);
   border: 1px solid rgba(88, 166, 255, 0.2);
@@ -85,7 +85,7 @@ main { margin-bottom: 2rem; }
 .conn-badge {
   display: inline-block;
   font-family: ui-monospace, "SF Mono", Menlo, monospace;
-  font-size: 0.6rem;
+  font-size: 0.82rem;
   font-weight: 600;
   padding: 0.1rem 0.35rem;
   border-radius: 3px;
@@ -103,7 +103,7 @@ main { margin-bottom: 2rem; }
 .provider-badge {
   display: inline-block;
   font-family: ui-monospace, "SF Mono", Menlo, monospace;
-  font-size: 1.2rem;
+  font-size: 1.17rem;
   font-weight: 600;
   padding: 0.3rem 0.75rem;
   border-radius: 5px;
@@ -114,12 +114,12 @@ main { margin-bottom: 2rem; }
 .provider-badge.p-codex   { color: #7ee787; background: rgba(126,231,135,0.1); border: 1px solid rgba(126,231,135,0.3); }
 .provider-badge.p-gemini  { color: #79c0ff; background: rgba(121,192,255,0.1); border: 1px solid rgba(121,192,255,0.3); }
 .turn-count {
-  font-size: 1.6rem;
+  font-size: 1.83rem;
   font-weight: 700;
   line-height: 1;
 }
 .turn-count .label {
-  font-size: 0.75rem;
+  font-size: 0.83rem;
   color: #8b949e;
   font-weight: 400;
   margin-left: 0.3rem;
@@ -137,17 +137,17 @@ main { margin-bottom: 2rem; }
   display: flex;
   align-items: baseline;
   gap: 0.5rem;
-  font-size: 0.85rem;
+  font-size: 0.96rem;
   margin-top: 0.2rem;
 }
 .metric-row-sub {
-  font-size: 0.78rem;
+  font-size: 0.88rem;
   opacity: 0.85;
 }
 .metric-label {
   color: #8b949e;
   font-weight: 500;
-  width: 3.5rem;
+  width: 4rem;
   flex-shrink: 0;
 }
 .metric-value {
@@ -158,7 +158,7 @@ main { margin-bottom: 2rem; }
 .metric-row-sub .metric-value { color: #8b949e; }
 .metric-ceiling {
   color: #6e7681;
-  font-size: 0.72rem;
+  font-size: 0.88rem;
   font-family: ui-monospace, "SF Mono", Menlo, monospace;
 }
 .zone-badges {
@@ -167,7 +167,7 @@ main { margin-bottom: 2rem; }
   gap: 0.3rem;
 }
 .zone-badge {
-  font-size: 0.65rem;
+  font-size: 0.84rem;
   font-weight: 600;
   padding: 0.1rem 0.35rem;
   border-radius: 3px;
@@ -180,15 +180,17 @@ main { margin-bottom: 2rem; }
 .zone-badge.z-red    { background: rgba(218,54,51,0.15);  color: #ff7b72; border: 1px solid rgba(218,54,51,0.4); }
 .zone-badge.z-hard   { background: #da3633; color: #fff; border: 1px solid #ff7b72; }
 
-/* Secondary metrics row — Recent5, Cumul (no zone) */
+/* Secondary metrics row — Recent5, Cumul, etc. */
 .metric-small {
   display: flex;
-  justify-content: space-between;
-  font-size: 0.72rem;
+  flex-wrap: wrap;
+  gap: 0.25rem 0.8rem;
+  font-size: 0.88rem;
   color: #6e7681;
   font-family: ui-monospace, "SF Mono", Menlo, monospace;
   margin-top: 0.2rem;
 }
+.metric-small .ml { color: #8b949e; }
 
 /* Cache / TTL metric badges */
 .metric-badges {
@@ -201,7 +203,7 @@ main { margin-bottom: 2rem; }
   display: inline-block;
   padding: 0.15rem 0.5rem;
   border-radius: 10px;
-  font-size: 0.72rem;
+  font-size: 0.88rem;
   font-weight: 600;
   font-family: ui-monospace, "SF Mono", Menlo, monospace;
 }
@@ -209,6 +211,7 @@ main { margin-bottom: 2rem; }
 .badge-warn { background: #d29922; color: #000; }
 .badge-danger { background: #da3633; color: #fff; }
 .badge-info { background: #6e40c9; color: #fff; }
+.badge-muted { background: #30363d; color: #8b949e; }
 
 /* Progress bars */
 .bar {
@@ -235,7 +238,7 @@ main { margin-bottom: 2rem; }
 .comp-section {
   display: flex;
   align-items: center;
-  gap: 0.8rem;
+  gap: 0.9rem;
   margin-top: 0.3rem;
   padding: 0.5rem 0;
   border-top: 1px solid #21262d;
@@ -253,7 +256,7 @@ main { margin-bottom: 2rem; }
   display: grid;
   grid-template-columns: 1fr 1fr;
   gap: 0.45rem 1.2rem;
-  font-size: 0.78rem;
+  font-size: 0.83rem;
   font-family: ui-monospace, "SF Mono", Menlo, monospace;
   color: #8b949e;
   line-height: 1.4;
@@ -261,20 +264,20 @@ main { margin-bottom: 2rem; }
 .comp-grid b {
   font-weight: 600;
   display: inline-block;
-  width: 3.2rem;
+  width: 3.5rem;
 }
 .comp-dupes {
-  font-size: 0.7rem;
+  font-size: 0.88rem;
   color: #6e7681;
   margin-top: 0.5rem;
   padding-top: 0.35rem;
   border-top: 1px solid #21262d;
 }
 .comp-dupes-warn { color: #d29922; font-weight: 600; border-top-color: #d29922; }
-.comp-tools { font-size: 0.7rem; color: #8b949e; margin-top: 0.3rem; }
-.comp-exec { font-size: 0.7rem; color: #58a6ff; margin-top: 0.2rem; }
-.comp-think-count { font-size: 0.7rem; color: #bc8cff; margin-left: 0.5rem; }
-.comp-snr-rec { font-size: 0.7rem; color: #da3633; margin-top: 0.4rem; padding: 0.3rem 0.5rem; background: rgba(218, 54, 51, 0.1); border-radius: 4px; border-left: 2px solid #da3633; }
+.comp-tools { font-size: 0.79rem; color: #8b949e; margin-top: 0.3rem; }
+.comp-exec { font-size: 0.79rem; color: #58a6ff; margin-top: 0.2rem; }
+.comp-think-count { font-size: 0.79rem; color: #bc8cff; margin-left: 0.5rem; }
+.comp-snr-rec { font-size: 0.79rem; color: #da3633; margin-top: 0.4rem; padding: 0.3rem 0.5rem; background: rgba(218, 54, 51, 0.1); border-radius: 4px; border-left: 2px solid #da3633; }
 .comp-warn { color: #f0883e; font-weight: 600; }
 .comp-danger { color: #f85149; font-weight: 600; }
 
@@ -291,9 +294,9 @@ main { margin-bottom: 2rem; }
   bottom: calc(100% + 6px);
   z-index: 100;
   width: max-content;
-  max-width: 260px;
+  max-width: 280px;
   padding: 0.5rem 0.7rem;
-  font-size: 0.7rem;
+  font-size: 0.88rem;
   font-weight: 400;
   line-height: 1.45;
   color: #c9d1d9;
@@ -321,7 +324,7 @@ main { margin-bottom: 2rem; }
   border: 1px solid #21262d;
   border-radius: 6px;
   padding: 0.7rem 0.9rem;
-  font-size: 0.82rem;
+  font-size: 0.92rem;
   color: #c9d1d9;
   line-height: 1.5;
   max-height: 14rem;
@@ -338,15 +341,16 @@ main { margin-bottom: 2rem; }
 /* Meta row */
 .meta {
   display: flex;
-  justify-content: space-between;
-  font-size: 0.7rem;
+  flex-wrap: wrap;
+  gap: 0.2rem 0.8rem;
+  font-size: 0.88rem;
   color: #6e7681;
 }
 .meta .abs-time { color: #8b949e; }
 
 /* Warning message */
 .warning {
-  font-size: 0.75rem;
+  font-size: 0.83rem;
   padding: 0.4rem 0.6rem;
   background: rgba(240, 136, 62, 0.1);
   border-left: 2px solid #f0883e;
@@ -365,7 +369,7 @@ main { margin-bottom: 2rem; }
   text-align: center;
   color: #6e7681;
   padding: 3rem;
-  font-size: 0.9rem;
+  font-size: 1.0rem;
 }
 
 footer {
@@ -373,6 +377,6 @@ footer {
   justify-content: space-between;
   padding-top: 1rem;
   border-top: 1px solid #21262d;
-  font-size: 0.7rem;
+  font-size: 0.88rem;
   color: #6e7681;
 }
