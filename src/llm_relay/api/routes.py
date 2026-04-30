@@ -141,11 +141,13 @@ async def _api_sessions(request: Request) -> Response:
 
 _ZONE_ORDER = {"green": 0, "yellow": 1, "orange": 2, "red": 3, "hard": 4}
 
-# Cached at module load — avoids repeated os.getenv in hot path
-_CACHED_TOKEN_A_YELLOW = int(os.getenv("LLM_TOKEN_A_YELLOW", "300000"))
-_CACHED_TOKEN_A_ORANGE = int(os.getenv("LLM_TOKEN_A_ORANGE", "500000"))
-_CACHED_TOKEN_A_RED = int(os.getenv("LLM_TOKEN_A_RED", "750000"))
-_CACHED_TOKEN_A_HARD = int(os.getenv("LLM_TOKEN_A_HARD", "900000"))
+# Cached at module load — avoids repeated os.getenv in hot path.
+# Zone A defaults aligned with Zone B ratios of the 1M ceiling:
+#   Yellow 500K (50%) / Orange 700K (70%) / Red 900K (90%) / Hard 1M (100%).
+_CACHED_TOKEN_A_YELLOW = int(os.getenv("LLM_TOKEN_A_YELLOW", "500000"))
+_CACHED_TOKEN_A_ORANGE = int(os.getenv("LLM_TOKEN_A_ORANGE", "700000"))
+_CACHED_TOKEN_A_RED = int(os.getenv("LLM_TOKEN_A_RED", "900000"))
+_CACHED_TOKEN_A_HARD = int(os.getenv("LLM_TOKEN_A_HARD", "1000000"))
 _CACHED_TOKEN_CEILING = int(os.getenv("LLM_TOKEN_CEILING", "1000000"))
 
 
@@ -159,15 +161,12 @@ def _classify_zone(turns: int) -> tuple:
     red = int(os.getenv("LLM_TURN_RED", "300"))
 
     if turns >= red:
-        return "red", "danger", None, f"Exceeded {red} turns. Quality degradation likely. Switch to a new session."
+        return "red", "위험", None, f"{red}턴 초과. 품질 저하 가능성이 높습니다. 새 세션으로 전환하세요."
     if turns >= orange:
-        return "orange", "warning", red, (
-            f"Reached {orange} turns. "
-            "Approaching quality degradation. Rotation recommended."
-        )
+        return "orange", "경고", red, f"{orange}턴 도달. 품질 저하 구간 진입 임박. 로테이션을 권장합니다."
     if turns >= yellow:
-        return "yellow", "caution", orange, f"Reached {yellow} turns. Prepare a new session."
-    return "green", "safe", yellow, None
+        return "yellow", "주의", orange, f"{yellow}턴 도달. 새 세션 준비를 권장합니다."
+    return "green", "안전", yellow, None
 
 
 def _classify_zone_absolute(tokens: int) -> tuple:
@@ -182,14 +181,14 @@ def _classify_zone_absolute(tokens: int) -> tuple:
     hard = _CACHED_TOKEN_A_HARD
 
     if tokens >= hard:
-        return "hard", "blocked", None, f"Exceeded {hard // 1000}K. Immediate session cleanup required."
+        return "hard", "차단", None, f"{hard // 1000}K 초과. 즉시 세션 정리 필요."
     if tokens >= red:
-        return "red", "danger", hard, f"Reached {red // 1000}K. Session rotation required."
+        return "red", "위험", hard, f"{red // 1000}K 도달. 세션 로테이션 필수."
     if tokens >= orange:
-        return "orange", "warning", red, f"Reached {orange // 1000}K. Finish current work then rotate."
+        return "orange", "경고", red, f"{orange // 1000}K 도달. 현재 작업 마무리 후 rotate."
     if tokens >= yellow:
-        return "yellow", "caution", orange, f"Reached {yellow // 1000}K. Update docs and prepare to rotate."
-    return "green", "safe", yellow, None
+        return "yellow", "주의", orange, f"{yellow // 1000}K 도달. 문서 업데이트 + rotate 준비."
+    return "green", "안전", yellow, None
 
 
 def _classify_zone_ratio(tokens: int, ceiling: Optional[int] = None) -> tuple:
@@ -201,22 +200,23 @@ def _classify_zone_ratio(tokens: int, ceiling: Optional[int] = None) -> tuple:
     if ceiling is None:
         ceiling = _CACHED_TOKEN_CEILING
     if ceiling <= 0:
-        return "green", "safe", 0, None
+        return "green", "안전", 0, None
 
     yellow_t = int(ceiling * 0.50)
     orange_t = int(ceiling * 0.70)
     red_t = int(ceiling * 0.90)
     ratio = tokens / ceiling if ceiling else 0.0
+    pct = int(ratio * 100)
 
     if ratio >= 1.0:
-        return "hard", "blocked", None, f"100% ({ceiling // 1000}K) ceiling reached. Immediate session cleanup."
+        return "hard", "차단", None, f"{pct}% ({tokens // 1000}K/{ceiling // 1000}K) 천장 도달. 즉시 세션 정리."
     if ratio >= 0.90:
-        return "red", "danger", ceiling, f"90% ({red_t // 1000}K) reached. Rotation required."
+        return "red", "위험", ceiling, f"{pct}% ({tokens // 1000}K/{ceiling // 1000}K) 도달. 로테이션 필수."
     if ratio >= 0.70:
-        return "orange", "warning", red_t, f"70% ({orange_t // 1000}K) reached. Finish then rotate."
+        return "orange", "경고", red_t, f"{pct}% ({tokens // 1000}K/{ceiling // 1000}K) 도달. 마무리 후 rotate."
     if ratio >= 0.50:
-        return "yellow", "caution", orange_t, f"50% ({yellow_t // 1000}K) reached. Prepare to rotate."
-    return "green", "safe", yellow_t, None
+        return "yellow", "주의", orange_t, f"{pct}% ({tokens // 1000}K/{ceiling // 1000}K) 도달. rotate 준비."
+    return "green", "안전", yellow_t, None
 
 
 def _overall_zone(zone_a: str, zone_b: str) -> str:
@@ -294,6 +294,10 @@ async def _api_turns(request: Request) -> Response:
             "cumul_unique": data["cumul_unique"],
             # Ceiling for ratio display on the client
             "ceiling": _CACHED_TOKEN_CEILING,
+            # Model metadata (consistent with Codex/Gemini)
+            "model_window": 0,
+            "official_context_window": 0,
+            "official_max_output": 0,
             # Cache hit rate
             "cache_hit_rate": cache["cache_hit_rate"],
             # TTL tier
@@ -482,6 +486,10 @@ async def _api_display(request: Request) -> Response:
                 "recent_peak": r["recent_peak"],
                 "cumul_unique": r["cumul_unique"],
                 "ceiling": ceiling,
+                # Model metadata (consistent with Codex/Gemini)
+                "model_window": 0,
+                "official_context_window": 0,
+                "official_max_output": 0,
                 # Cache hit rate + TTL tier
                 "cache_hit_rate": cache["cache_hit_rate"],
                 "ttl_tier": ttl["tier"],
