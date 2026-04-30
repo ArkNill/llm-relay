@@ -70,13 +70,13 @@
   };
 
   var COMP_TIPS = {
-    user_text:          "사용자가 입력한 프롬프트 텍스트가 차지하는 비율",
-    assistant_text:     "모델이 생성한 응답 텍스트 비율",
-    tool_use:           "도구 호출 정의(Read, Bash, Edit 등) 비율",
-    tool_result:        "도구 실행 결과(파일 내용, grep 출력 등) 비율. 높을수록 컨텍스트 오염",
-    thinking_overhead:  "모델 내부 추론(thinking) 블록 + 서명 오버헤드",
-    snr:                "Signal-to-Noise Ratio. (User+Asst) / (Result+Think). 1.0 이상이 이상적, 0.5 미만은 경고",
-    dupes:              "같은 파일을 2회 이상 Read한 횟수. compaction 후 재읽기가 주요 원인",
+    user_text:          "Percentage of context occupied by user-input prompt text",
+    assistant_text:     "Percentage of model-generated response text",
+    tool_use:           "Percentage of tool-call definitions (Read, Bash, Edit, etc.)",
+    tool_result:        "Percentage of tool execution results (file contents, grep output, etc.). Higher = more context noise.",
+    thinking_overhead:  "Model-internal reasoning (thinking) blocks + signature overhead",
+    snr:                "Signal-to-Noise Ratio. (User+Asst) / (Result+Think). 1.0+ is ideal; below 0.5 is a warning.",
+    dupes:              "Number of times the same file was Read 2+ times. Re-reading after compaction is the main cause.",
   };
 
   function tipAttr(key) {
@@ -234,7 +234,7 @@
 
     if (!data || !data.sessions || data.sessions.length === 0) {
       if (lastHash !== "EMPTY") {
-        container.innerHTML = '<div class="empty-state">활성 세션 없음</div>';
+        container.innerHTML = '<div class="empty-state">No active sessions</div>';
         countEl.textContent = "0 sessions";
         lastHash = "EMPTY";
       }
@@ -275,7 +275,7 @@
 
       var promptText = s.last_prompt || "";
       var promptClass = promptText ? "prompt-block" : "prompt-block empty";
-      var promptDisplay = promptText ? escapeHtml(promptText) : "(프롬프트 없음)";
+      var promptDisplay = promptText ? escapeHtml(promptText) : "(No prompt)";
       var warn = s.message ? '<div class="warning">' + escapeHtml(s.message) + '</div>' : '';
 
       // Terminal badge + connection type
