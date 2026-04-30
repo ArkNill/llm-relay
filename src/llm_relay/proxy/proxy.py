@@ -9,15 +9,43 @@ import logging
 import os
 import time
 from contextlib import asynccontextmanager
+from pathlib import Path
 from typing import Any
 
-import httpx
-from starlette.applications import Starlette
-from starlette.requests import Request
-from starlette.responses import Response, StreamingResponse
-from starlette.routing import Mount, Route
 
-from .db import get_conn, log_budget_event, log_microcompact, log_request
+def _load_env_files():
+    """Load .env.public and .env.local (2-tier env) for native (non-Docker) runs.
+
+    Only sets variables that are not already in the environment, so explicit
+    env vars and Docker env_file both take precedence.
+    """
+    base = Path(__file__).resolve().parent.parent.parent.parent  # repo root
+    for name in (".env.public", ".env.local"):
+        env_path = base / name
+        if not env_path.is_file():
+            continue
+        with open(env_path) as f:
+            for line in f:
+                line = line.strip()
+                if not line or line.startswith("#"):
+                    continue
+                if "=" not in line:
+                    continue
+                key, _, value = line.partition("=")
+                key = key.strip()
+                value = value.strip()
+                os.environ.setdefault(key, value)
+
+
+_load_env_files()
+
+import httpx  # noqa: E402
+from starlette.applications import Starlette  # noqa: E402
+from starlette.requests import Request  # noqa: E402
+from starlette.responses import Response, StreamingResponse  # noqa: E402
+from starlette.routing import Mount, Route  # noqa: E402
+
+from .db import get_conn, log_budget_event, log_microcompact, log_request  # noqa: E402
 
 # GrowthBook intercept (local-only, file excluded via .gitignore)
 try:
