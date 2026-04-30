@@ -14,6 +14,8 @@ from starlette.requests import Request
 from starlette.responses import Response
 from starlette.routing import Route
 
+from llm_relay.i18n import MESSAGES, get_lang, t
+
 logger = logging.getLogger(__name__)
 
 
@@ -161,12 +163,12 @@ def _classify_zone(turns: int) -> tuple:
     red = int(os.getenv("LLM_TURN_RED", "300"))
 
     if turns >= red:
-        return "red", "위험", None, f"{red}턴 초과. 품질 저하 가능성이 높습니다. 새 세션으로 전환하세요."
+        return "red", t("zone.danger"), None, t("zone.turn.red", n=red)
     if turns >= orange:
-        return "orange", "경고", red, f"{orange}턴 도달. 품질 저하 구간 진입 임박. 로테이션을 권장합니다."
+        return "orange", t("zone.warning"), red, t("zone.turn.orange", n=orange)
     if turns >= yellow:
-        return "yellow", "주의", orange, f"{yellow}턴 도달. 새 세션 준비를 권장합니다."
-    return "green", "안전", yellow, None
+        return "yellow", t("zone.caution"), orange, t("zone.turn.yellow", n=yellow)
+    return "green", t("zone.safe"), yellow, None
 
 
 def _classify_zone_absolute(tokens: int) -> tuple:
@@ -181,14 +183,14 @@ def _classify_zone_absolute(tokens: int) -> tuple:
     hard = _CACHED_TOKEN_A_HARD
 
     if tokens >= hard:
-        return "hard", "차단", None, f"{hard // 1000}K 초과. 즉시 세션 정리 필요."
+        return "hard", t("zone.blocked"), None, t("zone.abs.hard", n=hard // 1000)
     if tokens >= red:
-        return "red", "위험", hard, f"{red // 1000}K 도달. 세션 로테이션 필수."
+        return "red", t("zone.danger"), hard, t("zone.abs.red", n=red // 1000)
     if tokens >= orange:
-        return "orange", "경고", red, f"{orange // 1000}K 도달. 현재 작업 마무리 후 rotate."
+        return "orange", t("zone.warning"), red, t("zone.abs.orange", n=orange // 1000)
     if tokens >= yellow:
-        return "yellow", "주의", orange, f"{yellow // 1000}K 도달. 문서 업데이트 + rotate 준비."
-    return "green", "안전", yellow, None
+        return "yellow", t("zone.caution"), orange, t("zone.abs.yellow", n=yellow // 1000)
+    return "green", t("zone.safe"), yellow, None
 
 
 def _classify_zone_ratio(tokens: int, ceiling: Optional[int] = None) -> tuple:
@@ -200,7 +202,7 @@ def _classify_zone_ratio(tokens: int, ceiling: Optional[int] = None) -> tuple:
     if ceiling is None:
         ceiling = _CACHED_TOKEN_CEILING
     if ceiling <= 0:
-        return "green", "안전", 0, None
+        return "green", t("zone.safe"), 0, None
 
     yellow_t = int(ceiling * 0.50)
     orange_t = int(ceiling * 0.70)
@@ -208,15 +210,16 @@ def _classify_zone_ratio(tokens: int, ceiling: Optional[int] = None) -> tuple:
     ratio = tokens / ceiling if ceiling else 0.0
     pct = int(ratio * 100)
 
+    _kw = dict(pct=pct, cur=tokens // 1000, ceil=ceiling // 1000)
     if ratio >= 1.0:
-        return "hard", "차단", None, f"{pct}% ({tokens // 1000}K/{ceiling // 1000}K) 천장 도달. 즉시 세션 정리."
+        return "hard", t("zone.blocked"), None, t("zone.ratio.hard", **_kw)
     if ratio >= 0.90:
-        return "red", "위험", ceiling, f"{pct}% ({tokens // 1000}K/{ceiling // 1000}K) 도달. 로테이션 필수."
+        return "red", t("zone.danger"), ceiling, t("zone.ratio.red", **_kw)
     if ratio >= 0.70:
-        return "orange", "경고", red_t, f"{pct}% ({tokens // 1000}K/{ceiling // 1000}K) 도달. 마무리 후 rotate."
+        return "orange", t("zone.warning"), red_t, t("zone.ratio.orange", **_kw)
     if ratio >= 0.50:
-        return "yellow", "주의", orange_t, f"{pct}% ({tokens // 1000}K/{ceiling // 1000}K) 도달. rotate 준비."
-    return "green", "안전", yellow_t, None
+        return "yellow", t("zone.caution"), orange_t, t("zone.ratio.yellow", **_kw)
+    return "green", t("zone.safe"), yellow_t, None
 
 
 def _overall_zone(zone_a: str, zone_b: str) -> str:
@@ -1000,6 +1003,13 @@ async def _api_gemini_status(request: Request) -> Response:
     )
 
 
+async def _api_i18n(request: Request) -> Response:
+    """Return i18n message catalog for the requested locale."""
+    lang = request.query_params.get("lang", get_lang())
+    msgs = MESSAGES.get(lang, MESSAGES["en"])
+    return _json_response({"lang": lang, "messages": msgs})
+
+
 def get_api_routes() -> List[Route]:
     """Return all API routes for mounting into the main Starlette app."""
     return [
@@ -1027,4 +1037,6 @@ def get_api_routes() -> List[Route]:
         Route("/api/v1/anthropic-status", _api_anthropic_status, methods=["GET"]),
         Route("/api/v1/openai-status", _api_openai_status, methods=["GET"]),
         Route("/api/v1/gemini-status", _api_gemini_status, methods=["GET"]),
+        # i18n
+        Route("/api/v1/i18n", _api_i18n, methods=["GET"]),
     ]

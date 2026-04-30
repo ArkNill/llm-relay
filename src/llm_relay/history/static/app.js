@@ -27,7 +27,8 @@
   function fmtTime(ts) {
     if (!ts) return "-";
     const d = new Date(ts * 1000);
-    return d.toLocaleString("ko-KR", { hour12: false });
+    var locale = (navigator.language || "en").startsWith("ko") ? "ko-KR" : "en-US";
+    return d.toLocaleString(locale, { hour12: false });
   }
 
   function fmtDuration(firstTs, lastTs) {

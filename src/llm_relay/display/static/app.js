@@ -2,6 +2,26 @@
 (function () {
   const API = window.location.origin + "/api/v1";
 
+  // i18n — load messages for detected locale
+  var _i18n = {};
+  var _i18nLang = (navigator.language || "en").startsWith("ko") ? "ko" : "en";
+  function msg(key) { return _i18n[key] || key; }
+  (async function loadI18n() {
+    try {
+      var resp = await fetch(API + "/i18n?lang=" + _i18nLang);
+      var data = await resp.json();
+      _i18n = data.messages || {};
+      // Re-populate COMP_TIPS with i18n values once loaded
+      COMP_TIPS.user_text = msg("ui.comp.user_text");
+      COMP_TIPS.assistant_text = msg("ui.comp.assistant_text");
+      COMP_TIPS.tool_use = msg("ui.comp.tool_use");
+      COMP_TIPS.tool_result = msg("ui.comp.tool_result");
+      COMP_TIPS.thinking_overhead = msg("ui.comp.thinking_overhead");
+      COMP_TIPS.snr = msg("ui.comp.snr");
+      COMP_TIPS.dupes = msg("ui.comp.dupes");
+    } catch (e) { /* fallback to inline English defaults */ }
+  })();
+
   async function fetchJSON(path) {
     try {
       const resp = await fetch(API + path);
@@ -234,7 +254,7 @@
 
     if (!data || !data.sessions || data.sessions.length === 0) {
       if (lastHash !== "EMPTY") {
-        container.innerHTML = '<div class="empty-state">No active sessions</div>';
+        container.innerHTML = '<div class="empty-state">' + msg("ui.no_active_sessions") + '</div>';
         countEl.textContent = "0 sessions";
         lastHash = "EMPTY";
       }
@@ -275,7 +295,7 @@
 
       var promptText = s.last_prompt || "";
       var promptClass = promptText ? "prompt-block" : "prompt-block empty";
-      var promptDisplay = promptText ? escapeHtml(promptText) : "(No prompt)";
+      var promptDisplay = promptText ? escapeHtml(promptText) : msg("ui.no_prompt");
       var warn = s.message ? '<div class="warning">' + escapeHtml(s.message) + '</div>' : '';
 
       // Terminal badge + connection type

@@ -36,6 +36,7 @@ from llm_relay.api._compat import (
     read_proc_environ as _read_proc_environ,
 )
 from llm_relay.detect.scanner import find_projects_dir
+from llm_relay.i18n import t
 
 # Official OpenAI public limit for GPT-5.5 Thinking Pro / GPT-5 Codex-class
 # models: 400k context with 128k max output, leaving 272k input context.
@@ -94,14 +95,14 @@ def _codex_classify_absolute(tokens: int) -> tuple[str, str, Optional[int], Opti
     hard = int(os.getenv("CODEX_TOKEN_A_HARD", "400000"))
 
     if tokens >= hard:
-        return "hard", "차단", None, f"{hard // 1000}K 도달. 즉시 세션 정리 필요."
+        return "hard", t("zone.blocked"), None, t("zone.abs.hard", n=hard // 1000)
     if tokens >= red:
-        return "red", "위험", hard, f"{red // 1000}K 도달. 세션 로테이션 필수."
+        return "red", t("zone.danger"), hard, t("zone.abs.red", n=red // 1000)
     if tokens >= orange:
-        return "orange", "경고", red, f"{orange // 1000}K 도달. 마무리 후 rotate."
+        return "orange", t("zone.warning"), red, t("zone.abs.orange", n=orange // 1000)
     if tokens >= yellow:
-        return "yellow", "주의", orange, f"{yellow // 1000}K 도달. rotate 준비."
-    return "green", "안전", yellow, None
+        return "yellow", t("zone.caution"), orange, t("zone.abs.yellow", n=yellow // 1000)
+    return "green", t("zone.safe"), yellow, None
 
 
 def _codex_classify_ratio(tokens: int, ceiling: int) -> tuple[str, str, Optional[int], Optional[str]]:
@@ -111,7 +112,7 @@ def _codex_classify_ratio(tokens: int, ceiling: int) -> tuple[str, str, Optional
     sees real numbers instead of the fixed threshold label.
     """
     if ceiling <= 0:
-        return "green", "안전", 0, None
+        return "green", t("zone.safe"), 0, None
 
     yellow_t = int(ceiling * 0.50)
     orange_t = int(ceiling * 0.70)
@@ -119,15 +120,16 @@ def _codex_classify_ratio(tokens: int, ceiling: int) -> tuple[str, str, Optional
     ratio = tokens / ceiling if ceiling else 0.0
     pct = int(ratio * 100)
 
+    _kw = dict(pct=pct, cur=tokens // 1000, ceil=ceiling // 1000)
     if ratio >= 1.0:
-        return "hard", "차단", None, f"{pct}% ({tokens // 1000}K/{ceiling // 1000}K) 천장 도달. 즉시 세션 정리."
+        return "hard", t("zone.blocked"), None, t("zone.ratio.hard", **_kw)
     if ratio >= 0.90:
-        return "red", "위험", ceiling, f"{pct}% ({tokens // 1000}K/{ceiling // 1000}K) 도달. 로테이션 필수."
+        return "red", t("zone.danger"), ceiling, t("zone.ratio.red", **_kw)
     if ratio >= 0.70:
-        return "orange", "경고", red_t, f"{pct}% ({tokens // 1000}K/{ceiling // 1000}K) 도달. 마무리 후 rotate."
+        return "orange", t("zone.warning"), red_t, t("zone.ratio.orange", **_kw)
     if ratio >= 0.50:
-        return "yellow", "주의", orange_t, f"{pct}% ({tokens // 1000}K/{ceiling // 1000}K) 도달. rotate 준비."
-    return "green", "안전", yellow_t, None
+        return "yellow", t("zone.caution"), orange_t, t("zone.ratio.yellow", **_kw)
+    return "green", t("zone.safe"), yellow_t, None
 
 
 def _codex_compute_zone_bundle(current_ctx: int, peak_ctx: int) -> dict:

@@ -2,6 +2,18 @@
 (function () {
   const API = window.location.origin + "/api/v1";
 
+  // i18n — load messages for detected locale
+  var _i18n = {};
+  var _i18nLang = (navigator.language || "en").startsWith("ko") ? "ko" : "en";
+  function msg(key) { return _i18n[key] || key; }
+  (async function loadI18n() {
+    try {
+      var resp = await fetch(API + "/i18n?lang=" + _i18nLang);
+      var data = await resp.json();
+      _i18n = data.messages || {};
+    } catch (e) { /* fallback to key-as-value */ }
+  })();
+
   var _fetchErrorShown = false;
   async function fetchJSON(path) {
     try {
@@ -287,7 +299,7 @@
     var data = await fetchJSON("/turns?window=4");
     if (!data || !data.sessions || data.sessions.length === 0) {
       if (lastTurnHash !== "EMPTY") {
-        container.innerHTML = '<div class="turn-monitor-empty">No active sessions</div>';
+        container.innerHTML = '<div class="turn-monitor-empty">' + msg("ui.no_active_sessions") + '</div>';
         renderContextHealth([]);
         lastTurnHash = "EMPTY";
       }

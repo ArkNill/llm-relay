@@ -28,19 +28,37 @@ MESSAGES = {
         "zone.abs.hard": "Exceeded {n}K. Immediate session cleanup required.",
         "zone.abs.red": "Reached {n}K. Session rotation required.",
         "zone.abs.orange": "Reached {n}K. Finish current work then rotate.",
-        "zone.abs.yellow": "Reached {n}K. Prepare to rotate.",
+        "zone.abs.yellow": "Reached {n}K. Update docs and prepare to rotate.",
 
-        # Zone messages — ratio
-        "zone.ratio.hard": "100% ({n}K) ceiling reached. Immediate session cleanup.",
-        "zone.ratio.red": "90% ({n}K) reached. Rotation required.",
-        "zone.ratio.orange": "70% ({n}K) reached. Finish then rotate.",
-        "zone.ratio.yellow": "50% ({n}K) reached. Prepare to rotate.",
+        # Zone messages — ratio (pct-aware format)
+        "zone.ratio.hard": "{pct}% ({cur}K/{ceil}K) ceiling reached. Immediate session cleanup.",
+        "zone.ratio.red": "{pct}% ({cur}K/{ceil}K) reached. Rotation required.",
+        "zone.ratio.orange": "{pct}% ({cur}K/{ceil}K) reached. Finish then rotate.",
+        "zone.ratio.yellow": "{pct}% ({cur}K/{ceil}K) reached. Prepare to rotate.",
 
         # UI strings
         "ui.no_active_sessions": "No active sessions",
-        "ui.no_prompt": "(no prompt)",
+        "ui.no_prompt": "(No prompt)",
         "ui.no_history": "No session history recorded yet.",
         "ui.enable_history": "Enable with LLM_RELAY_HISTORY=1",
+
+        # Composition tooltips
+        "ui.comp.user_text": "Percentage of context occupied by user-input prompt text",
+        "ui.comp.assistant_text": "Percentage of model-generated response text",
+        "ui.comp.tool_use": "Percentage of tool-call definitions (Read, Bash, Edit, etc.)",
+        "ui.comp.tool_result": (
+            "Percentage of tool execution results (file contents, grep output, etc.)."
+            " Higher = more context noise."
+        ),
+        "ui.comp.thinking_overhead": "Model-internal reasoning (thinking) blocks + signature overhead",
+        "ui.comp.snr": (
+            "Signal-to-Noise Ratio. (User+Asst) / (Result+Think)."
+            " 1.0+ is ideal; below 0.5 is a warning."
+        ),
+        "ui.comp.dupes": (
+            "Number of times the same file was Read 2+ times."
+            " Re-reading after compaction is the main cause."
+        ),
     },
     "ko": {
         "zone.safe": "안전",
@@ -58,15 +76,23 @@ MESSAGES = {
         "zone.abs.orange": "{n}K 도달. 현재 작업 마무리 후 rotate.",
         "zone.abs.yellow": "{n}K 도달. 문서 업데이트 + rotate 준비.",
 
-        "zone.ratio.hard": "100% ({n}K) 천장 도달. 즉시 세션 정리.",
-        "zone.ratio.red": "90% ({n}K) 도달. 로테이션 필수.",
-        "zone.ratio.orange": "70% ({n}K) 도달. 마무리 후 rotate.",
-        "zone.ratio.yellow": "50% ({n}K) 도달. rotate 준비.",
+        "zone.ratio.hard": "{pct}% ({cur}K/{ceil}K) 천장 도달. 즉시 세션 정리.",
+        "zone.ratio.red": "{pct}% ({cur}K/{ceil}K) 도달. 로테이션 필수.",
+        "zone.ratio.orange": "{pct}% ({cur}K/{ceil}K) 도달. 마무리 후 rotate.",
+        "zone.ratio.yellow": "{pct}% ({cur}K/{ceil}K) 도달. rotate 준비.",
 
         "ui.no_active_sessions": "활성 세션 없음",
         "ui.no_prompt": "(프롬프트 없음)",
         "ui.no_history": "세션 기록이 없습니다.",
         "ui.enable_history": "LLM_RELAY_HISTORY=1로 활성화하세요",
+
+        "ui.comp.user_text": "사용자가 입력한 프롬프트 텍스트가 차지하는 비율",
+        "ui.comp.assistant_text": "모델이 생성한 응답 텍스트 비율",
+        "ui.comp.tool_use": "도구 호출 정의(Read, Bash, Edit 등) 비율",
+        "ui.comp.tool_result": "도구 실행 결과(파일 내용, grep 출력 등) 비율. 높을수록 컨텍스트 오염",
+        "ui.comp.thinking_overhead": "모델 내부 추론(thinking) 블록 + 서명 오버헤드",
+        "ui.comp.snr": "Signal-to-Noise Ratio. (User+Asst) / (Result+Think). 1.0 이상이 이상적, 0.5 미만은 경고",
+        "ui.comp.dupes": "같은 파일을 2회 이상 Read한 횟수. compaction 후 재읽기가 주요 원인",
     },
 }
 
@@ -74,6 +100,7 @@ _lang = os.getenv("LLM_RELAY_LANG", "en")
 
 
 def get_lang():
+    """Return the current server locale."""
     return _lang
 
 
