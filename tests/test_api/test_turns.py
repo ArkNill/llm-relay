@@ -796,7 +796,7 @@ class TestClassifyZoneAbsolute:
     def test_yellow(self):
         z, label, nxt, msg = _classify_zone_absolute(500_000)
         assert z == "yellow"
-        assert label == "주의"
+        assert label == "caution"
         assert nxt == 700_000
         assert msg is not None
 
