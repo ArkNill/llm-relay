@@ -389,17 +389,40 @@ async def _api_session_terminal(request: Request) -> Response:
 
         body = await request.json()
         session_id = body.get("session_id")
-        if not session_id:
-            return _json_response({"error": "session_id required"}, status=400)
+        if not session_id or not isinstance(session_id, str):
+            return _json_response({"error": "session_id required (string)"}, status=400)
+        if len(session_id) > 128:
+            return _json_response({"error": "session_id too long"}, status=400)
+
+        # Validate optional fields
+        cc_pid = body.get("cc_pid")
+        term_pid = body.get("term_pid")
+        tty = body.get("tty")
+        term_name = body.get("term_name")
+
+        if cc_pid is not None:
+            try:
+                cc_pid = int(cc_pid)
+            except (ValueError, TypeError):
+                return _json_response({"error": "cc_pid must be integer"}, status=400)
+        if term_pid is not None:
+            try:
+                term_pid = int(term_pid)
+            except (ValueError, TypeError):
+                return _json_response({"error": "term_pid must be integer"}, status=400)
+        if tty is not None and (not isinstance(tty, str) or len(tty) > 256):
+            return _json_response({"error": "tty must be string <= 256 chars"}, status=400)
+        if term_name is not None and (not isinstance(term_name, str) or len(term_name) > 256):
+            return _json_response({"error": "term_name must be string <= 256 chars"}, status=400)
 
         conn = get_conn()
         upsert_session_terminal(
             conn,
             session_id=session_id,
-            tty=body.get("tty"),
-            cc_pid=body.get("cc_pid"),
-            term_pid=body.get("term_pid"),
-            term_name=body.get("term_name"),
+            tty=tty,
+            cc_pid=cc_pid,
+            term_pid=term_pid,
+            term_name=term_name,
         )
         return _json_response({"ok": True, "session_id": session_id})
     except ImportError:
