@@ -96,6 +96,8 @@ MESSAGES = {
     },
 }
 
+SUPPORTED_LANGS = list(MESSAGES.keys())
+
 _lang = os.getenv("LLM_RELAY_LANG", "en")
 
 
