@@ -3,17 +3,14 @@
 from __future__ import annotations
 
 import json
-from pathlib import Path
-
-import pytest
 
 from llm_relay.recover.doctor import (
     DoctorReport,
     HealthResult,
-    check_trust_dialog_hang,
     check_claude_json_corruption,
-    check_zombie_sessions,
     check_relay_health,
+    check_trust_dialog_hang,
+    check_zombie_sessions,
     run_doctor,
 )
 
