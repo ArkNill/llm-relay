@@ -13,7 +13,7 @@ from llm_relay.detect.models import GrowthBookConfig
 
 def find_claude_home() -> Path:
     """Locate the Claude Code data directory."""
-    override = os.environ.get("CCPULSE_CLAUDE_HOME")
+    override = os.environ.get("LLM_RELAY_CLAUDE_HOME") or os.environ.get("CCPULSE_CLAUDE_HOME")
     if override:
         return Path(override)
     return Path.home() / ".claude"
