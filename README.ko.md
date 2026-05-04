@@ -7,7 +7,7 @@ LLM 사용 통합 관리 — API 프록시 + 세션 진단 + 멀티 CLI 오케�
 ## 기능
 
 - **Proxy**: API 투명 프록시 — 캐시/토큰 모니터링 + 12전략 pruning
-- **Detect**: 8종 디텍터 (orphan, stuck, inflation, synthetic, bloat, cache, resume, microcompact)
+- **Detect**: 7종 디텍터 (orphan, stuck, bloat, synthetic, cache, resume, microcompact)
 - **Recover**: 세션 복구 + doctor (7개 건강 검사)
 - **Guard**: 4-tier 임계값 데몬 — dual-zone(절대+비율) 분류
 - **Cost**: per-1% 비용 산출 + rate-limit 헤더 분석
@@ -37,7 +37,7 @@ pip install llm-relay[all]
 ### CLI 진단 (서버 불필요)
 
 ```bash
-llm-relay scan              # 세션 건강 검사 (8종 디텍터)
+llm-relay scan              # 세션 건강 검사 (7종 디텍터)
 llm-relay doctor            # 설정 건강 검사 (7개 항목)
 llm-relay recover           # 세션 컨텍스트 추출 (재개용)
 ```
