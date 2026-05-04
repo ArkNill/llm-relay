@@ -270,7 +270,7 @@
       if (dupeWarning) rowCls += " dupes-row-warn";
 
       var snrRecHtml = c.snr_recommendation
-        ? '<div class="health-rec">' + c.snr_recommendation + '</div>'
+        ? '<div class="health-rec">' + escapeHtml(c.snr_recommendation) + '</div>'
         : '';
 
       return '<div class="' + rowCls + '">' +
@@ -319,7 +319,7 @@
       var duration = s.duration_s || 0;
       var idleS = now - (s.last_ts || now);
       var pct = Math.min(100, (s.turns / 300) * 100);
-      var msg = s.message ? '<div class="message">' + s.message + '</div>' : '';
+      var msg = s.message ? '<div class="message">' + escapeHtml(s.message) + '</div>' : '';
       return '<div class="turn-card zone-' + s.zone + '">' +
         '<div class="sid">' + label + '</div>' +
         '<div class="turn-count">' + s.turns + '<span class="label">/ 300</span></div>' +
@@ -351,7 +351,7 @@
         '<td>' + d.cli_id + "</td>" +
         '<td class="' + statusClass + '">' + statusText + "</td>" +
         "<td>" + Math.round(d.duration_ms) + "ms</td>" +
-        "<td>" + (d.prompt_preview || "").substring(0, 60) + "</td>" +
+        "<td>" + escapeHtml((d.prompt_preview || "").substring(0, 60)) + "</td>" +
         "</tr>";
     }).join("");
 
