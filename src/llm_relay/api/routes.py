@@ -91,7 +91,7 @@ async def _api_delegations(request: Request) -> Response:
         return _json_response({"error": str(pe)}, status=400)
     except Exception as e:
         logger.error("Failed to get delegation history: %s", e)
-        return _json_response({"error": str(e), "delegations": []}, status=500)
+        return _json_response({"error": "Internal server error", "delegations": []}, status=500)
 
 
 # ── GET /api/v1/delegations/stats ──
@@ -110,7 +110,7 @@ async def _api_delegation_stats(request: Request) -> Response:
         return _json_response({"error": str(pe)}, status=400)
     except Exception as e:
         logger.error("Failed to get delegation stats: %s", e)
-        return _json_response({"error": str(e)}, status=500)
+        return _json_response({"error": "Internal server error"}, status=500)
 
 
 # ── GET /api/v1/sessions ──
@@ -130,7 +130,7 @@ async def _api_sessions(request: Request) -> Response:
         return _json_response({"error": str(pe)}, status=400)
     except Exception as e:
         logger.error("Failed to get sessions: %s", e)
-        return _json_response({"error": str(e), "sessions": []}, status=500)
+        return _json_response({"error": "Internal server error", "sessions": []}, status=500)
 
 
 # ── Zone classification ──
@@ -312,7 +312,7 @@ async def _api_turns(request: Request) -> Response:
         return _json_response({"error": "Proxy module not available"}, status=501)
     except Exception as e:
         logger.error("Failed to get turn count: %s", e)
-        return _json_response({"error": str(e)}, status=500)
+        return _json_response({"error": "Internal server error"}, status=500)
 
 
 # ── GET /api/v1/turns (all sessions) ──
@@ -372,7 +372,7 @@ async def _api_turns_all(request: Request) -> Response:
         return _json_response({"error": "Proxy module not available", "sessions": []}, status=501)
     except Exception as e:
         logger.error("Failed to get all turn counts: %s", e)
-        return _json_response({"error": str(e), "sessions": []}, status=500)
+        return _json_response({"error": "Internal server error", "sessions": []}, status=500)
 
 
 # ── POST /api/v1/session-terminal ──
@@ -429,7 +429,7 @@ async def _api_session_terminal(request: Request) -> Response:
         return _json_response({"error": "Proxy module not available"}, status=501)
     except Exception as e:
         logger.error("Failed to upsert session terminal: %s", e)
-        return _json_response({"error": str(e)}, status=500)
+        return _json_response({"error": "Internal server error"}, status=500)
 
 
 # ── Context composition helper ──
@@ -549,7 +549,7 @@ async def _api_display(request: Request) -> Response:
         return _json_response({"error": "Proxy module not available", "sessions": []}, status=501)
     except Exception as e:
         logger.error("Failed to get display data: %s", e)
-        return _json_response({"error": str(e), "sessions": []}, status=500)
+        return _json_response({"error": "Internal server error", "sessions": []}, status=500)
 
 
 # ── GET /api/v1/cost ──
@@ -590,7 +590,7 @@ async def _api_cost(request: Request) -> Response:
         return _json_response({"error": str(pe)}, status=400)
     except Exception as e:
         logger.error("Failed to get cost data: %s", e)
-        return _json_response({"error": str(e)}, status=500)
+        return _json_response({"error": "Internal server error"}, status=500)
 
 
 # ── GET /api/v1/health ──
@@ -692,7 +692,7 @@ async def _api_history_sessions(request: Request) -> Response:
         return _json_response({"error": "Proxy module not available"}, status=501)
     except Exception as e:
         logger.error("Failed to get history sessions: %s", e)
-        return _json_response({"error": str(e)}, status=500)
+        return _json_response({"error": "Internal server error"}, status=500)
 
 
 # ── GET /api/v1/history/{session_id} ──
@@ -752,7 +752,7 @@ async def _api_history_detail(request: Request) -> Response:
         return _json_response({"error": str(pe)}, status=400)
     except Exception as e:
         logger.error("Failed to get session history: %s", e)
-        return _json_response({"error": str(e)}, status=500)
+        return _json_response({"error": "Internal server error"}, status=500)
 
 
 # ── GET /api/v1/history/{session_id}/compactions ──
@@ -774,7 +774,7 @@ async def _api_history_compactions(request: Request) -> Response:
         return _json_response({"error": "Proxy module not available"}, status=501)
     except Exception as e:
         logger.error("Failed to get compaction events: %s", e)
-        return _json_response({"error": str(e)}, status=500)
+        return _json_response({"error": "Internal server error"}, status=500)
 
 
 # ── GET /api/v1/quota ──
@@ -793,7 +793,7 @@ async def _api_quota(request: Request) -> Response:
         return _json_response({"error": "Proxy module not available"}, status=501)
     except Exception as e:
         logger.error("Failed to get quota: %s", e)
-        return _json_response({"error": str(e)}, status=500)
+        return _json_response({"error": "Internal server error"}, status=500)
 
 
 # ── GET /api/v1/errors ──
@@ -814,7 +814,7 @@ async def _api_errors(request: Request) -> Response:
         return _json_response({"error": str(pe)}, status=400)
     except Exception as e:
         logger.error("Failed to get error stats: %s", e)
-        return _json_response({"error": str(e)}, status=500)
+        return _json_response({"error": "Internal server error"}, status=500)
 
 
 # ── GET /api/v1/cache ──
@@ -835,7 +835,7 @@ async def _api_cache(request: Request) -> Response:
         return _json_response({"error": str(pe)}, status=400)
     except Exception as e:
         logger.error("Failed to get cache stats: %s", e)
-        return _json_response({"error": str(e)}, status=500)
+        return _json_response({"error": "Internal server error"}, status=500)
 
 
 # ── GET /api/v1/ttl ──
@@ -853,7 +853,7 @@ async def _api_ttl(request: Request) -> Response:
         return _json_response({"error": "Proxy module not available"}, status=501)
     except Exception as e:
         logger.error("Failed to get TTL tier: %s", e)
-        return _json_response({"error": str(e)}, status=500)
+        return _json_response({"error": "Internal server error"}, status=500)
 
 
 async def _api_history_composition(request: Request) -> Response:
@@ -879,7 +879,7 @@ async def _api_history_composition(request: Request) -> Response:
         return _json_response({"error": "Proxy module not available"}, status=501)
     except Exception as e:
         logger.error("Failed to get per-turn composition: %s", e)
-        return _json_response({"error": str(e)}, status=500)
+        return _json_response({"error": "Internal server error"}, status=500)
 
 
 # ── Upstream provider status (proxied + 60s-cached) ──
