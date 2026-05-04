@@ -50,7 +50,7 @@ pip install llm-relay[proxy]
 uvicorn llm_relay.proxy.proxy:app --host 0.0.0.0 --port 8083
 
 # 방법 2: Docker
-cp .env.example .env        # 필요에 따라 수정
+cp .env.public .env         # 필요에 따라 수정
 docker compose up -d
 ```
 
