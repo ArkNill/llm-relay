@@ -14,6 +14,10 @@ build/
 .mypy_cache/
 vendor/
 
+# Project instruction files (LOCAL-ONLY — NEVER COMMIT)
+CLAUDE.md
+PLAN.txt
+
 # GrowthBook intercept (LOCAL-ONLY — DO NOT COMMIT)
 src/llm_relay/proxy/growthbook_intercept.py
 
