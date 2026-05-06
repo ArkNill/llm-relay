@@ -24,7 +24,7 @@ def _load_env_files():
         env_path = base / name
         if not env_path.is_file():
             continue
-        with open(env_path) as f:
+        with open(env_path, encoding="utf-8") as f:
             for line in f:
                 line = line.strip()
                 if not line or line.startswith("#"):

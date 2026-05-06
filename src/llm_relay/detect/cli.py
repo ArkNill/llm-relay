@@ -232,6 +232,12 @@ def doctor(fix: bool) -> None:
 @click.option("--workers", "-w", default=1, type=int, help="Number of worker processes.")
 def serve(host: str, port: int, workers: int) -> None:
     """Start the proxy server with dashboard and display pages."""
+    import sys
+
+    if sys.platform == "win32":
+        import asyncio
+        asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
+
     try:
         import uvicorn
     except ImportError:
@@ -376,6 +382,73 @@ def init(port: int, skip_server: bool, dry_run: bool) -> None:
     if dry_run:
         click.echo()
         click.echo("(dry run — no changes were made)")
+
+
+@cli.group()
+def service() -> None:
+    """Manage llm-relay as a Windows background service."""
+    pass
+
+
+@service.command("install")
+@click.option("--port", "-p", default=8083, type=int, help="Listen port (default: 8083).")
+def service_install(port: int) -> None:
+    """Install llm-relay as a Windows service (requires admin)."""
+    import sys
+    if sys.platform != "win32":
+        click.echo("Error: 'service' commands are Windows-only. Use systemd on Linux.")
+        raise SystemExit(1)
+    from llm_relay.win_service import install_service
+    if not install_service(port=port):
+        raise SystemExit(1)
+
+
+@service.command("uninstall")
+def service_uninstall() -> None:
+    """Remove llm-relay Windows service (requires admin)."""
+    import sys
+    if sys.platform != "win32":
+        click.echo("Error: 'service' commands are Windows-only.")
+        raise SystemExit(1)
+    from llm_relay.win_service import uninstall_service
+    if not uninstall_service():
+        raise SystemExit(1)
+
+
+@service.command("start")
+@click.option("--port", "-p", default=8083, type=int, help="Listen port (default: 8083).")
+def service_start(port: int) -> None:
+    """Start the llm-relay background daemon."""
+    import sys
+    if sys.platform != "win32":
+        click.echo("Error: 'service' commands are Windows-only. Use: systemctl start llm-relay")
+        raise SystemExit(1)
+    from llm_relay.win_service import start_daemon
+    if not start_daemon(port=port):
+        raise SystemExit(1)
+
+
+@service.command("stop")
+def service_stop() -> None:
+    """Stop the llm-relay background daemon."""
+    import sys
+    if sys.platform != "win32":
+        click.echo("Error: 'service' commands are Windows-only. Use: systemctl stop llm-relay")
+        raise SystemExit(1)
+    from llm_relay.win_service import stop_daemon
+    if not stop_daemon():
+        raise SystemExit(1)
+
+
+@service.command("status")
+def service_status_cmd() -> None:
+    """Show llm-relay Windows service status."""
+    import sys
+    if sys.platform != "win32":
+        click.echo("Error: 'service' commands are Windows-only.")
+        raise SystemExit(1)
+    from llm_relay.win_service import service_status
+    service_status()
 
 
 def main() -> None:

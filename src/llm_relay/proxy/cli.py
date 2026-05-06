@@ -15,10 +15,14 @@ from rich.table import Table
 
 def cmd_serve(args):
     """Start the proxy server."""
+    import asyncio
     import logging
     import os
 
     import uvicorn
+
+    if sys.platform == "win32":
+        asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
 
     os.environ.setdefault("LLM_RELAY_UPSTREAM", args.upstream)
     os.environ.setdefault("LLM_RELAY_WARN_RATIO", str(args.warn_ratio))
