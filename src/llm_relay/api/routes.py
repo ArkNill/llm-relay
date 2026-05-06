@@ -6,6 +6,7 @@ import asyncio
 import json
 import logging
 import os
+import sys
 import time
 import urllib.request
 from typing import Any, List, Optional
@@ -14,9 +15,25 @@ from starlette.requests import Request
 from starlette.responses import Response
 from starlette.routing import Route
 
-from llm_relay.i18n import MESSAGES, get_lang, t
+from llm_relay.i18n import MESSAGES, get_lang
 
 logger = logging.getLogger(__name__)
+
+
+def _get_db_conn():
+    """Get DB connection — prefer the proxy's shared connection (same WAL view).
+
+    Falls back to a fresh connection if the proxy hasn't been initialised
+    (e.g. in tests, or when the API server runs standalone).
+    """
+    try:
+        from llm_relay.proxy import proxy as _proxy_mod
+        if _proxy_mod._conn is not None:
+            return _proxy_mod._conn
+    except (ImportError, AttributeError):
+        pass
+    from llm_relay.proxy.db import get_conn
+    return get_conn()
 
 
 def _json_response(data: Any, status: int = 200) -> Response:
@@ -118,10 +135,10 @@ async def _api_delegation_stats(request: Request) -> Response:
 async def _api_sessions(request: Request) -> Response:
     """Return proxy session summaries (from existing proxy DB)."""
     try:
-        from llm_relay.proxy.db import get_conn, get_session_summary
+        from llm_relay.proxy.db import get_session_summary
 
         window = _parse_float(request, "window", "8")
-        conn = get_conn()
+        conn = _get_db_conn()
         summaries = get_session_summary(conn, window_hours=window)
         return _json_response({"count": len(summaries), "sessions": summaries})
     except ImportError:
@@ -133,146 +150,48 @@ async def _api_sessions(request: Request) -> Response:
         return _json_response({"error": "Internal server error", "sessions": []}, status=500)
 
 
-# ── Zone classification ──
+# ── Zone classification (moved to _zones.py) ──
 
-# Turn count is display-only and no longer drives zone judgment.
-# Zones are computed from current_ctx (token-based) via two independent scales:
-#   A) absolute thresholds  -- env LLM_TOKEN_A_YELLOW/ORANGE/RED/HARD
-#   B) ratio-of-ceiling     -- env LLM_TOKEN_CEILING (50/70/90/100 %)
-# Overall zone = worst of A and B (max).
-
-_ZONE_ORDER = {"green": 0, "yellow": 1, "orange": 2, "red": 3, "hard": 4}
-
-# Cached at module load — avoids repeated os.getenv in hot path.
-# Zone A defaults aligned with Zone B ratios of the 1M ceiling:
-#   Yellow 500K (50%) / Orange 700K (70%) / Red 900K (90%) / Hard 1M (100%).
-_CACHED_TOKEN_A_YELLOW = int(os.getenv("LLM_TOKEN_A_YELLOW", "500000"))
-_CACHED_TOKEN_A_ORANGE = int(os.getenv("LLM_TOKEN_A_ORANGE", "700000"))
-_CACHED_TOKEN_A_RED = int(os.getenv("LLM_TOKEN_A_RED", "900000"))
-_CACHED_TOKEN_A_HARD = int(os.getenv("LLM_TOKEN_A_HARD", "1000000"))
-_CACHED_TOKEN_CEILING = int(os.getenv("LLM_TOKEN_CEILING", "1000000"))
+from llm_relay.api._zones import (  # noqa: F401, E402 (re-exported for tests + display)
+    _CACHED_TOKEN_A_HARD,
+    _CACHED_TOKEN_A_ORANGE,
+    _CACHED_TOKEN_A_RED,
+    _CACHED_TOKEN_A_YELLOW,
+    _CACHED_TOKEN_CEILING,
+    _ZONE_ORDER,
+    _classify_zone,
+    _classify_zone_absolute,
+    _classify_zone_ratio,
+    _compute_zone_bundle,
+    _overall_zone,
+)
 
 
-def _classify_zone(turns: int) -> tuple:
-    """Legacy turn-based classification -- kept only for backward compatibility.
+def _win32_liveness_fallback(last_ts: Optional[float], now_ts: float) -> bool:
+    """Windows fallback: treat CC session as alive if recently active + claude process exists.
 
-    Not used by any endpoint anymore. Turn counts are display-only now.
+    On Linux, terminal/proc-based liveness is accurate and this is never called.
+    On Windows, /proc doesn't exist and psutil open_files() requires admin, so we
+    use mtime proximity + process existence as a best-effort substitute.
     """
-    yellow = int(os.getenv("LLM_TURN_YELLOW", "200"))
-    orange = int(os.getenv("LLM_TURN_ORANGE", "250"))
-    red = int(os.getenv("LLM_TURN_RED", "300"))
-
-    if turns >= red:
-        return "red", t("zone.danger"), None, t("zone.turn.red", n=red)
-    if turns >= orange:
-        return "orange", t("zone.warning"), red, t("zone.turn.orange", n=orange)
-    if turns >= yellow:
-        return "yellow", t("zone.caution"), orange, t("zone.turn.yellow", n=yellow)
-    return "green", t("zone.safe"), yellow, None
-
-
-def _classify_zone_absolute(tokens: int) -> tuple:
-    """Zone A -- absolute token threshold classification.
-
-    Env: LLM_TOKEN_A_YELLOW / _A_ORANGE / _A_RED / _A_HARD
-    Returns (zone, zone_label, next_threshold, message).
-    """
-    yellow = _CACHED_TOKEN_A_YELLOW
-    orange = _CACHED_TOKEN_A_ORANGE
-    red = _CACHED_TOKEN_A_RED
-    hard = _CACHED_TOKEN_A_HARD
-
-    if tokens >= hard:
-        return "hard", t("zone.blocked"), None, t("zone.abs.hard", n=hard // 1000)
-    if tokens >= red:
-        return "red", t("zone.danger"), hard, t("zone.abs.red", n=red // 1000)
-    if tokens >= orange:
-        return "orange", t("zone.warning"), red, t("zone.abs.orange", n=orange // 1000)
-    if tokens >= yellow:
-        return "yellow", t("zone.caution"), orange, t("zone.abs.yellow", n=yellow // 1000)
-    return "green", t("zone.safe"), yellow, None
-
-
-def _classify_zone_ratio(tokens: int, ceiling: Optional[int] = None) -> tuple:
-    """Zone B -- ratio-of-ceiling classification (50/70/90/100%).
-
-    Env: LLM_TOKEN_CEILING (default 1M for local / 500K recommended for public)
-    Returns (zone, zone_label, next_threshold, message).
-    """
-    if ceiling is None:
-        ceiling = _CACHED_TOKEN_CEILING
-    if ceiling <= 0:
-        return "green", t("zone.safe"), 0, None
-
-    yellow_t = int(ceiling * 0.50)
-    orange_t = int(ceiling * 0.70)
-    red_t = int(ceiling * 0.90)
-    ratio = tokens / ceiling if ceiling else 0.0
-    pct = int(ratio * 100)
-
-    _kw = dict(pct=pct, cur=tokens // 1000, ceil=ceiling // 1000)
-    if ratio >= 1.0:
-        return "hard", t("zone.blocked"), None, t("zone.ratio.hard", **_kw)
-    if ratio >= 0.90:
-        return "red", t("zone.danger"), ceiling, t("zone.ratio.red", **_kw)
-    if ratio >= 0.70:
-        return "orange", t("zone.warning"), red_t, t("zone.ratio.orange", **_kw)
-    if ratio >= 0.50:
-        return "yellow", t("zone.caution"), orange_t, t("zone.ratio.yellow", **_kw)
-    return "green", t("zone.safe"), yellow_t, None
-
-
-def _overall_zone(zone_a: str, zone_b: str) -> str:
-    """Return whichever of the two zones is more severe (max by _ZONE_ORDER)."""
-    if _ZONE_ORDER.get(zone_a, 0) >= _ZONE_ORDER.get(zone_b, 0):
-        return zone_a
-    return zone_b
-
-
-def _compute_zone_bundle(current_ctx: int, peak_ctx: int, ceiling: Optional[int] = None) -> dict:
-    """Compute Zone A/B on current_ctx (primary) + A/B on peak_ctx (reference).
-
-    Returns a flat dict ready to be merged into the session response.
-    """
-    za_cur = _classify_zone_absolute(current_ctx)
-    zb_cur = _classify_zone_ratio(current_ctx, ceiling=ceiling)
-    za_peak = _classify_zone_absolute(peak_ctx)
-    zb_peak = _classify_zone_ratio(peak_ctx, ceiling=ceiling)
-    overall = _overall_zone(za_cur[0], zb_cur[0])
-
-    # Pick message from the worst-of-A/B on current_ctx
-    if _ZONE_ORDER.get(za_cur[0], 0) >= _ZONE_ORDER.get(zb_cur[0], 0):
-        worst_msg = za_cur[3]
-        worst_next = za_cur[2]
-    else:
-        worst_msg = zb_cur[3]
-        worst_next = zb_cur[2]
-
-    return {
-        "zone": overall,
-        "zone_a": za_cur[0],
-        "zone_a_label": za_cur[1],
-        "zone_a_message": za_cur[3],
-        "zone_a_next": za_cur[2],
-        "zone_b": zb_cur[0],
-        "zone_b_label": zb_cur[1],
-        "zone_b_message": zb_cur[3],
-        "zone_b_next": zb_cur[2],
-        "zone_a_peak": za_peak[0],
-        "zone_b_peak": zb_peak[0],
-        # legacy-compatible fields
-        "message": worst_msg,
-        "next_threshold": worst_next,
-    }
+    if sys.platform != "win32" or not last_ts:
+        return False
+    if (now_ts - last_ts) >= 600:
+        return False
+    try:
+        from llm_relay.api._compat import is_cli_running_cached
+        return is_cli_running_cached("claude")
+    except ImportError:
+        return False
 
 
 async def _api_turns(request: Request) -> Response:
     """Return turn count + 4 token metrics + dual-zone classification for a session."""
     try:
-        from llm_relay.proxy.db import get_conn, get_session_cache_stats, get_ttl_tier, get_turn_count
+        from llm_relay.proxy.db import get_session_cache_stats, get_ttl_tier, get_turn_count
 
         session_id = request.path_params["session_id"]
-        conn = get_conn()
+        conn = _get_db_conn()
         data = get_turn_count(conn, session_id)
         turns = data["turns"]
 
@@ -326,11 +245,11 @@ async def _api_turns_all(request: Request) -> Response:
     """
     try:
         from llm_relay.api.display import check_cc_session_alive, collect_owned_cc_pids
-        from llm_relay.proxy.db import get_all_session_terminals, get_all_turn_counts, get_conn
+        from llm_relay.proxy.db import get_all_session_terminals, get_all_turn_counts
 
         window = _parse_float(request, "window", "4")
         include_dead = request.query_params.get("include_dead", "0") == "1"
-        conn = get_conn()
+        conn = _get_db_conn()
         rows = get_all_turn_counts(conn, window_hours=window)
         terminals = get_all_session_terminals(conn)
         ceiling = _CACHED_TOKEN_CEILING
@@ -342,6 +261,8 @@ async def _api_turns_all(request: Request) -> Response:
         for r in rows:
             term = terminals.get(r["session_id"]) or {}
             alive = check_cc_session_alive(term, r["last_ts"], owned_cc_pids, now_ts)
+            if not alive:
+                alive = _win32_liveness_fallback(r["last_ts"], now_ts)
             if not alive and not include_dead:
                 continue
             duration_s = 0.0
@@ -385,7 +306,7 @@ async def _api_session_terminal(request: Request) -> Response:
     cleared so it no longer appears alive on the display page.
     """
     try:
-        from llm_relay.proxy.db import get_conn, upsert_session_terminal
+        from llm_relay.proxy.db import upsert_session_terminal
 
         body = await request.json()
         session_id = body.get("session_id")
@@ -415,7 +336,7 @@ async def _api_session_terminal(request: Request) -> Response:
         if term_name is not None and (not isinstance(term_name, str) or len(term_name) > 256):
             return _json_response({"error": "term_name must be string <= 256 chars"}, status=400)
 
-        conn = get_conn()
+        conn = _get_db_conn()
         upsert_session_terminal(
             conn,
             session_id=session_id,
@@ -469,14 +390,13 @@ async def _api_display(request: Request) -> Response:
         from llm_relay.proxy.db import (
             get_all_session_terminals,
             get_all_turn_counts,
-            get_conn,
             get_session_cache_stats,
             get_ttl_tier,
         )
 
         window = _parse_float(request, "window", "4")
         include_dead = request.query_params.get("include_dead", "0") == "1"
-        conn = get_conn()
+        conn = _get_db_conn()
         rows = get_all_turn_counts(conn, window_hours=window)
         terminals = get_all_session_terminals(conn)
         ceiling = _CACHED_TOKEN_CEILING
@@ -485,11 +405,15 @@ async def _api_display(request: Request) -> Response:
         now_ts = time.time()
 
         sessions = []
+        proxy_session_ids = set()  # type: set
         for r in rows:
             term = terminals.get(r["session_id"]) or {}
             alive = check_cc_session_alive(term, r["last_ts"], owned_cc_pids, now_ts)
+            if not alive:
+                alive = _win32_liveness_fallback(r["last_ts"], now_ts)
             if not alive and not include_dead:
                 continue
+            proxy_session_ids.add(r["session_id"])
 
             duration_s = 0.0
             if r["first_ts"] and r["last_ts"]:
@@ -535,12 +459,15 @@ async def _api_display(request: Request) -> Response:
                 "composition": _get_composition_safe(conn, r["session_id"]),
             })
 
-        # Merge Codex/Gemini sessions discovered from session files
+        # Merge Codex/Gemini (and CC on Windows) sessions discovered from session files
         try:
             external = discover_external_cli_sessions(
                 window_hours=window, include_dead=include_dead,
             )
-            sessions.extend(external)
+            # Deduplicate: skip file-based CC sessions already in proxy DB
+            for ext in external:
+                if ext.get("session_id") not in proxy_session_ids:
+                    sessions.append(ext)
         except Exception as exc:
             logger.debug("External CLI session discovery failed: %s", exc)
 
@@ -557,12 +484,12 @@ async def _api_display(request: Request) -> Response:
 async def _api_cost(request: Request) -> Response:
     """Return cost breakdown from proxy DB."""
     try:
-        from llm_relay.proxy.db import get_conn
+        from llm_relay.proxy.db import get_conn  # noqa: F401 (availability check)
 
         window = _parse_float(request, "window", "24")
         import time
         cutoff = time.time() - (window * 3600)
-        conn = get_conn()
+        conn = _get_db_conn()
         rows = conn.execute(
             """SELECT model,
                       COUNT(*) as requests,
@@ -609,8 +536,7 @@ async def _api_health(request: Request) -> Response:
 
     proxy_ok = False
     try:
-        from llm_relay.proxy.db import get_conn
-        conn = get_conn()
+        conn = _get_db_conn()
         conn.execute("SELECT 1").fetchone()
         proxy_ok = True
     except Exception:
@@ -639,10 +565,10 @@ async def _api_health(request: Request) -> Response:
 async def _api_history_sessions(request: Request) -> Response:
     """Return sessions that have conversation history recorded."""
     try:
-        from llm_relay.proxy.db import get_conn, get_history_sessions
+        from llm_relay.proxy.db import get_history_sessions
 
         window = _parse_float(request, "window", "24")
-        conn = get_conn()
+        conn = _get_db_conn()
         sessions = get_history_sessions(conn, window_hours=window)
         ceiling = _CACHED_TOKEN_CEILING
 
@@ -707,14 +633,14 @@ async def _api_history_detail(request: Request) -> Response:
       raw (0|1): Return raw stored data without diff reconstruction (default 0)
     """
     try:
-        from llm_relay.proxy.db import get_conn, get_session_history
+        from llm_relay.proxy.db import get_session_history
 
         session_id = request.path_params["session_id"]
         turn_start = _parse_int(request, "turn_start", "0")
         turn_end = _parse_int(request, "turn_end", "-1")
         include_thinking = request.query_params.get("include_thinking", "0") == "1"
 
-        conn = get_conn()
+        conn = _get_db_conn()
         turns = get_session_history(
             conn, session_id,
             turn_start=turn_start,
@@ -760,10 +686,10 @@ async def _api_history_detail(request: Request) -> Response:
 async def _api_history_compactions(request: Request) -> Response:
     """Return compaction events for a specific session."""
     try:
-        from llm_relay.proxy.db import get_conn, get_session_compactions
+        from llm_relay.proxy.db import get_session_compactions
 
         session_id = request.path_params["session_id"]
-        conn = get_conn()
+        conn = _get_db_conn()
         compactions = get_session_compactions(conn, session_id)
         return _json_response({
             "session_id": session_id,
@@ -782,9 +708,9 @@ async def _api_history_compactions(request: Request) -> Response:
 async def _api_quota(request: Request) -> Response:
     """Return latest ratelimit quota data (Q5h/Q7d utilization + overage)."""
     try:
-        from llm_relay.proxy.db import get_conn, get_latest_quota
+        from llm_relay.proxy.db import get_latest_quota
 
-        conn = get_conn()
+        conn = _get_db_conn()
         quota = get_latest_quota(conn)
         if not quota:
             return _json_response({"available": False, "message": "No ratelimit data yet"})
@@ -801,11 +727,11 @@ async def _api_quota(request: Request) -> Response:
 async def _api_errors(request: Request) -> Response:
     """Return error rate statistics."""
     try:
-        from llm_relay.proxy.db import get_conn, get_error_stats
+        from llm_relay.proxy.db import get_error_stats
 
         window = _parse_float(request, "window", "8")
         session_id = request.query_params.get("session_id")
-        conn = get_conn()
+        conn = _get_db_conn()
         stats = get_error_stats(conn, session_id=session_id, window_hours=window)
         return _json_response({"window_hours": window, **stats})
     except ImportError:
@@ -822,11 +748,11 @@ async def _api_errors(request: Request) -> Response:
 async def _api_cache(request: Request) -> Response:
     """Return cache hit rate statistics."""
     try:
-        from llm_relay.proxy.db import get_conn, get_session_cache_stats
+        from llm_relay.proxy.db import get_session_cache_stats
 
         window = _parse_float(request, "window", "8")
         session_id = request.query_params.get("session_id")
-        conn = get_conn()
+        conn = _get_db_conn()
         stats = get_session_cache_stats(conn, session_id=session_id, window_hours=window)
         return _json_response({"window_hours": window, **stats})
     except ImportError:
@@ -843,10 +769,10 @@ async def _api_cache(request: Request) -> Response:
 async def _api_ttl(request: Request) -> Response:
     """Return TTL tier detection (1h vs 5m ephemeral cache)."""
     try:
-        from llm_relay.proxy.db import get_conn, get_ttl_tier
+        from llm_relay.proxy.db import get_ttl_tier
 
         session_id = request.query_params.get("session_id")
-        conn = get_conn()
+        conn = _get_db_conn()
         ttl = get_ttl_tier(conn, session_id=session_id)
         return _json_response(ttl)
     except ImportError:
@@ -864,10 +790,10 @@ async def _api_history_composition(request: Request) -> Response:
         )
     try:
         from llm_relay.proxy.composition import analyze_session_composition_per_turn
-        from llm_relay.proxy.db import get_conn
+        from llm_relay.proxy.db import get_conn  # noqa: F401 (availability check)
 
         session_id = request.path_params["session_id"]
-        conn = get_conn()
+        conn = _get_db_conn()
         result = analyze_session_composition_per_turn(conn, session_id)
         if result is None:
             return _json_response(
