@@ -191,7 +191,7 @@ def install_service(port: int = _DEFAULT_PORT) -> bool:
     # Start now
     started = start_daemon(port=port)
     if started:
-        print(f"  Auto-start: registered (runs on login)")
+        print("  Auto-start: registered (runs on login)")
     return started
 
 
