@@ -9,6 +9,7 @@ from __future__ import annotations
 import logging
 import os
 import sys
+import time
 from pathlib import Path
 from typing import Dict, List, Optional, Set, Tuple
 
@@ -19,6 +20,102 @@ _IS_LINUX = sys.platform.startswith("linux")
 # Lazy psutil import for non-Linux platforms
 _psutil = None
 _psutil_checked = False
+
+# TTL cache for expensive psutil process scans (Windows/macOS)
+_PSUTIL_SCAN_CACHE_TTL = 30.0  # seconds
+_open_paths_cache = None  # type: Optional[Tuple[float, Set[str]]]
+_open_path_pids_cache = None  # type: Optional[Tuple[float, Dict[str, int]]]
+
+# Background scanner for Windows — pre-scans process list every N seconds
+# so API requests read from memory instead of blocking on psutil
+_BG_SCAN_INTERVAL = 10.0  # seconds
+_bg_scanner_started = False
+_bg_cli_cache = {}  # type: Dict[str, bool]  # {"claude": True, "codex": False, ...}
+_bg_cli_cache_ts = 0.0
+
+
+def _start_bg_scanner():
+    """Start a daemon thread that periodically scans for running CLI processes.
+
+    Only activates on non-Linux platforms where psutil scans are expensive.
+    """
+    global _bg_scanner_started
+    if _bg_scanner_started or _IS_LINUX:
+        return
+    _bg_scanner_started = True
+
+    import threading
+
+    def _scan_loop():
+        global _bg_cli_cache, _bg_cli_cache_ts
+        cli_names = ["claude", "codex", "gemini"]
+        while True:
+            psutil = _get_psutil()
+            if psutil is None:
+                time.sleep(_BG_SCAN_INTERVAL)
+                continue
+            result = {}  # type: Dict[str, bool]
+            try:
+                for proc in psutil.process_iter(["name"]):
+                    try:
+                        pname = (proc.info.get("name") or "").lower()
+                        for cli in cli_names:
+                            if pname.startswith(cli) and cli not in result:
+                                result[cli] = True
+                    except (psutil.NoSuchProcess, psutil.AccessDenied):
+                        continue
+            except Exception:
+                pass
+            for cli in cli_names:
+                result.setdefault(cli, False)
+            _bg_cli_cache = result
+            _bg_cli_cache_ts = time.monotonic()
+            time.sleep(_BG_SCAN_INTERVAL)
+
+    t = threading.Thread(target=_scan_loop, daemon=True, name="llm-relay-bg-scanner")
+    t.start()
+    logger.debug("Background CLI scanner started (interval=%.0fs)", _BG_SCAN_INTERVAL)
+
+
+def is_cli_running_cached(name: str) -> bool:
+    """Check if a CLI process is running, using background scan cache.
+
+    Falls back to direct check if cache is stale (>30s) or scanner not started.
+    """
+    if _IS_LINUX:
+        # Linux: direct check is cheap
+        psutil = _get_psutil()
+        if psutil is None:
+            return False
+        try:
+            for proc in psutil.process_iter(["name"]):
+                try:
+                    if (proc.info.get("name") or "").lower().startswith(name):
+                        return True
+                except (psutil.NoSuchProcess, psutil.AccessDenied):
+                    continue
+        except Exception:
+            pass
+        return False
+
+    _start_bg_scanner()
+    # Use cached result if fresh enough
+    if _bg_cli_cache_ts and (time.monotonic() - _bg_cli_cache_ts) < _PSUTIL_SCAN_CACHE_TTL:
+        return _bg_cli_cache.get(name, False)
+    # Stale or not yet populated — direct check as fallback
+    psutil = _get_psutil()
+    if psutil is None:
+        return False
+    try:
+        for proc in psutil.process_iter(["name"]):
+            try:
+                if (proc.info.get("name") or "").lower().startswith(name):
+                    return True
+            except (psutil.NoSuchProcess, psutil.AccessDenied):
+                continue
+    except Exception:
+        pass
+    return False
 
 
 def _get_psutil():
@@ -280,7 +377,14 @@ def collect_open_session_paths(proc_dir: Optional[Path] = None) -> Set[str]:
                 open_paths.add(resolved)
         return open_paths
 
-    # Non-Linux: psutil fallback
+    # Non-Linux: psutil fallback (with TTL cache to avoid repeated full scans)
+    global _open_paths_cache
+    now = time.monotonic()
+    if _open_paths_cache is not None:
+        cached_ts, cached_result = _open_paths_cache
+        if now - cached_ts < _PSUTIL_SCAN_CACHE_TTL:
+            return set(cached_result)
+
     psutil = _get_psutil()
     if psutil is None:
         return set()
@@ -299,6 +403,7 @@ def collect_open_session_paths(proc_dir: Optional[Path] = None) -> Set[str]:
                 continue
     except (psutil.Error, OSError):
         pass
+    _open_paths_cache = (now, open_paths)
     return open_paths
 
 
@@ -339,7 +444,14 @@ def collect_open_session_path_pids(proc_dir: Optional[Path] = None) -> Dict[str,
                 path_pids[resolved] = pid
         return path_pids
 
-    # Non-Linux: psutil fallback
+    # Non-Linux: psutil fallback (with TTL cache to avoid repeated full scans)
+    global _open_path_pids_cache
+    now = time.monotonic()
+    if _open_path_pids_cache is not None:
+        cached_ts, cached_result = _open_path_pids_cache
+        if now - cached_ts < _PSUTIL_SCAN_CACHE_TTL:
+            return dict(cached_result)
+
     psutil = _get_psutil()
     if psutil is None:
         return {}
@@ -359,6 +471,7 @@ def collect_open_session_path_pids(proc_dir: Optional[Path] = None) -> Dict[str,
                 continue
     except (psutil.Error, OSError):
         pass
+    _open_path_pids_cache = (now, path_pids)
     return path_pids
 
 
