@@ -170,9 +170,18 @@ CREATE INDEX IF NOT EXISTS idx_deleg_cli ON delegations(cli_id);
 
 Entry: `llm-relay-mcp` (pyproject.toml scripts) → stdio transport.
 
-### api/routes.py — HTTP API
+### api/ — HTTP API + Zone Classification
 
 ```
+api/
+├── __init__.py
+├── _compat.py     — cross-platform process inspection (Linux /proc + Windows psutil)
+│                    background CLI scanner thread (Windows, 10s interval)
+├── _zones.py      — token-based zone classification (CC + Codex dual-scale A/B)
+│                    token metric utilities shared by session parsers
+├── display.py     — session file parsing, liveness detection, CC/Codex/Gemini parsers
+└── routes.py      — Starlette API endpoints (22 routes)
+
 GET /api/v1/cli/status          — CLI detection status
 GET /api/v1/delegations         — delegation history
 GET /api/v1/delegations/stats   — aggregate statistics

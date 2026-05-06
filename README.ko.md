@@ -34,29 +34,40 @@ pip install llm-relay[all]
 
 ## 빠른 시작
 
-### CLI 진단 (서버 불필요)
+### 원클릭 설정
+
+```bash
+llm-relay init              # CLI 자동 감지, 프록시 설정, 서버 시작
+```
+
+### CLI 명령어
 
 ```bash
 llm-relay scan              # 세션 건강 검사 (7종 디텍터)
 llm-relay doctor            # 설정 건강 검사 (7개 항목)
 llm-relay recover           # 세션 컨텍스트 추출 (재개용)
+llm-relay serve             # 프록시 서버 + 웹 대시보드
+llm-relay top               # 라이브 터미널 모니터 (btop 스타일)
+llm-relay service install   # Windows: 백그라운드 서비스 + 자동 시작 (콘솔 창 없음)
+llm-relay service stop      # Windows: 서비스 중지
+llm-relay service uninstall # Windows: 서비스 제거 + 정리
 ```
 
 ### 웹 대시보드
 
 ```bash
-# 방법 1: 직접 실행
-pip install llm-relay[proxy]
-uvicorn llm_relay.proxy.proxy:app --host 0.0.0.0 --port 8083
+# 방법 1: 직접 실행 (Linux/macOS/Windows)
+llm-relay serve --port 8083
 
-# 방법 2: Docker
+# 방법 2: Docker (Linux)
 cp .env.public .env         # 필요에 따라 수정
 docker compose up -d
 ```
 
 접속 주소:
 - `/dashboard/` — CLI 상태, 비용, 위임 히스토리, Turn Monitor (alive 세션만; `?include_dead=1` 로 우회)
-- `/display/` — 턴 카운터 + CC/Codex/Gemini 세션 카드 (alive 필터: CC=cc_pid+TTY fallback, Codex/Gemini=fd-open)
+- `/display/` — 턴 카운터 + CC/Codex/Gemini 세션 카드 (alive 필터: CC=cc_pid+TTY fallback, Codex/Gemini=fd-open; Windows는 mtime+프로세스 감지)
+- `/history/` — 세션 대화 히스토리 브라우저
 
 ### MCP 서버
 
@@ -78,6 +89,14 @@ export ANTHROPIC_BASE_URL=http://localhost:8080
 | Claude Code | 전체 지원 |
 | OpenAI Codex | 전체 지원 |
 | Gemini CLI | Display 지원, oauth-personal 서버사이드 403 버그 ([#25425](https://github.com/google-gemini/gemini-cli/issues/25425)) |
+
+## 플랫폼 지원
+
+| 플랫폼 | 모드 | 비고 |
+|--------|------|------|
+| Linux | 네이티브 + Docker | 전체 기능, systemd 권장 |
+| macOS | 네이티브 | 전체 기능 |
+| Windows | 네이티브 | `llm-relay service install`로 백그라운드 데몬 (콘솔 창 없음) |
 
 ## 요구 사항
 

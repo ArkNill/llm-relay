@@ -34,29 +34,40 @@ pip install llm-relay[all]
 
 ## Quick Start
 
-### CLI diagnostics (no server needed)
+### One-command setup
+
+```bash
+llm-relay init              # Auto-detect CLIs, configure proxy, start server
+```
+
+### CLI commands
 
 ```bash
 llm-relay scan              # Session health check (7 detectors)
 llm-relay doctor            # Configuration health check (7 checks)
 llm-relay recover           # Extract session context for resumption
+llm-relay serve             # Start proxy server + web dashboard
+llm-relay top               # Live terminal monitor (btop-style)
+llm-relay service install   # Windows: background service + auto-start (no console window)
+llm-relay service stop      # Windows: stop background service
+llm-relay service uninstall # Windows: remove service + cleanup
 ```
 
 ### Web dashboard
 
 ```bash
-# Option 1: Direct
-pip install llm-relay[proxy]
-uvicorn llm_relay.proxy.proxy:app --host 0.0.0.0 --port 8083
+# Option 1: Direct (Linux/macOS/Windows)
+llm-relay serve --port 8083
 
-# Option 2: Docker
+# Option 2: Docker (Linux)
 cp .env.public .env         # Edit as needed
 docker compose up -d
 ```
 
 Then open:
 - `/dashboard/` — CLI status, cost, delegation history, Turn Monitor (alive sessions only; `?include_dead=1` to bypass)
-- `/display/` — Turn counter with CC/Codex/Gemini session cards (alive filter: CC via cc_pid+TTY fallback, Codex/Gemini via fd-open)
+- `/display/` — Turn counter with CC/Codex/Gemini session cards (alive filter: CC via cc_pid+TTY fallback, Codex/Gemini via fd-open; Windows uses mtime+process detection)
+- `/history/` — Session conversation history browser
 
 ### MCP server
 
@@ -78,6 +89,14 @@ export ANTHROPIC_BASE_URL=http://localhost:8080
 | Claude Code | Fully supported |
 | OpenAI Codex | Fully supported |
 | Gemini CLI | Display supported, oauth-personal has known 403 server-side bug ([#25425](https://github.com/google-gemini/gemini-cli/issues/25425)) |
+
+## Platform Support
+
+| Platform | Mode | Notes |
+|----------|------|-------|
+| Linux | Native + Docker | Full feature set, systemd recommended |
+| macOS | Native | Full feature set |
+| Windows | Native | `llm-relay service install` for background daemon (no console window) |
 
 ## Requirements
 

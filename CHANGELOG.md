@@ -2,6 +2,32 @@
 
 All notable changes to llm-relay are documented here.
 
+## [0.9.3] - 2026-05-06
+
+### Added
+- **Windows native support**: SelectorEventLoop policy for uvicorn, UTF-8 .env encoding
+- **Windows background service**: `llm-relay service install/start/stop/status/uninstall` — no console window, auto-start on login, PID file management, clean uninstall (zero traces)
+- **Background CLI scanner**: Daemon thread (10s interval) for instant process lookup on Windows; Linux unaffected (uses /proc directly)
+- **psutil TTL cache**: 30s cache for `collect_open_session_paths/path_pids` on non-Linux platforms
+- **CC session file parser**: `_parse_cc_session_raw()` for Windows file-based detection (turns, tokens, cache hit rate from JSONL)
+- **Loading overlay**: Spinner + fade-out on dashboard, display, and history pages
+
+### Changed
+- **Zone classification refactored**: Extracted to `api/_zones.py` (CC + Codex dual-scale A/B + token metrics) — resolves circular import between display.py and routes.py
+- **Shared DB connection**: `_get_db_conn()` prefers proxy's WAL connection for read consistency
+- **Windows liveness fallback**: mtime + process existence when psutil `open_files()` is denied
+- **Deduplication**: Proxy-DB CC sessions no longer duplicated by file-based discovery on Windows
+
+### Fixed
+- Page transition infinite loading on Windows (ProactorEventLoop incompatibility)
+- CP949 decode error on Korean Windows when reading .env files
+- Service process dying with parent (CREATE_BREAKAWAY_FROM_JOB flag)
+
+### Removed
+- Dead code: `_any_cli_process_running()` (replaced by `is_cli_running_cached`)
+- Dead code: `get_shared_conn()` wrapper in proxy.py
+- Redundant zone logic duplication between routes.py and display.py
+
 ## [0.9.2] - 2026-04-30
 
 ### Added
