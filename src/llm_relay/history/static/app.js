@@ -367,5 +367,8 @@
   });
 
   // Init
-  loadSessions();
+  loadSessions().finally(function () {
+    var overlay = document.getElementById("loading-overlay");
+    if (overlay) overlay.classList.add("hidden");
+  });
 })();

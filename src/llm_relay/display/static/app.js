@@ -409,7 +409,10 @@
 
   function start() {
     if (interval === null) {
-      load();
+      load().finally(function () {
+        var overlay = document.getElementById("loading-overlay");
+        if (overlay) overlay.classList.add("hidden");
+      });
       interval = setInterval(load, 2000);
     }
   }

@@ -537,18 +537,14 @@
   }
 
   // Initial load
-  loadHealth();
-  loadAnthropicStatus();
-  loadOpenAIStatus();
-  loadGeminiStatus();
-  loadCLIStatus();
-  loadStats();
-  loadHistory();
-  loadTurnMonitor();
-  loadQuota();
-  loadErrors();
-  loadCache();
-  loadTTL();
+  Promise.all([
+    loadHealth(), loadAnthropicStatus(), loadOpenAIStatus(), loadGeminiStatus(),
+    loadCLIStatus(), loadStats(), loadHistory(), loadTurnMonitor(),
+    loadQuota(), loadErrors(), loadCache(), loadTTL()
+  ]).finally(function () {
+    var overlay = document.getElementById("loading-overlay");
+    if (overlay) overlay.classList.add("hidden");
+  });
 
   // Polling intervals — pause when tab is hidden (Page Visibility API)
   // Reduces GPU/CPU load when user isn't actively viewing
