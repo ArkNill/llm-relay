@@ -22,6 +22,7 @@ from llm_relay.api._compat import (
 from llm_relay.api._compat import (
     find_cli_pid_by_tty,
     is_cli_process_alive,
+    is_cli_running_cached,
 )
 from llm_relay.api._compat import (
     get_parent_comm_chain as _get_parent_comm_chain,
@@ -35,18 +36,21 @@ from llm_relay.api._compat import (
 from llm_relay.api._compat import (
     read_proc_environ as _read_proc_environ,
 )
-from llm_relay.detect.scanner import find_projects_dir
-from llm_relay.i18n import t
 
-# Official OpenAI public limit for GPT-5.5 Thinking Pro / GPT-5 Codex-class
-# models: 400k context with 128k max output, leaving 272k input context.
-_OPENAI_CODEX_OFFICIAL_CONTEXT_WINDOW = 400_000
-_OPENAI_CODEX_OFFICIAL_MAX_OUTPUT = 128_000
-_OPENAI_CODEX_OFFICIAL_INPUT_WINDOW = (
-    _OPENAI_CODEX_OFFICIAL_CONTEXT_WINDOW - _OPENAI_CODEX_OFFICIAL_MAX_OUTPUT
+# Re-exports from _zones.py for backward compatibility (tests import these from display)
+from llm_relay.api._zones import (  # noqa: F401
+    _OPENAI_CODEX_OFFICIAL_CONTEXT_WINDOW,
+    _OPENAI_CODEX_OFFICIAL_MAX_OUTPUT,
+    _codex_classify_absolute,
+    _codex_classify_ratio,
+    _codex_compute_zone_bundle,
+    _codex_display_ceiling,
+    _context_tokens_from_openai_usage,
+    _extract_codex_token_metrics,
+    _to_int,
+    _usage_total,
 )
-
-_CODEX_ZONE_ORDER = {"green": 0, "yellow": 1, "orange": 2, "red": 3, "hard": 4}
+from llm_relay.detect.scanner import find_projects_dir
 
 # Filters for non-user-input messages that live under type=="user"
 _WRAPPER_PREFIXES = (
@@ -57,113 +61,6 @@ _WRAPPER_PREFIXES = (
     "<tool_use_error",
     "<user-prompt-submit-hook",
 )
-
-
-def _codex_display_ceiling() -> int:
-    """Operator-facing ceiling for Codex session cards.
-
-    Defaults to the official model context window (400K) so the progress bar
-    reflects real model capacity, not an arbitrary Zone-A threshold.
-    """
-    return int(os.getenv(
-        "CODEX_TOKEN_DISPLAY_CEILING",
-        str(_OPENAI_CODEX_OFFICIAL_CONTEXT_WINDOW),
-    ))
-
-
-def _codex_zone_ceiling() -> int:
-    """Runtime ceiling for ratio-based Codex zone-B classification.
-
-    Uses the official model context window (400K) so zone-B percentages
-    align with zone-A absolute thresholds and the display progress bar.
-    """
-    return int(os.getenv(
-        "CODEX_TOKEN_ZONE_CEILING",
-        str(_OPENAI_CODEX_OFFICIAL_CONTEXT_WINDOW),
-    ))
-
-
-def _codex_classify_absolute(tokens: int) -> tuple[str, str, Optional[int], Optional[str]]:
-    """Classify Codex live context against absolute operator thresholds.
-
-    Defaults calibrated to the official 400K context window:
-      Yellow 200K (50%) / Orange 280K (70%) / Red 360K (90%) / Hard 400K (100%).
-    """
-    yellow = int(os.getenv("CODEX_TOKEN_A_YELLOW", "200000"))
-    orange = int(os.getenv("CODEX_TOKEN_A_ORANGE", "280000"))
-    red = int(os.getenv("CODEX_TOKEN_A_RED", "360000"))
-    hard = int(os.getenv("CODEX_TOKEN_A_HARD", "400000"))
-
-    if tokens >= hard:
-        return "hard", t("zone.blocked"), None, t("zone.abs.hard", n=hard // 1000)
-    if tokens >= red:
-        return "red", t("zone.danger"), hard, t("zone.abs.red", n=red // 1000)
-    if tokens >= orange:
-        return "orange", t("zone.warning"), red, t("zone.abs.orange", n=orange // 1000)
-    if tokens >= yellow:
-        return "yellow", t("zone.caution"), orange, t("zone.abs.yellow", n=yellow // 1000)
-    return "green", t("zone.safe"), yellow, None
-
-
-def _codex_classify_ratio(tokens: int, ceiling: int) -> tuple[str, str, Optional[int], Optional[str]]:
-    """Classify Codex live context as a ratio of the runtime ceiling.
-
-    Messages now show the *actual* ratio and token count so the operator
-    sees real numbers instead of the fixed threshold label.
-    """
-    if ceiling <= 0:
-        return "green", t("zone.safe"), 0, None
-
-    yellow_t = int(ceiling * 0.50)
-    orange_t = int(ceiling * 0.70)
-    red_t = int(ceiling * 0.90)
-    ratio = tokens / ceiling if ceiling else 0.0
-    pct = int(ratio * 100)
-
-    _kw = dict(pct=pct, cur=tokens // 1000, ceil=ceiling // 1000)
-    if ratio >= 1.0:
-        return "hard", t("zone.blocked"), None, t("zone.ratio.hard", **_kw)
-    if ratio >= 0.90:
-        return "red", t("zone.danger"), ceiling, t("zone.ratio.red", **_kw)
-    if ratio >= 0.70:
-        return "orange", t("zone.warning"), red_t, t("zone.ratio.orange", **_kw)
-    if ratio >= 0.50:
-        return "yellow", t("zone.caution"), orange_t, t("zone.ratio.yellow", **_kw)
-    return "green", t("zone.safe"), yellow_t, None
-
-
-def _codex_compute_zone_bundle(current_ctx: int, peak_ctx: int) -> dict:
-    """Compute Codex-only live-context zones without affecting Claude/Gemini paths."""
-    zone_ceiling = _codex_zone_ceiling()
-    zone_a = _codex_classify_absolute(current_ctx)
-    zone_b = _codex_classify_ratio(current_ctx, zone_ceiling)
-    zone_a_peak = _codex_classify_absolute(peak_ctx)
-    zone_b_peak = _codex_classify_ratio(peak_ctx, zone_ceiling)
-    zone = zone_a[0] if _CODEX_ZONE_ORDER[zone_a[0]] >= _CODEX_ZONE_ORDER[zone_b[0]] else zone_b[0]
-
-    if _CODEX_ZONE_ORDER[zone_a[0]] >= _CODEX_ZONE_ORDER[zone_b[0]]:
-        message = zone_a[3]
-        next_threshold = zone_a[2]
-    else:
-        message = zone_b[3]
-        next_threshold = zone_b[2]
-
-    return {
-        "zone": zone,
-        "zone_a": zone_a[0],
-        "zone_a_label": zone_a[1],
-        "zone_a_message": zone_a[3],
-        "zone_a_next": zone_a[2],
-        "zone_b": zone_b[0],
-        "zone_b_label": zone_b[1],
-        "zone_b_message": zone_b[3],
-        "zone_b_next": zone_b[2],
-        # Keep legacy fields populated for consumers that still read them.
-        "zone_a_peak": zone_a_peak[0],
-        "zone_b_peak": zone_b_peak[0],
-        "message": message,
-        "next_threshold": next_threshold,
-    }
 
 
 def _extract_text(content) -> str:
@@ -652,62 +549,111 @@ def check_cc_session_alive(
 # ── External CLI (Codex/Gemini) liveness via open file descriptors ──
 
 
-def _to_int(value) -> int:
-    """Best-effort int conversion for provider usage counters."""
-    if isinstance(value, bool):
-        return int(value)
-    if isinstance(value, int):
-        return value
-    if isinstance(value, float):
-        return int(value)
-    if isinstance(value, str):
-        try:
-            return int(float(value))
-        except ValueError:
-            return 0
-    return 0
+def _parse_cc_session_raw(path: Path) -> dict:
+    """Parse a Claude Code JSONL session file for display (Windows file-based fallback).
 
+    Extracts user turns, timestamps, last prompt, token metrics, and cache stats
+    from the CC JSONL format where assistant entries contain full usage data.
+    """
+    user_turns = 0
+    first_ts = None  # type: Optional[str]
+    last_ts = None  # type: Optional[str]
+    last_user_text = ""
+    last_user_ts = None  # type: Optional[str]
+    session_id = None  # type: Optional[str]
+    current_ctx = 0
+    peak_ctx = 0
+    recent_contexts = []  # type: list
+    cumul_input = 0
+    cumul_output = 0
+    total_input_tokens = 0
+    total_cache_read = 0
+    total_cache_creation = 0
 
-def _usage_total(usage: dict) -> int:
-    """Return provider-reported total_tokens, or compute a conservative total."""
-    total = _to_int(usage.get("total_tokens"))
-    if total:
-        return total
-    return (
-        _to_int(usage.get("input_tokens"))
-        + _to_int(usage.get("output_tokens"))
-        + _to_int(usage.get("reasoning_output_tokens"))
-    )
+    try:
+        for line in _tail_lines(path, max_bytes=4 * 1024 * 1024):
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                obj = json.loads(line)
+            except (json.JSONDecodeError, ValueError):
+                continue
 
+            ts = obj.get("timestamp")
+            entry_type = obj.get("type", "")
 
-def _context_tokens_from_openai_usage(usage: dict) -> int:
-    """Return the prompt/context tokens for a Codex token_count usage record."""
-    return _to_int(usage.get("input_tokens"))
+            if not session_id and obj.get("sessionId"):
+                session_id = obj["sessionId"]
+            if ts and first_ts is None:
+                first_ts = ts
+            if ts:
+                last_ts = ts
 
+            if entry_type == "user":
+                user_turns += 1
+                msg = obj.get("message", {})
+                if isinstance(msg, dict):
+                    content = msg.get("content", "")
+                    if isinstance(content, str) and _is_real_user_prompt(content):
+                        last_user_text = content.strip()[:500]
+                        last_user_ts = ts
+                    elif isinstance(content, list):
+                        for part in content:
+                            if isinstance(part, dict) and part.get("type") == "text":
+                                text = part.get("text", "")
+                                if text and _is_real_user_prompt(text):
+                                    last_user_text = text.strip()[:500]
+                                    last_user_ts = ts
 
-def _extract_codex_token_metrics(payload: dict, recent_contexts: list[int]) -> dict:
-    """Extract display metrics from a Codex event_msg token_count payload."""
-    info = payload.get("info", {})
-    if not isinstance(info, dict):
-        return {}
+            elif entry_type == "assistant":
+                msg = obj.get("message", {})
+                if not isinstance(msg, dict):
+                    continue
+                usage = msg.get("usage", {})
+                if not isinstance(usage, dict):
+                    continue
+                inp = usage.get("input_tokens", 0) or 0
+                out = usage.get("output_tokens", 0) or 0
+                cache_read = usage.get("cache_read_input_tokens", 0) or 0
+                cache_create = usage.get("cache_creation_input_tokens", 0) or 0
 
-    last_usage = info.get("last_token_usage", {})
-    total_usage = info.get("total_token_usage", {})
-    if not isinstance(last_usage, dict):
-        last_usage = {}
-    if not isinstance(total_usage, dict):
-        total_usage = {}
+                # current_ctx = input + cache_read + cache_create (total context sent)
+                ctx = inp + cache_read + cache_create
+                if ctx > 0:
+                    current_ctx = ctx
+                    peak_ctx = max(peak_ctx, ctx)
+                    recent_contexts.append(ctx)
 
-    current_ctx = _context_tokens_from_openai_usage(last_usage)
-    if current_ctx:
-        recent_contexts.append(current_ctx)
+                cumul_input += ctx
+                cumul_output += out
+                total_input_tokens += inp + cache_read + cache_create
+                total_cache_read += cache_read
+                total_cache_creation += cache_create
+    except OSError:
+        pass
 
-    metrics = {
+    recent_peak = max(recent_contexts[-5:], default=0)
+    cumul_unique = cumul_input + cumul_output
+
+    cache_hit_rate = None  # type: Optional[float]
+    if total_input_tokens > 0:
+        cache_hit_rate = round(total_cache_read / total_input_tokens * 100, 2)
+
+    return {
+        "user_turns": user_turns,
+        "first_ts": first_ts,
+        "last_ts": last_ts,
+        "last_user_text": last_user_text,
+        "last_user_ts": last_user_ts,
+        "session_id": session_id,
         "current_ctx": current_ctx,
-        "cumul_unique": _usage_total(total_usage),
-        "model_window": _to_int(info.get("model_context_window")),
+        "peak_ctx": peak_ctx,
+        "recent_peak": recent_peak,
+        "cumul_unique": cumul_unique,
+        "model_window": 0,
+        "cache_hit_rate": cache_hit_rate,
     }
-    return {k: v for k, v in metrics.items() if v}
 
 
 def _parse_codex_session_raw(path: Path) -> dict:
@@ -976,6 +922,24 @@ def _find_cli_pid(name: str) -> int:
     Returns the PID or 0 if not found.
     """
     import subprocess
+    import sys
+
+    if sys.platform == "win32":
+        # Windows: use psutil to find by process name
+        try:
+            from llm_relay.api._compat import _get_psutil
+            psutil = _get_psutil()
+            if psutil:
+                for proc in psutil.process_iter(["pid", "name"]):
+                    try:
+                        pname = (proc.info.get("name") or "").lower()
+                        if pname.startswith(name):
+                            return proc.info["pid"]
+                    except (psutil.NoSuchProcess, psutil.AccessDenied):
+                        continue
+        except Exception:
+            pass
+        return 0
 
     try:
         out = subprocess.run(
@@ -1020,15 +984,30 @@ def discover_external_cli_sessions(
     except ImportError:
         return results
 
-    path_pids = _collect_open_session_path_pids() if check_open_fds else {}
-    open_paths = set(path_pids.keys())
+    import sys
 
-    # Gemini CLI doesn't hold session files open (write-and-close).
-    # Detect running gemini processes and associate with the most recent session.
+    # On Windows, open_files() requires admin privileges and usually fails.
+    # Fall back to mtime-based liveness: if a CLI process is running AND the
+    # session file was modified recently (within 10 min), treat it as alive.
+    _is_windows = sys.platform == "win32"
+    _mtime_alive_window = 600  # 10 minutes
+
+    if _is_windows:
+        path_pids = {}  # type: dict
+        open_paths = set()  # type: set
+    else:
+        path_pids = _collect_open_session_path_pids() if check_open_fds else {}
+        open_paths = set(path_pids.keys())
+
+    # Detect running CLI processes
     gemini_pid = _find_cli_pid("gemini") if check_open_fds else 0
+    codex_running = is_cli_running_cached("codex") if _is_windows else False
+    claude_running = is_cli_running_cached("claude") if _is_windows else False
 
     for provider in get_all_providers():
-        if provider.provider_id == "claude-code":
+        # On Linux, CC sessions come from the proxy DB — skip here.
+        # On Windows (no proxy), discover CC sessions from files too.
+        if provider.provider_id == "claude-code" and not _is_windows:
             continue
 
         try:
@@ -1047,8 +1026,22 @@ def discover_external_cli_sessions(
                 resolved = str(sf.path.resolve())
             except OSError:
                 resolved = str(sf.path)
-            alive = resolved in open_paths if check_open_fds else False
-            cli_pid = path_pids.get(resolved, 0) if alive else 0
+
+            if _is_windows:
+                # Windows fallback: mtime-based liveness
+                recently_modified = (time.time() - sf.mtime) < _mtime_alive_window
+                if provider.provider_id == "claude-code":
+                    alive = recently_modified and claude_running
+                elif provider.provider_id == "openai-codex":
+                    alive = recently_modified and codex_running
+                elif provider.provider_id == "gemini-cli":
+                    alive = recently_modified and bool(gemini_pid)
+                else:
+                    alive = False
+                cli_pid = 0
+            else:
+                alive = resolved in open_paths if check_open_fds else False
+                cli_pid = path_pids.get(resolved, 0) if alive else 0
 
             # Gemini fallback: assign running gemini pid to newest session
             if not alive and provider.provider_id == "gemini-cli" and gemini_pid and not gemini_newest_assigned:
@@ -1060,7 +1053,9 @@ def discover_external_cli_sessions(
                 continue
 
             # Parse directly based on provider type
-            if provider.provider_id == "openai-codex":
+            if provider.provider_id == "claude-code":
+                info = _parse_cc_session_raw(sf.path)
+            elif provider.provider_id == "openai-codex":
                 info = _parse_codex_session_raw(sf.path)
             elif provider.provider_id == "gemini-cli":
                 info = _parse_gemini_session_raw(sf.path)
@@ -1093,7 +1088,7 @@ def discover_external_cli_sessions(
                 official_context_window = 0
                 official_max_output = 0
                 try:
-                    from llm_relay.api.routes import _compute_zone_bundle
+                    from llm_relay.api._zones import _compute_zone_bundle
 
                     zones = _compute_zone_bundle(current_ctx, peak_ctx, ceiling=display_ceiling)
                 except Exception:
