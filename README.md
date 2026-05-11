@@ -18,18 +18,67 @@ Unified LLM usage management — API proxy, session diagnostics, multi-CLI orche
 
 ## Install
 
+### 1. Set up Python environment
+
+<details>
+<summary><b>Windows (pip)</b></summary>
+
+```cmd
+python -m venv .venv
+.venv\Scripts\activate
+```
+</details>
+
+<details>
+<summary><b>Windows (conda)</b></summary>
+
+```cmd
+conda create -n llm-relay python=3.12
+conda activate llm-relay
+```
+</details>
+
+<details>
+<summary><b>Linux / macOS (pip)</b></summary>
+
 ```bash
-# CLI only (diagnostics, recovery, orchestration)
+python3 -m venv .venv
+source .venv/bin/activate
+```
+</details>
+
+### 2. Install llm-relay
+
+```bash
+# Default (SQLite, zero-config)
 pip install llm-relay
 
 # With proxy + web dashboard
 pip install llm-relay[proxy]
+
+# With PostgreSQL support (long-term analytics + vector search)
+pip install llm-relay[pg]
 
 # With MCP server (Python 3.10+)
 pip install llm-relay[mcp]
 
 # Everything
 pip install llm-relay[all]
+```
+
+### 3. Choose database
+
+| | SQLite (default) | PostgreSQL |
+|---|---|---|
+| Setup | Zero-config | Requires PG server |
+| Best for | Getting started, light usage | Long-term data analytics, vector search |
+| Install | `pip install llm-relay` | `pip install llm-relay[pg]` |
+| Config | (none needed) | `LLM_RELAY_DB=postgresql://user:pass@host/db` |
+
+### 4. Initialize
+
+```bash
+llm-relay init
 ```
 
 ## Quick Start

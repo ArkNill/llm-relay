@@ -18,18 +18,67 @@ LLM 사용 통합 관리 — API 프록시 + 세션 진단 + 멀티 CLI 오케�
 
 ## 설치
 
+### 1. Python 환경 설정
+
+<details>
+<summary><b>Windows (pip)</b></summary>
+
+```cmd
+python -m venv .venv
+.venv\Scripts\activate
+```
+</details>
+
+<details>
+<summary><b>Windows (conda)</b></summary>
+
+```cmd
+conda create -n llm-relay python=3.12
+conda activate llm-relay
+```
+</details>
+
+<details>
+<summary><b>Linux / macOS (pip)</b></summary>
+
 ```bash
-# CLI 전용 (진단, 복구, 오케스트레이션)
+python3 -m venv .venv
+source .venv/bin/activate
+```
+</details>
+
+### 2. llm-relay 설치
+
+```bash
+# 기본 (SQLite, 설정 불필요)
 pip install llm-relay
 
 # 프록시 + 웹 대시보드
 pip install llm-relay[proxy]
+
+# PostgreSQL 지원 (장기 데이터 분석 + 벡터 검색)
+pip install llm-relay[pg]
 
 # MCP 서버 (Python 3.10 이상)
 pip install llm-relay[mcp]
 
 # 전부
 pip install llm-relay[all]
+```
+
+### 3. 데이터베이스 선택
+
+| | SQLite (기본) | PostgreSQL |
+|---|---|---|
+| 설정 | 불필요 | PG 서버 필요 |
+| 적합 | 시작, 가벼운 사용 | 장기 데이터 분석, 벡터 검색 |
+| 설치 | `pip install llm-relay` | `pip install llm-relay[pg]` |
+| 설정 | (없음) | `LLM_RELAY_DB=postgresql://user:pass@host/db` |
+
+### 4. 초기화
+
+```bash
+llm-relay init
 ```
 
 ## 빠른 시작
