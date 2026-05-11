@@ -298,10 +298,11 @@ def init(port: int, skip_server: bool, dry_run: bool) -> None:
     What this does:
       1. Detect installed CLIs (Claude Code, Codex, Gemini)
       2. Initialize DB (~/.llm-relay/usage.db)
-      3. Configure Claude Code to route through proxy
-      4. Register llm-relay MCP server in Claude Code
-      5. Start the proxy server (with history enabled)
-      6. Verify everything works
+      3. Create knowledge directory (~/.llm-relay/knowledge/)
+      4. Configure Claude Code to route through proxy
+      5. Register llm-relay MCP server in Claude Code
+      6. Start the proxy server (with history enabled)
+      7. Verify everything works
 
     \b
     After running this, open the dashboard:
@@ -337,6 +338,9 @@ def init(port: int, skip_server: bool, dry_run: bool) -> None:
 
     # Config
     click.echo("Config:   {}".format(summary["config"]))
+
+    # Knowledge
+    click.echo("Knowledge: {}".format(summary.get("knowledge", "skipped")))
     click.echo()
 
     # Claude Code configuration

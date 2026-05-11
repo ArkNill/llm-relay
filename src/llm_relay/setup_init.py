@@ -16,6 +16,46 @@ import time
 from pathlib import Path
 from typing import Any, Dict, List, Tuple
 
+# ── Knowledge rules template ──
+
+_KNOWLEDGE_RULES_TEMPLATE = """\
+## llm-relay Knowledge Rules
+
+> Add this section to your project's CLAUDE.md (or AGENTS.md / GEMINI.md).
+> LLMs will follow these rules to accumulate knowledge across sessions.
+
+### Storage
+- Path: `~/.llm-relay/knowledge/{topic}.md`
+- Index: `~/.llm-relay/knowledge/INDEX.md`
+
+### File format
+```
+---
+name: {title}
+type: decision | pattern | preference | issue
+created: {YYYY-MM-DD}
+---
+{content — what was decided/learned and why}
+```
+
+### When to save
+- Architectural decisions and their rationale
+- User preferences and recurring patterns
+- Problems encountered and how they were resolved
+- Project-specific conventions not obvious from code
+
+### Do NOT save
+- Code snippets (read from source directly)
+- Git history (use git log)
+- Temporary or in-progress state
+- Anything already in CLAUDE.md or project docs
+
+### Index maintenance
+- One line per entry: `- [Title](filename.md) — one-line description`
+- Keep INDEX.md under 100 entries; archive old items to `archive/`
+"""
+
+
 # ── Detection helpers ──
 
 
@@ -181,6 +221,35 @@ def _init_db(db_dir: Path) -> str:
         return "DB directory created (proxy module not installed for schema init)"
 
 
+# ── Knowledge directory ──
+
+
+def _init_knowledge(db_dir: Path, dry_run: bool = False) -> str:
+    """Create knowledge directory, INDEX.md, and rules template."""
+    knowledge_dir = db_dir / "knowledge"
+    if knowledge_dir.exists():
+        count = len(list(knowledge_dir.glob("*.md")))
+        return "Knowledge dir exists ({} files)".format(count)
+
+    if dry_run:
+        return "[dry-run] Would create {}".format(knowledge_dir)
+
+    knowledge_dir.mkdir(parents=True, exist_ok=True)
+
+    # INDEX.md
+    (knowledge_dir / "INDEX.md").write_text(
+        "# Knowledge Index\n\n"
+        "> Auto-maintained by LLM following llm-relay knowledge rules.\n",
+        encoding="utf-8",
+    )
+
+    # Rules template (user copies into their CLAUDE.md)
+    rules_path = db_dir / "knowledge-rules.md"
+    rules_path.write_text(_KNOWLEDGE_RULES_TEMPLATE, encoding="utf-8")
+
+    return "Knowledge dir created. Rules template: {}".format(rules_path)
+
+
 # ── Config file ──
 
 
@@ -320,6 +389,7 @@ def run_init(
         "db": None,
         "config": None,
         "claude_code": [],
+        "knowledge": None,
         "server": None,
         "health": None,
         "port": port,
@@ -366,7 +436,10 @@ def run_init(
     else:
         summary["config"] = "[dry-run] Would write config"
 
-    # Step 5: Configure Claude Code
+    # Step 5: Initialize knowledge directory
+    summary["knowledge"] = _init_knowledge(db_dir, dry_run=dry_run)
+
+    # Step 6: Configure Claude Code
     has_cc = any(c["id"] == "claude-code" for c in summary["clis"])
     if has_cc:
         summary["claude_code"] = _configure_claude_code(port, dry_run=dry_run)
