@@ -105,12 +105,8 @@ llm-relay service uninstall # Windows: 서비스 제거 + 정리
 ### 웹 대시보드
 
 ```bash
-# 방법 1: 직접 실행 (Linux/macOS/Windows)
-llm-relay serve --port 8083
-
-# 방법 2: Docker (Linux)
-cp .env.public .env         # 필요에 따라 수정
-docker compose up -d
+# 네이티브 (Linux/macOS/Windows)
+llm-relay serve --port 8080
 ```
 
 접속 주소:
@@ -128,7 +124,7 @@ llm-relay-mcp               # stdio 전송, 8개 도구
 
 ```bash
 # Claude Code에서 설정
-export ANTHROPIC_BASE_URL=http://localhost:8080
+llm-relay connect   # Claude Code 프록시 자동 설정
 ```
 
 ## CLI 지원 현황
@@ -143,7 +139,7 @@ export ANTHROPIC_BASE_URL=http://localhost:8080
 
 | 플랫폼 | 모드 | 비고 |
 |--------|------|------|
-| Linux | 네이티브 + Docker | 전체 기능, systemd 권장 |
+| Linux | 네이티브 | 전체 기능, systemd 권장 |
 | macOS | 네이티브 | 전체 기능 |
 | Windows | 네이티브 | `llm-relay service install`로 백그라운드 데몬 (콘솔 창 없음) |
 

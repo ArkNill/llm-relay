@@ -105,12 +105,8 @@ llm-relay service uninstall # Windows: remove service + cleanup
 ### Web dashboard
 
 ```bash
-# Option 1: Direct (Linux/macOS/Windows)
-llm-relay serve --port 8083
-
-# Option 2: Docker (Linux)
-cp .env.public .env         # Edit as needed
-docker compose up -d
+# Native (Linux/macOS/Windows)
+llm-relay serve --port 8080
 ```
 
 Then open:
@@ -128,7 +124,7 @@ llm-relay-mcp               # stdio transport, 8 tools
 
 ```bash
 # Set in Claude Code
-export ANTHROPIC_BASE_URL=http://localhost:8080
+llm-relay connect   # Auto-configures Claude Code proxy
 ```
 
 ## CLI Status
@@ -143,7 +139,7 @@ export ANTHROPIC_BASE_URL=http://localhost:8080
 
 | Platform | Mode | Notes |
 |----------|------|-------|
-| Linux | Native + Docker | Full feature set, systemd recommended |
+| Linux | Native | Full feature set, systemd recommended |
 | macOS | Native | Full feature set |
 | Windows | Native | `llm-relay service install` for background daemon (no console window) |
 
