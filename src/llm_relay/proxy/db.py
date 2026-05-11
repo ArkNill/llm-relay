@@ -87,6 +87,22 @@ def _bool_val(b: Any) -> Any:
     return int(b)
 
 
+def _ts_to_epoch(val: Any) -> Any:
+    """Convert datetime to epoch float for API responses. Passthrough for floats."""
+    if val is None:
+        return None
+    if hasattr(val, "timestamp"):
+        return val.timestamp()
+    return float(val)
+
+
+def _duration_seconds(val: Any) -> float:
+    """Convert timedelta or float to seconds."""
+    if hasattr(val, "total_seconds"):
+        return val.total_seconds()
+    return float(val) if val else 0.0
+
+
 def _ts_ago(hours: float) -> Any:
     """Timestamp N hours ago: datetime for PG, epoch float for SQLite."""
     if _USE_PG:
@@ -578,9 +594,9 @@ def upsert_session_terminal(
                term_pid = excluded.term_pid,
                term_name = CASE
                    WHEN excluded.term_name IN ({placeholders})
-                        AND term_name IS NOT NULL
-                        AND term_name NOT IN ({placeholders})
-                   THEN term_name
+                        AND session_terminals.term_name IS NOT NULL
+                        AND session_terminals.term_name NOT IN ({placeholders})
+                   THEN session_terminals.term_name
                    ELSE excluded.term_name
                END,
                updated_ts = excluded.updated_ts""",
@@ -998,7 +1014,7 @@ def get_history_sessions(
                     MAX(ts) as last_ts,
                     SUM(request_size_bytes) as total_request_bytes,
                     SUM(response_size_bytes) as total_response_bytes,
-                    provider
+                    MAX(provider) as provider
              FROM conversation_turns
              WHERE ts > ?
              GROUP BY session_id

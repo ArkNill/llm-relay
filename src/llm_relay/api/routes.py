@@ -188,7 +188,13 @@ def _win32_liveness_fallback(last_ts: Optional[float], now_ts: float) -> bool:
 async def _api_turns(request: Request) -> Response:
     """Return turn count + 4 token metrics + dual-zone classification for a session."""
     try:
-        from llm_relay.proxy.db import get_session_cache_stats, get_ttl_tier, get_turn_count
+        from llm_relay.proxy.db import (
+            _duration_seconds,
+            _ts_to_epoch,
+            get_session_cache_stats,
+            get_ttl_tier,
+            get_turn_count,
+        )
 
         session_id = request.path_params["session_id"]
         conn = _get_db_conn()
@@ -197,7 +203,7 @@ async def _api_turns(request: Request) -> Response:
 
         duration_s = 0.0
         if data["first_ts"] and data["last_ts"]:
-            duration_s = data["last_ts"] - data["first_ts"]
+            duration_s = _duration_seconds(data["last_ts"] - data["first_ts"])
 
         zones = _compute_zone_bundle(data["current_ctx"], data["peak_ctx"])
         cache = get_session_cache_stats(conn, session_id=session_id)
@@ -206,8 +212,8 @@ async def _api_turns(request: Request) -> Response:
         return _json_response({
             "session_id": session_id,
             "turns": turns,
-            "first_ts": data["first_ts"],
-            "last_ts": data["last_ts"],
+            "first_ts": _ts_to_epoch(data["first_ts"]),
+            "last_ts": _ts_to_epoch(data["last_ts"]),
             "duration_s": round(duration_s, 1),
             # 4 token metrics
             "current_ctx": data["current_ctx"],
@@ -245,7 +251,7 @@ async def _api_turns_all(request: Request) -> Response:
     """
     try:
         from llm_relay.api.display import check_cc_session_alive, collect_owned_cc_pids
-        from llm_relay.proxy.db import get_all_session_terminals, get_all_turn_counts
+        from llm_relay.proxy.db import _duration_seconds, _ts_to_epoch, get_all_session_terminals, get_all_turn_counts
 
         window = _parse_float(request, "window", "4")
         include_dead = request.query_params.get("include_dead", "0") == "1"
@@ -260,22 +266,23 @@ async def _api_turns_all(request: Request) -> Response:
         sessions = []
         for r in rows:
             term = terminals.get(r["session_id"]) or {}
-            alive = check_cc_session_alive(term, r["last_ts"], owned_cc_pids, now_ts)
+            last_ts_epoch = _ts_to_epoch(r["last_ts"])
+            alive = check_cc_session_alive(term, last_ts_epoch, owned_cc_pids, now_ts)
             if not alive:
-                alive = _win32_liveness_fallback(r["last_ts"], now_ts)
+                alive = _win32_liveness_fallback(last_ts_epoch, now_ts)
             if not alive and not include_dead:
                 continue
             duration_s = 0.0
             if r["first_ts"] and r["last_ts"]:
-                duration_s = r["last_ts"] - r["first_ts"]
+                duration_s = _duration_seconds(r["last_ts"] - r["first_ts"])
             zones = _compute_zone_bundle(r["current_ctx"], r["peak_ctx"])
             sessions.append({
                 "session_id": r["session_id"],
                 "term_name": term.get("term_name"),
                 "tty": term.get("tty"),
                 "turns": r["turns"],
-                "first_ts": r["first_ts"],
-                "last_ts": r["last_ts"],
+                "first_ts": _ts_to_epoch(r["first_ts"]),
+                "last_ts": last_ts_epoch,
                 "duration_s": round(duration_s, 1),
                 "current_ctx": r["current_ctx"],
                 "peak_ctx": r["peak_ctx"],
@@ -388,6 +395,8 @@ async def _api_display(request: Request) -> Response:
             get_last_user_prompt,
         )
         from llm_relay.proxy.db import (
+            _duration_seconds,
+            _ts_to_epoch,
             get_all_session_terminals,
             get_all_turn_counts,
             get_session_cache_stats,
@@ -408,16 +417,17 @@ async def _api_display(request: Request) -> Response:
         proxy_session_ids = set()  # type: set
         for r in rows:
             term = terminals.get(r["session_id"]) or {}
-            alive = check_cc_session_alive(term, r["last_ts"], owned_cc_pids, now_ts)
+            last_ts_epoch = _ts_to_epoch(r["last_ts"])
+            alive = check_cc_session_alive(term, last_ts_epoch, owned_cc_pids, now_ts)
             if not alive:
-                alive = _win32_liveness_fallback(r["last_ts"], now_ts)
+                alive = _win32_liveness_fallback(last_ts_epoch, now_ts)
             if not alive and not include_dead:
                 continue
             proxy_session_ids.add(r["session_id"])
 
             duration_s = 0.0
             if r["first_ts"] and r["last_ts"]:
-                duration_s = r["last_ts"] - r["first_ts"]
+                duration_s = _duration_seconds(r["last_ts"] - r["first_ts"])
             prompt_info = get_last_user_prompt(r["session_id"])
             zones = _compute_zone_bundle(r["current_ctx"], r["peak_ctx"])
             cache = get_session_cache_stats(conn, session_id=r["session_id"])
@@ -427,8 +437,8 @@ async def _api_display(request: Request) -> Response:
                 "provider": "claude-code",
                 "provider_name": "Claude Code",
                 "turns": r["turns"],
-                "first_ts": r["first_ts"],
-                "last_ts": r["last_ts"],
+                "first_ts": _ts_to_epoch(r["first_ts"]),
+                "last_ts": last_ts_epoch,
                 "duration_s": round(duration_s, 1),
                 # 4 token metrics
                 "current_ctx": r["current_ctx"],

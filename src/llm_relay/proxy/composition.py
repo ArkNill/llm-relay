@@ -184,7 +184,7 @@ def _reconstruct_and_classify(
             continue
 
         try:
-            messages = json.loads(req_json)
+            messages = req_json if isinstance(req_json, list) else json.loads(req_json)
         except (json.JSONDecodeError, TypeError):
             continue
 
@@ -241,14 +241,14 @@ def analyze_session_composition(
     """
     # Check current max turn
     row = conn.execute(
-        "SELECT MAX(turn_number) FROM conversation_turns WHERE session_id = ?",
+        "SELECT MAX(turn_number) AS max_turn FROM conversation_turns WHERE session_id = ?",
         (session_id,),
     ).fetchone()
 
-    if not row or row[0] is None:
+    if not row or row["max_turn"] is None:
         return None
 
-    max_turn = row[0]
+    max_turn = row["max_turn"]
 
     # Cache check
     cached = _cache.get(session_id)
@@ -308,7 +308,7 @@ def _reconstruct_per_turn(
             continue
 
         try:
-            messages = json.loads(req_json)
+            messages = req_json if isinstance(req_json, list) else json.loads(req_json)
         except (json.JSONDecodeError, TypeError):
             continue
 
@@ -372,14 +372,14 @@ def analyze_session_composition_per_turn(
     Returns None if no history data exists.
     """
     row = conn.execute(
-        "SELECT MAX(turn_number) FROM conversation_turns WHERE session_id = ?",
+        "SELECT MAX(turn_number) AS max_turn FROM conversation_turns WHERE session_id = ?",
         (session_id,),
     ).fetchone()
 
-    if not row or row[0] is None:
+    if not row or row["max_turn"] is None:
         return None
 
-    max_turn = row[0]
+    max_turn = row["max_turn"]
 
     # Cache check
     cached = _per_turn_cache.get(session_id)
