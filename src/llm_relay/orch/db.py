@@ -7,11 +7,10 @@ from __future__ import annotations
 
 import os
 import sqlite3
-import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-from llm_relay.proxy.db import _USE_PG, _DB_URL, _bool_val, _ts_now, _ts_ago
+from llm_relay.proxy.db import _USE_PG, _bool_val, _ts_ago, _ts_now
 
 _ORCH_SCHEMA = """
 CREATE TABLE IF NOT EXISTS delegations (
@@ -35,7 +34,8 @@ CREATE INDEX IF NOT EXISTS idx_deleg_ts ON delegations(ts);
 CREATE INDEX IF NOT EXISTS idx_deleg_cli ON delegations(cli_id);
 """
 
-DEFAULT_DB = Path(os.getenv("LLM_RELAY_DB", str(Path.home() / ".llm-relay" / "usage.db"))) if not _USE_PG else Path.home() / ".llm-relay" / "usage.db"
+_default = str(Path.home() / ".llm-relay" / "usage.db")
+DEFAULT_DB = Path.home() / ".llm-relay" / "usage.db" if _USE_PG else Path(os.getenv("LLM_RELAY_DB", _default))
 
 
 def get_orch_conn(db_path: Optional[Path] = None) -> Any:

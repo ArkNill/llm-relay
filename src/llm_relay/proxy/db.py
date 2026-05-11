@@ -90,7 +90,7 @@ def _bool_val(b: Any) -> Any:
 def _ts_ago(hours: float) -> Any:
     """Timestamp N hours ago: datetime for PG, epoch float for SQLite."""
     if _USE_PG:
-        from datetime import datetime, timezone, timedelta
+        from datetime import datetime, timedelta, timezone
         return datetime.now(timezone.utc) - timedelta(hours=hours)
     return time.time() - hours * 3600
 
