@@ -1,4 +1,7 @@
-"""SQLite storage for API request/response usage logs."""
+"""Database storage for API request/response usage logs.
+
+Supports SQLite (default) and PostgreSQL (when LLM_RELAY_DB starts with postgresql://).
+"""
 
 from __future__ import annotations
 
@@ -9,7 +12,95 @@ import time
 from pathlib import Path
 from typing import Any, Optional
 
-DEFAULT_DB = Path(os.getenv("LLM_RELAY_DB", str(Path.home() / ".llm-relay" / "usage.db")))
+_DB_URL = os.getenv("LLM_RELAY_DB", str(Path.home() / ".llm-relay" / "usage.db"))
+_USE_PG = _DB_URL.startswith("postgresql://") or _DB_URL.startswith("postgres://")
+
+DEFAULT_DB = Path(_DB_URL) if not _USE_PG else Path.home() / ".llm-relay" / "usage.db"
+
+# ── PostgreSQL compatibility layer ──
+
+if _USE_PG:
+    try:
+        import psycopg
+        from psycopg.rows import dict_row
+        from psycopg.types.json import Jsonb
+    except ImportError:
+        raise ImportError(
+            "PostgreSQL backend requires psycopg. Install with: pip install llm-relay[pg]"
+        )
+
+
+class _PGWrapper:
+    """Wraps psycopg connection to match sqlite3.Connection interface."""
+
+    def __init__(self, conn: Any) -> None:
+        self._conn = conn
+
+    def execute(self, sql: str, params: Any = ()) -> Any:
+        sql = sql.replace("?", "%s")
+        try:
+            return self._conn.execute(sql, params)
+        except Exception:
+            # autocommit=True but if connection enters bad state, reconnect
+            try:
+                self._conn.rollback()
+            except Exception:
+                pass
+            raise
+
+    def executescript(self, sql: str) -> None:
+        pass  # PG schema managed externally
+
+    def commit(self) -> None:
+        self._conn.commit()
+
+    def close(self) -> None:
+        self._conn.close()
+
+
+def _json_val(data: Any) -> Any:
+    """Serialize dict/list for DB. Jsonb for PG, json string for SQLite."""
+    if data is None:
+        return None
+    if _USE_PG:
+        return Jsonb(data)
+    return json.dumps(data)
+
+
+def _json_str(s: Optional[str]) -> Any:
+    """Convert pre-serialized JSON string for DB. Jsonb for PG, passthrough for SQLite."""
+    if s is None:
+        return None
+    if _USE_PG:
+        s = s.replace("\x00", "")
+        try:
+            return Jsonb(json.loads(s))
+        except (json.JSONDecodeError, TypeError):
+            return s
+    return s
+
+
+def _bool_val(b: Any) -> Any:
+    """Bool for PG, int for SQLite."""
+    if _USE_PG:
+        return bool(b)
+    return int(b)
+
+
+def _ts_ago(hours: float) -> Any:
+    """Timestamp N hours ago: datetime for PG, epoch float for SQLite."""
+    if _USE_PG:
+        from datetime import datetime, timezone, timedelta
+        return datetime.now(timezone.utc) - timedelta(hours=hours)
+    return time.time() - hours * 3600
+
+
+def _ts_now() -> Any:
+    """Current timestamp: datetime for PG, epoch float for SQLite."""
+    if _USE_PG:
+        from datetime import datetime, timezone
+        return datetime.now(timezone.utc)
+    return time.time()
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS requests (
@@ -160,7 +251,12 @@ _MIGRATIONS = [
 ]
 
 
-def get_conn(db_path: Path = DEFAULT_DB) -> sqlite3.Connection:
+def get_conn(db_path: Path = DEFAULT_DB) -> Any:
+    """Get a database connection (SQLite or PostgreSQL based on LLM_RELAY_DB)."""
+    if _USE_PG:
+        conn = psycopg.connect(_DB_URL, row_factory=dict_row, autocommit=True)
+        return _PGWrapper(conn)
+
     db_path.parent.mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(str(db_path), check_same_thread=False)
     # WAL mode -- allows concurrent reads during writes and replaces the
@@ -214,7 +310,7 @@ def log_request(
             ratelimit_headers, ephemeral_1h_tokens, ephemeral_5m_tokens)
            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
         (
-            time.time(),
+            _ts_now(),
             session_id,
             model,
             input_tokens,
@@ -225,10 +321,10 @@ def log_request(
             status_code,
             latency_ms,
             endpoint,
-            int(is_stream),
-            json.dumps(raw_usage) if raw_usage else None,
+            _bool_val(is_stream),
+            _json_val(raw_usage),
             request_body_bytes,
-            json.dumps(ratelimit_headers) if ratelimit_headers else None,
+            _json_val(ratelimit_headers),
             ephemeral_1h_tokens,
             ephemeral_5m_tokens,
         ),
@@ -252,12 +348,12 @@ def log_microcompact(
             cleared_indices, message_count)
            VALUES (?, ?, ?, ?, ?, ?, ?)""",
         (
-            time.time(),
+            _ts_now(),
             session_id,
             request_id,
             cleared_count,
             total_tool_results,
-            json.dumps(cleared_indices) if cleared_indices else None,
+            _json_val(cleared_indices),
             message_count,
         ),
     )
@@ -278,7 +374,7 @@ def log_budget_event(
         """INSERT INTO budget_events
            (ts, session_id, msg_index, tool_name, content_chars, truncated, marker)
            VALUES (?, ?, ?, ?, ?, ?, ?)""",
-        (time.time(), session_id, msg_index, tool_name, content_chars, int(truncated), marker),
+        (_ts_now(), session_id, msg_index, tool_name, content_chars, _bool_val(truncated), marker),
     )
     conn.commit()
 
@@ -295,11 +391,11 @@ def log_intercept_event(
            (ts, session_id, endpoint, flags_count, flags_overridden)
            VALUES (?, ?, ?, ?, ?)""",
         (
-            time.time(),
+            _ts_now(),
             session_id,
             endpoint,
             len(flags_overridden) if flags_overridden else 0,
-            json.dumps(flags_overridden) if flags_overridden else None,
+            _json_val(flags_overridden),
         ),
     )
     conn.commit()
@@ -328,7 +424,7 @@ def log_cache_diagnostic(
             drifted_blocks, tools_count, tools_reordered, ttl_injected)
            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
         (
-            time.time(),
+            _ts_now(),
             session_id,
             cc_version,
             fingerprint,
@@ -338,7 +434,7 @@ def log_cache_diagnostic(
             msg0_preview,
             drifted_blocks,
             tools_count,
-            tools_reordered,
+            _bool_val(tools_reordered),
             ttl_injected,
         ),
     )
@@ -366,7 +462,7 @@ def get_microcompact_events(
 def get_session_summary(
     conn: sqlite3.Connection, window_hours: float = 8
 ) -> list[dict[str, Any]]:
-    cutoff = time.time() - window_hours * 3600
+    cutoff = _ts_ago(window_hours)
     rows = conn.execute(
         """SELECT session_id,
                   COUNT(*) as turns,
@@ -446,7 +542,7 @@ def upsert_session_terminal(
     (terminal reuse), the old session's terminal record is cleared so it
     no longer appears alive on the display page.
     """
-    now = time.time()
+    now = _ts_now()
     # Clear stale sessions that had the same cc_pid (terminal reuse)
     if cc_pid:
         conn.execute(
@@ -523,7 +619,7 @@ def get_all_turn_counts(
     Uses a single window-function CTE to compute per-session aggregates and
     rank-based "latest / recent-5" snapshots in one scan.
     """
-    cutoff = time.time() - window_hours * 3600
+    cutoff = _ts_ago(window_hours)
     rows = conn.execute(
         """WITH ranked AS (
              SELECT session_id, ts,
@@ -575,8 +671,11 @@ def get_latest_quota(conn: sqlite3.Connection) -> Optional[dict[str, Any]]:
     ).fetchone()
     if not row or not row["ratelimit_headers"]:
         return None
+    raw = row["ratelimit_headers"]
+    if raw is None:
+        return None
     try:
-        headers = json.loads(row["ratelimit_headers"])
+        headers = raw if isinstance(raw, dict) else json.loads(raw)
     except (json.JSONDecodeError, TypeError):
         return None
 
@@ -601,7 +700,7 @@ def get_error_stats(
     Returns total requests, success (2xx), client errors (4xx), server errors (5xx),
     and the error rate as a percentage.
     """
-    cutoff = time.time() - window_hours * 3600
+    cutoff = _ts_ago(window_hours)
     params: list[Any] = [cutoff]
     where = "WHERE ts > ?"
     if session_id:
@@ -650,7 +749,7 @@ def get_session_cache_stats(
     cache_hit_rate = cache_read / (cache_read + cache_creation) when there is cached data.
     Also returns fresh_input (tokens not from cache).
     """
-    cutoff = time.time() - window_hours * 3600
+    cutoff = _ts_ago(window_hours)
     params: list[Any] = [cutoff]
     where = "WHERE ts > ? AND endpoint = '/v1/messages'"
     if session_id:
@@ -757,6 +856,36 @@ def log_conversation_turn(
     request_id: Optional[int] = None,
 ) -> int:
     """Insert a conversation turn record. Returns the row id."""
+    params = (
+        _ts_now(),
+        session_id,
+        request_id,
+        turn_number,
+        storage_mode,
+        _json_str(request_messages),
+        _json_str(response_message),
+        _json_str(thinking_blocks),
+        model,
+        temperature,
+        max_tokens,
+        total_message_count,
+        previous_message_count,
+        request_size_bytes,
+        response_size_bytes,
+        provider,
+    )
+    if _USE_PG:
+        sql = """INSERT INTO conversation_turns
+               (ts, session_id, request_id, turn_number, storage_mode,
+                request_messages, response_message, thinking_blocks,
+                model, temperature, max_tokens,
+                total_message_count, previous_message_count,
+                request_size_bytes, response_size_bytes, provider)
+               VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s) RETURNING id"""
+        cursor = conn.execute(sql, params)
+        row = cursor.fetchone()
+        conn.commit()
+        return row["id"] if row else 0
     cursor = conn.execute(
         """INSERT INTO conversation_turns
            (ts, session_id, request_id, turn_number, storage_mode,
@@ -765,24 +894,7 @@ def log_conversation_turn(
             total_message_count, previous_message_count,
             request_size_bytes, response_size_bytes, provider)
            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-        (
-            time.time(),
-            session_id,
-            request_id,
-            turn_number,
-            storage_mode,
-            request_messages,
-            response_message,
-            thinking_blocks,
-            model,
-            temperature,
-            max_tokens,
-            total_message_count,
-            previous_message_count,
-            request_size_bytes,
-            response_size_bytes,
-            provider,
-        ),
+        params,
     )
     conn.commit()
     return cursor.lastrowid or 0
@@ -810,7 +922,7 @@ def log_compaction_event(
             dropped_roles)
            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
         (
-            time.time(),
+            _ts_now(),
             session_id,
             turn_number,
             previous_count,
@@ -877,7 +989,7 @@ def get_history_sessions(
     window_hours: float = 24,
 ) -> list[dict[str, Any]]:
     """Return sessions that have conversation history, with summary stats."""
-    cutoff = time.time() - window_hours * 3600
+    cutoff = _ts_ago(window_hours)
     rows = conn.execute(
         """WITH history AS (
              SELECT session_id,

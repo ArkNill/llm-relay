@@ -11,7 +11,7 @@ RUN pip install --no-cache-dir /tmp/tokpress && rm -rf /tmp/tokpress
 
 # Install llm-relay dependencies
 COPY pyproject.toml README.md ./
-RUN pip install --no-cache-dir ".[proxy]"
+RUN pip install --no-cache-dir ".[proxy,pg]"
 
 # Copy source
 COPY src/ src/

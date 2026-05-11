@@ -1,4 +1,7 @@
-"""Orchestration database -- extends the existing proxy SQLite DB with delegation tracking."""
+"""Orchestration database -- extends the existing proxy DB with delegation tracking.
+
+Supports SQLite (default) and PostgreSQL (when LLM_RELAY_DB starts with postgresql://).
+"""
 
 from __future__ import annotations
 
@@ -7,6 +10,8 @@ import sqlite3
 import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional
+
+from llm_relay.proxy.db import _USE_PG, _DB_URL, _bool_val, _ts_now, _ts_ago
 
 _ORCH_SCHEMA = """
 CREATE TABLE IF NOT EXISTS delegations (
@@ -30,14 +35,18 @@ CREATE INDEX IF NOT EXISTS idx_deleg_ts ON delegations(ts);
 CREATE INDEX IF NOT EXISTS idx_deleg_cli ON delegations(cli_id);
 """
 
-DEFAULT_DB = Path(os.getenv("LLM_RELAY_DB", str(Path.home() / ".llm-relay" / "usage.db")))
+DEFAULT_DB = Path(os.getenv("LLM_RELAY_DB", str(Path.home() / ".llm-relay" / "usage.db"))) if not _USE_PG else Path.home() / ".llm-relay" / "usage.db"
 
 
-def get_orch_conn(db_path: Optional[Path] = None) -> sqlite3.Connection:
+def get_orch_conn(db_path: Optional[Path] = None) -> Any:
     """Get connection with orchestration tables initialized.
 
-    Reuses proxy's DB path by default. Adds orch tables via migration.
+    Reuses proxy's DB path by default. For PostgreSQL, delegates to proxy.db.get_conn().
     """
+    if _USE_PG:
+        from llm_relay.proxy.db import get_conn
+        return get_conn()
+
     path = db_path or DEFAULT_DB
     path.parent.mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(str(path), check_same_thread=False)
@@ -63,26 +72,38 @@ def log_delegation(
     strategy: Optional[str] = None,
 ) -> int:
     """Insert a delegation record. Returns the row id."""
+    params = (
+        _ts_now(),
+        cli_id,
+        auth_method,
+        prompt_hash,
+        prompt_preview,
+        model,
+        working_dir,
+        _bool_val(success),
+        exit_code,
+        duration_ms,
+        output_chars,
+        error,
+        strategy,
+    )
+    if _USE_PG:
+        cursor = conn.execute(
+            """INSERT INTO delegations
+               (ts, cli_id, auth_method, prompt_hash, prompt_preview, model, working_dir,
+                success, exit_code, duration_ms, output_chars, error, strategy)
+               VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s) RETURNING id""",
+            params,
+        )
+        row = cursor.fetchone()
+        conn.commit()
+        return row["id"] if row else 0
     cursor = conn.execute(
         """INSERT INTO delegations
            (ts, cli_id, auth_method, prompt_hash, prompt_preview, model, working_dir,
             success, exit_code, duration_ms, output_chars, error, strategy)
            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-        (
-            time.time(),
-            cli_id,
-            auth_method,
-            prompt_hash,
-            prompt_preview,
-            model,
-            working_dir,
-            1 if success else 0,
-            exit_code,
-            duration_ms,
-            output_chars,
-            error,
-            strategy,
-        ),
+        params,
     )
     conn.commit()
     return cursor.lastrowid or 0
@@ -99,12 +120,12 @@ def get_delegation_history(conn: sqlite3.Connection, limit: int = 50) -> List[Di
 
 def get_delegation_stats(conn: sqlite3.Connection, window_hours: float = 24) -> Dict[str, Any]:
     """Aggregate stats for delegations within the time window."""
-    cutoff = time.time() - (window_hours * 3600)
+    cutoff = _ts_ago(window_hours)
 
     rows = conn.execute(
         """SELECT cli_id,
                   COUNT(*) as total,
-                  SUM(CASE WHEN success = 1 THEN 1 ELSE 0 END) as successes,
+                  SUM(CASE WHEN success THEN 1 ELSE 0 END) as successes,
                   AVG(duration_ms) as avg_duration_ms,
                   SUM(output_chars) as total_output_chars
            FROM delegations
