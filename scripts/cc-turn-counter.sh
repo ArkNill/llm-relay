@@ -76,7 +76,7 @@ if [ -n "$CC_PID" ]; then
 fi
 
 # POST terminal info to llm-relay (fire-and-forget, short timeout)
-API_PORT="${LLM_TURN_API_PORT:-8083}"
+API_PORT="${LLM_TURN_API_PORT:-8080}"
 if command -v curl >/dev/null 2>&1; then
     TERM_JSON=$(jq -n \
         --arg sid "$SESSION_ID" \
