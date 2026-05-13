@@ -68,7 +68,7 @@ def _classify_zone_absolute(tokens: int) -> tuple:
     if tokens >= hard:
         return "hard", t("zone.blocked"), None, t("zone.abs.hard", n=hard // 1000)
     if tokens >= red:
-        return "red", t("zone.danger"), hard, t("zone.abs.red", n=red // 1000)
+        return "red", t("zone.danger"), hard, t("zone.abs.red.cc", n=red // 1000)
     if tokens >= orange:
         return "orange", t("zone.warning"), red, t("zone.abs.orange", n=orange // 1000)
     if tokens >= yellow:
@@ -98,7 +98,7 @@ def _classify_zone_ratio(tokens: int, ceiling: Optional[int] = None) -> tuple:
     if ratio >= 1.0:
         return "hard", t("zone.blocked"), None, t("zone.ratio.hard", **_kw)
     if ratio >= 0.90:
-        return "red", t("zone.danger"), ceiling, t("zone.ratio.red", **_kw)
+        return "red", t("zone.danger"), ceiling, t("zone.ratio.red.cc", **_kw)
     if ratio >= 0.70:
         return "orange", t("zone.warning"), red_t, t("zone.ratio.orange", **_kw)
     if ratio >= 0.50:

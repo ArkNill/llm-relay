@@ -27,12 +27,20 @@ MESSAGES = {
         # Zone messages — absolute tokens
         "zone.abs.hard": "Exceeded {n}K. Immediate session cleanup required.",
         "zone.abs.red": "Reached {n}K. Session rotation required.",
+        "zone.abs.red.cc": (
+            "Reached {n}K. Auto-compact imminent — hand off to a new session"
+            " before context degradation."
+        ),
         "zone.abs.orange": "Reached {n}K. Finish current work then rotate.",
         "zone.abs.yellow": "Reached {n}K. Update docs and prepare to rotate.",
 
         # Zone messages — ratio (pct-aware format)
         "zone.ratio.hard": "{pct}% ({cur}K/{ceil}K) ceiling reached. Immediate session cleanup.",
         "zone.ratio.red": "{pct}% ({cur}K/{ceil}K) reached. Rotation required.",
+        "zone.ratio.red.cc": (
+            "{pct}% ({cur}K/{ceil}K) reached. Auto-compact imminent —"
+            " hand off to a new session before context degradation."
+        ),
         "zone.ratio.orange": "{pct}% ({cur}K/{ceil}K) reached. Finish then rotate.",
         "zone.ratio.yellow": "{pct}% ({cur}K/{ceil}K) reached. Prepare to rotate.",
 
@@ -73,11 +81,16 @@ MESSAGES = {
 
         "zone.abs.hard": "{n}K 초과. 즉시 세션 정리 필요.",
         "zone.abs.red": "{n}K 도달. 세션 로테이션 필수.",
+        "zone.abs.red.cc": "{n}K 도달. auto-compact 임박 — 컨텍스트 손상 전 다음 세션으로 인수인계.",
         "zone.abs.orange": "{n}K 도달. 현재 작업 마무리 후 rotate.",
         "zone.abs.yellow": "{n}K 도달. 문서 업데이트 + rotate 준비.",
 
         "zone.ratio.hard": "{pct}% ({cur}K/{ceil}K) 천장 도달. 즉시 세션 정리.",
         "zone.ratio.red": "{pct}% ({cur}K/{ceil}K) 도달. 로테이션 필수.",
+        "zone.ratio.red.cc": (
+            "{pct}% ({cur}K/{ceil}K) 도달. auto-compact 임박 —"
+            " 컨텍스트 손상 전 다음 세션으로 인수인계."
+        ),
         "zone.ratio.orange": "{pct}% ({cur}K/{ceil}K) 도달. 마무리 후 rotate.",
         "zone.ratio.yellow": "{pct}% ({cur}K/{ceil}K) 도달. rotate 준비.",
 
