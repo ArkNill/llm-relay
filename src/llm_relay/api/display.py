@@ -1084,7 +1084,7 @@ def discover_external_cli_sessions(
                 official_context_window = _OPENAI_CODEX_OFFICIAL_CONTEXT_WINDOW
                 official_max_output = _OPENAI_CODEX_OFFICIAL_MAX_OUTPUT
             else:
-                display_ceiling = int(os.getenv("LLM_TOKEN_CEILING", "1000000"))
+                display_ceiling = int(os.getenv("LLM_TOKEN_CEILING", "665000"))
                 official_context_window = 0
                 official_max_output = 0
                 try:

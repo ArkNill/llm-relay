@@ -23,13 +23,17 @@ _ZONE_ORDER = {"green": 0, "yellow": 1, "orange": 2, "red": 3, "hard": 4}
 # ── Claude Code zone classification ──
 
 # Cached at module load — avoids repeated os.getenv in hot path.
-# Zone A defaults aligned with Zone B ratios of the 1M ceiling:
-#   Yellow 500K (50%) / Orange 700K (70%) / Red 900K (90%) / Hard 1M (100%).
-_CACHED_TOKEN_A_YELLOW = int(os.getenv("LLM_TOKEN_A_YELLOW", "500000"))
-_CACHED_TOKEN_A_ORANGE = int(os.getenv("LLM_TOKEN_A_ORANGE", "700000"))
-_CACHED_TOKEN_A_RED = int(os.getenv("LLM_TOKEN_A_RED", "900000"))
-_CACHED_TOKEN_A_HARD = int(os.getenv("LLM_TOKEN_A_HARD", "1000000"))
-_CACHED_TOKEN_CEILING = int(os.getenv("LLM_TOKEN_CEILING", "1000000"))
+# Zone A defaults aligned with Zone B ratios of the practical 665K ceiling:
+#   Yellow 332K (50%) / Orange 465K (70%) / Red 600K (90%) / Hard 665K (100%).
+# Rationale: Claude Code's client-side auto-compact (re-introduced in v2.1.139)
+# triggers around 650-670K cumulative context. Operators rely on these zones to
+# hand off to a new session before compaction degrades context continuity.
+# Override via LLM_TOKEN_A_*/LLM_TOKEN_CEILING if the exact threshold is confirmed.
+_CACHED_TOKEN_A_YELLOW = int(os.getenv("LLM_TOKEN_A_YELLOW", "332000"))
+_CACHED_TOKEN_A_ORANGE = int(os.getenv("LLM_TOKEN_A_ORANGE", "465000"))
+_CACHED_TOKEN_A_RED = int(os.getenv("LLM_TOKEN_A_RED", "600000"))
+_CACHED_TOKEN_A_HARD = int(os.getenv("LLM_TOKEN_A_HARD", "665000"))
+_CACHED_TOKEN_CEILING = int(os.getenv("LLM_TOKEN_CEILING", "665000"))
 
 
 def _classify_zone(turns: int) -> tuple:
@@ -75,7 +79,8 @@ def _classify_zone_absolute(tokens: int) -> tuple:
 def _classify_zone_ratio(tokens: int, ceiling: Optional[int] = None) -> tuple:
     """Zone B -- ratio-of-ceiling classification (50/70/90/100%).
 
-    Env: LLM_TOKEN_CEILING (default 1M for local / 500K recommended for public)
+    Env: LLM_TOKEN_CEILING (default 665K — Opus 4.7 forced auto-compact ceiling.
+    Override to 500K for public deployments without 1M context entitlement.)
     Returns (zone, zone_label, next_threshold, message).
     """
     if ceiling is None:
