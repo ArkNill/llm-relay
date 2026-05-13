@@ -2,6 +2,15 @@
 
 All notable changes to llm-relay are documented here.
 
+## [Unreleased]
+
+### Changed
+- **Claude Code zone defaults rescaled to 665K ceiling**: Yellow 332K / Orange 465K / Red 600K / Hard 665K (`_zones.py`, `tui.py`, `display.py`, `.env.public`). Rationale: Claude Code's client-side auto-compact (re-introduced in v2.1.139) triggers around 650-670K cumulative context; the new defaults let operators hand off to a new session before compaction degrades context continuity. Override via `LLM_TOKEN_A_*` / `LLM_TOKEN_CEILING` env vars if a different ceiling is needed (e.g. `500000` for public deployments without 1M entitlement).
+- **Red-zone message split for CC vs Codex** (`i18n.py`): new keys `zone.abs.red.cc` and `zone.ratio.red.cc` carry an explicit "Auto-compact imminent — hand off to a new session" guideline used by CC paths. Codex paths keep the existing "Session rotation required" wording (Codex has no client-side compaction; the 400K hard limit semantics differ).
+
+### Tests
+- `tests/test_api/test_turns.py::_zone_env` autouse fixture now patches both `_zones` and `routes` modules so legacy 1M-scale assertions stay stable against new production defaults.
+
 ## [0.9.3] - 2026-05-06
 
 ### Added

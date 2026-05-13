@@ -28,16 +28,22 @@ from llm_relay.proxy.db import (
 
 # Deterministic env for Zone A absolute-threshold tests.
 # Module-level _CACHED_TOKEN_* are evaluated once at import, so env-only
-# monkeypatching has no effect.  Patch the cached values directly.
+# monkeypatching has no effect.  Patch the cached values directly on both the
+# zones source module (used by _classify_zone_* functions) and the routes
+# re-export (used by API endpoints to populate the ceiling field).
+# Tests below assume the legacy 1M-scale thresholds to keep assertions stable
+# independent of the production default (which tracks observed auto-compact).
 @pytest.fixture(autouse=True)
 def _zone_env(monkeypatch):
+    import llm_relay.api._zones as _zones_mod
     import llm_relay.api.routes as _routes
 
-    monkeypatch.setattr(_routes, "_CACHED_TOKEN_A_YELLOW", 500_000)
-    monkeypatch.setattr(_routes, "_CACHED_TOKEN_A_ORANGE", 700_000)
-    monkeypatch.setattr(_routes, "_CACHED_TOKEN_A_RED", 900_000)
-    monkeypatch.setattr(_routes, "_CACHED_TOKEN_A_HARD", 1_000_000)
-    monkeypatch.setattr(_routes, "_CACHED_TOKEN_CEILING", 1_000_000)
+    for mod in (_zones_mod, _routes):
+        monkeypatch.setattr(mod, "_CACHED_TOKEN_A_YELLOW", 500_000)
+        monkeypatch.setattr(mod, "_CACHED_TOKEN_A_ORANGE", 700_000)
+        monkeypatch.setattr(mod, "_CACHED_TOKEN_A_RED", 900_000)
+        monkeypatch.setattr(mod, "_CACHED_TOKEN_A_HARD", 1_000_000)
+        monkeypatch.setattr(mod, "_CACHED_TOKEN_CEILING", 1_000_000)
 
 
 # Default empty-metrics dict for mocking get_turn_count returns
