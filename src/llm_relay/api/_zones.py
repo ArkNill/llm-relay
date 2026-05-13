@@ -79,7 +79,7 @@ def _classify_zone_absolute(tokens: int) -> tuple:
 def _classify_zone_ratio(tokens: int, ceiling: Optional[int] = None) -> tuple:
     """Zone B -- ratio-of-ceiling classification (50/70/90/100%).
 
-    Env: LLM_TOKEN_CEILING (default 665K — Opus 4.7 forced auto-compact ceiling.
+    Env: LLM_TOKEN_CEILING (default 665K — Opus 4.7 client-side auto-compact ceiling.
     Override to 500K for public deployments without 1M context entitlement.)
     Returns (zone, zone_label, next_threshold, message).
     """
