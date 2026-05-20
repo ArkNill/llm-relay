@@ -4,6 +4,9 @@ All notable changes to llm-relay are documented here.
 
 ## [Unreleased]
 
+### Added
+- **`llm-relay env-fingerprint` command** (`env_fingerprint.py`): single-shot, idempotent snapshot of the local LLM CLI environment for agent-driven onboarding. Emits a structured JSON (or YAML) document with sections for `llm_relay` package state, per-CLI install/auth/version, port availability, filesystem layout, redacted environment variables (API keys reported as `set`/`empty`/`null` only), and an optional `doctor` summary. Designed so an agent (Claude Code / Codex / Gemini) automating an llm-relay install can parse the environment instead of scraping `init` output. Schema versioned (`schema_version: "1"`); sub-probe failures surface as `_error` markers without crashing the snapshot. Options: `--format {json,yaml}`, `--no-doctor`, `--ports`.
+
 ### Performance
 - **Incremental composition cache** (`composition.py`, #16): `analyze_session_composition` and `analyze_session_composition_per_turn` now fold delta turns into cached state instead of re-walking the full session on every new turn. Previously the cache invalidated whenever any new turn arrived, forcing an O(n²) replay; on long-running sessions this caused `/api/v1/turns` to balloon to tens of seconds and daemon RSS to climb above 10 GB within ~30 min of normal multi-agent traffic. Cache now keys on `session_id` alone with `(max_turn_processed, accumulated, totals, …)` state; new turns trigger a `WHERE turn_number > max_turn_processed` fetch. Compaction events (`storage_mode="full"`) reset accumulated state and re-absorb the snapshot. Exception during fold falls back to a full rebuild so an incremental error can't poison the cache.
 

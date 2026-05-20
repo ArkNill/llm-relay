@@ -226,6 +226,58 @@ def doctor(fix: bool) -> None:
                 click.echo(f"          -> {r.recommendation}")
 
 
+@cli.command("env-fingerprint")
+@click.option(
+    "--format", "fmt",
+    type=click.Choice(["json", "yaml"]),
+    default="json",
+    help="Output format (default: json).",
+)
+@click.option(
+    "--no-doctor", "no_doctor",
+    is_flag=True,
+    help="Skip doctor health checks (faster, install/version probe only).",
+)
+@click.option(
+    "--ports", "ports_str",
+    default="",
+    help="Comma-separated TCP ports to probe (default: 8080,8083).",
+)
+def env_fingerprint(fmt: str, no_doctor: bool, ports_str: str) -> None:
+    """Print a structured snapshot of the local LLM CLI environment.
+
+    Designed to be consumed by an agent (Claude Code / Codex / Gemini)
+    during automated llm-relay onboarding (Path B). Safe to run repeatedly --
+    this command makes no changes to the user's environment.
+
+    Schema is documented in src/llm_relay/env_fingerprint.py.
+    """
+    import json
+    from typing import List, Optional
+
+    from llm_relay.env_fingerprint import collect_fingerprint
+
+    ports: Optional[List[int]] = None
+    if ports_str.strip():
+        try:
+            ports = [int(p.strip()) for p in ports_str.split(",") if p.strip()]
+        except ValueError as exc:
+            raise click.BadParameter("--ports must be comma-separated integers") from exc
+
+    snapshot = collect_fingerprint(include_doctor=not no_doctor, ports=ports)
+
+    if fmt == "yaml":
+        try:
+            import yaml  # type: ignore[import-not-found]
+        except ImportError as exc:
+            raise click.ClickException(
+                "PyYAML not installed. Install with `pip install pyyaml` or use --format=json."
+            ) from exc
+        click.echo(yaml.safe_dump(snapshot, sort_keys=False, allow_unicode=True))
+    else:
+        click.echo(json.dumps(snapshot, indent=2, ensure_ascii=False))
+
+
 @cli.command()
 @click.option("--host", default="0.0.0.0", help="Bind address.")
 @click.option("--port", "-p", default=8083, type=int, help="Listen port.")
