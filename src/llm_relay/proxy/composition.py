@@ -15,6 +15,7 @@ import os
 import re
 import sqlite3
 from collections import defaultdict
+from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Tuple
 
 logger = logging.getLogger("llm-relay.composition")
@@ -28,8 +29,34 @@ CATEGORIES = [
     "thinking_overhead",
 ]
 
-# In-memory cache: session_id -> (max_turn_number, result_dict)
-_cache: Dict[str, Tuple[int, dict]] = {}
+
+@dataclass
+class _CompositionState:
+    """Cumulative state for incremental composition analysis.
+
+    Built by folding turns one at a time. On storage_mode="full" (compaction),
+    accumulated/totals/tool counts/thinking_count/read_counts all reset and
+    then absorb the snapshot. On "delta", everything is appended to.
+    """
+    max_turn_processed: int = 0
+    accumulated: List[dict] = field(default_factory=list)
+    read_counts: Dict[str, int] = field(default_factory=dict)
+    totals: Dict[str, int] = field(default_factory=lambda: {cat: 0 for cat in CATEGORIES})
+    tool_call_counts: Dict[str, int] = field(default_factory=dict)
+    tool_byte_totals: Dict[str, Dict[str, int]] = field(default_factory=dict)
+    thinking_count: int = 0
+
+
+@dataclass
+class _PerTurnState:
+    """Cumulative state for incremental per-turn composition analysis."""
+    max_turn_processed: int = 0
+    accumulated: List[dict] = field(default_factory=list)
+    turn_results: List[dict] = field(default_factory=list)
+
+
+# In-memory cache: session_id -> _CompositionState
+_cache: Dict[str, _CompositionState] = {}
 
 
 # ── Classification ──
@@ -166,6 +193,37 @@ def _count_thinking_blocks(msg: dict) -> int:
 # ── Reconstruction ──
 
 
+def _classify_messages_delta(
+    messages: List[dict],
+) -> Tuple[Dict[str, int], Dict[str, int], Dict[str, Dict[str, int]], int]:
+    """Classify a list of messages into category byte totals + tool details.
+
+    Returns (totals, tool_call_counts, tool_byte_totals, thinking_count) where each
+    value is the contribution from `messages` alone. Callers either use the result
+    directly (final-state classification) or fold it into a running state
+    (incremental classification).
+    """
+    totals: Dict[str, int] = {cat: 0 for cat in CATEGORIES}
+    tool_call_counts: Dict[str, int] = defaultdict(int)
+    tool_byte_totals: Dict[str, Dict[str, int]] = defaultdict(lambda: {"use": 0, "result": 0})
+    thinking_count = 0
+
+    for msg in messages:
+        sizes = _classify_message(msg)
+        for cat in CATEGORIES:
+            totals[cat] += sizes.get(cat, 0)
+        for name in _extract_tool_names(msg):
+            tool_call_counts[name] += 1
+        for name, bytes_info in _extract_tool_use_bytes(msg).items():
+            if name == "__result__":
+                continue
+            tool_byte_totals[name]["use"] += bytes_info["use"]
+            tool_byte_totals[name]["result"] += bytes_info["result"]
+        thinking_count += _count_thinking_blocks(msg)
+
+    return totals, dict(tool_call_counts), dict(tool_byte_totals), thinking_count
+
+
 def _reconstruct_and_classify(
     turns_data: List[dict],
 ) -> Tuple[Dict[str, int], int, Dict[str, int], Dict[str, int], Dict[str, Dict[str, int]], int]:
@@ -193,38 +251,117 @@ def _reconstruct_and_classify(
 
         if storage_mode == "full":
             accumulated = list(messages)
+            # Compaction replaces the accumulated context, so prior reads
+            # are no longer present. Reset read_counts so duplicate_reads
+            # reflects only files still in the current accumulated state.
+            read_counts = defaultdict(int)
         else:
             accumulated.extend(messages)
 
-        # Track reads and tool calls
         for msg in messages:
             for target in _extract_read_targets(msg):
                 read_counts[target] += 1
 
-    # Classify accumulated context + extract tool details
-    totals: Dict[str, int] = {cat: 0 for cat in CATEGORIES}
-    tool_call_counts: Dict[str, int] = defaultdict(int)
-    tool_byte_totals: Dict[str, Dict[str, int]] = defaultdict(lambda: {"use": 0, "result": 0})
-    thinking_count = 0
-
-    for msg in accumulated:
-        sizes = _classify_message(msg)
-        for cat in CATEGORIES:
-            totals[cat] += sizes.get(cat, 0)
-        # Per-tool counting
-        for name in _extract_tool_names(msg):
-            tool_call_counts[name] += 1
-        for name, bytes_info in _extract_tool_use_bytes(msg).items():
-            if name == "__result__":
-                continue
-            tool_byte_totals[name]["use"] += bytes_info["use"]
-            tool_byte_totals[name]["result"] += bytes_info["result"]
-        thinking_count += _count_thinking_blocks(msg)
+    totals, tool_call_counts, tool_byte_totals, thinking_count = _classify_messages_delta(accumulated)
 
     total_bytes = sum(totals.values())
     dupes = {k: v for k, v in read_counts.items() if v > 1}
 
-    return totals, total_bytes, dupes, dict(tool_call_counts), dict(tool_byte_totals), thinking_count
+    return totals, total_bytes, dupes, tool_call_counts, tool_byte_totals, thinking_count
+
+
+# ── Incremental folding ──
+
+
+def _parse_turn_messages(row: dict) -> Optional[List[dict]]:
+    """Parse request_messages from a turn row. Returns None if unusable."""
+    req_json = row["request_messages"]
+    if not req_json:
+        return None
+    try:
+        messages = req_json if isinstance(req_json, list) else json.loads(req_json)
+    except (json.JSONDecodeError, TypeError):
+        return None
+    if not isinstance(messages, list):
+        return None
+    return messages
+
+
+def _fold_delta_into_composition_state(
+    state: _CompositionState,
+    new_turns: List[dict],
+) -> None:
+    """Fold delta turns into the state in place.
+
+    Matches the semantics of _reconstruct_and_classify: storage_mode="full"
+    resets accumulated/totals/tool_calls/tool_bytes/thinking/read_counts and
+    re-absorbs the snapshot; other modes append.
+    """
+    for row in new_turns:
+        turn_number = row["turn_number"]
+        storage_mode = row["storage_mode"]
+        messages = _parse_turn_messages(row)
+        if messages is None:
+            state.max_turn_processed = turn_number
+            continue
+
+        if storage_mode == "full":
+            state.accumulated = list(messages)
+            state.read_counts = {}
+            state.totals = {cat: 0 for cat in CATEGORIES}
+            state.tool_call_counts = {}
+            state.tool_byte_totals = {}
+            state.thinking_count = 0
+        else:
+            state.accumulated.extend(messages)
+
+        d_totals, d_calls, d_bytes, d_thinking = _classify_messages_delta(messages)
+        for cat in CATEGORIES:
+            state.totals[cat] += d_totals[cat]
+        for name, count in d_calls.items():
+            state.tool_call_counts[name] = state.tool_call_counts.get(name, 0) + count
+        for name, info in d_bytes.items():
+            existing = state.tool_byte_totals.setdefault(name, {"use": 0, "result": 0})
+            existing["use"] += info["use"]
+            existing["result"] += info["result"]
+        state.thinking_count += d_thinking
+
+        for msg in messages:
+            for target in _extract_read_targets(msg):
+                state.read_counts[target] = state.read_counts.get(target, 0) + 1
+
+        state.max_turn_processed = turn_number
+
+
+def _build_composition_result_from_state(state: _CompositionState) -> dict:
+    """Render a result dict from accumulated state."""
+    dupes = {k: v for k, v in state.read_counts.items() if v > 1}
+    return _build_composition_result(
+        state.totals,
+        dupes=dupes,
+        tool_calls=state.tool_call_counts,
+        tool_bytes=state.tool_byte_totals,
+        thinking_count=state.thinking_count,
+    )
+
+
+def _full_rebuild_composition_state(
+    conn: sqlite3.Connection,
+    session_id: str,
+) -> Optional[_CompositionState]:
+    """Fetch all turns for a session and fold them into a fresh state."""
+    turns = conn.execute(
+        """SELECT turn_number, storage_mode, request_messages
+           FROM conversation_turns
+           WHERE session_id = ?
+           ORDER BY turn_number ASC""",
+        (session_id,),
+    ).fetchall()
+    if not turns:
+        return None
+    state = _CompositionState()
+    _fold_delta_into_composition_state(state, [dict(t) for t in turns])
+    return state
 
 
 # ── Public API ──
@@ -236,56 +373,65 @@ def analyze_session_composition(
 ) -> Optional[dict]:
     """Analyze context composition for a session. Returns cached result if available.
 
-    Returns dict with: categories, total_bytes, est_tokens, snr, duplicate_read_count
+    Uses an incremental cache: when new turns arrive, only those past
+    max_turn_processed are fetched and folded into existing state. Compaction
+    events (storage_mode="full") reset accumulated/totals/read_counts then
+    re-absorb the snapshot. On any fold exception, falls back to a full
+    rebuild so a corrupted increment can't poison the cache permanently.
+
+    Returns dict with: categories, total_bytes, est_tokens, snr, duplicate_read_count.
     Returns None if no history data exists.
     """
-    # Check current max turn
     row = conn.execute(
         "SELECT MAX(turn_number) AS max_turn FROM conversation_turns WHERE session_id = ?",
         (session_id,),
     ).fetchone()
-
     if not row or row["max_turn"] is None:
         return None
-
     max_turn = row["max_turn"]
 
-    # Cache check
     cached = _cache.get(session_id)
-    if cached and cached[0] == max_turn:
-        return cached[1]
 
-    # Fetch turns
-    turns = conn.execute(
+    if cached is not None and max_turn < cached.max_turn_processed:
+        logger.warning(
+            "max_turn regressed for %s (cached=%d, now=%d) — rebuilding composition cache",
+            session_id, cached.max_turn_processed, max_turn,
+        )
+        cached = None
+
+    if cached is not None and max_turn == cached.max_turn_processed:
+        return _build_composition_result_from_state(cached)
+
+    start_after = cached.max_turn_processed if cached is not None else 0
+    new_turns = conn.execute(
         """SELECT turn_number, storage_mode, request_messages
            FROM conversation_turns
-           WHERE session_id = ?
+           WHERE session_id = ? AND turn_number > ?
            ORDER BY turn_number ASC""",
-        (session_id,),
+        (session_id, start_after),
     ).fetchall()
 
-    if not turns:
+    if not new_turns and cached is None:
         return None
 
-    turns_data = [dict(t) for t in turns]
-    category_bytes, total_bytes, dupes, tool_calls, tool_bytes, thinking_count = (
-        _reconstruct_and_classify(turns_data)
-    )
+    state = cached if cached is not None else _CompositionState()
+    try:
+        _fold_delta_into_composition_state(state, [dict(t) for t in new_turns])
+    except Exception:
+        logger.exception("Incremental composition fold failed for %s — rebuilding", session_id)
+        rebuilt = _full_rebuild_composition_state(conn, session_id)
+        if rebuilt is None:
+            _cache.pop(session_id, None)
+            return None
+        state = rebuilt
 
-    result = _build_composition_result(
-        category_bytes, dupes, tool_calls, tool_bytes,
-        thinking_count=thinking_count,
-    )
-
-    # Cache
-    _cache[session_id] = (max_turn, result)
-
-    return result
+    _cache[session_id] = state
+    return _build_composition_result_from_state(state)
 
 
 # ── Per-turn analysis ──
 
-_per_turn_cache: Dict[str, Tuple[int, dict]] = {}
+_per_turn_cache: Dict[str, _PerTurnState] = {}
 
 
 def _reconstruct_per_turn(
@@ -362,11 +508,93 @@ def _sample_turns(turns: List[dict]) -> List[dict]:
     return [turns[i] for i in sorted(indices)]
 
 
+def _classify_accumulated_categories(accumulated: List[dict]) -> Tuple[Dict[str, int], int]:
+    """Classify an accumulated message list into category byte totals.
+
+    Used by the per-turn fold path which only needs categories, not the
+    extended tool-call/tool-bytes/thinking breakdown.
+    """
+    totals: Dict[str, int] = {cat: 0 for cat in CATEGORIES}
+    for msg in accumulated:
+        sizes = _classify_message(msg)
+        for cat in CATEGORIES:
+            totals[cat] += sizes.get(cat, 0)
+    return totals, sum(totals.values())
+
+
+def _fold_delta_into_per_turn_state(
+    state: _PerTurnState,
+    new_turns: List[dict],
+) -> None:
+    """Fold delta turns into the per-turn state in place.
+
+    For each turn, classifies the full accumulated context at that point and
+    appends a per-turn entry. Compaction events reset `accumulated` to the
+    snapshot before classifying.
+    """
+    for row in new_turns:
+        turn_number = row["turn_number"]
+        storage_mode = row["storage_mode"]
+        messages = _parse_turn_messages(row)
+        if messages is None:
+            state.max_turn_processed = turn_number
+            continue
+
+        compacted = False
+        if storage_mode == "full":
+            if state.accumulated and len(messages) < len(state.accumulated):
+                compacted = True
+            state.accumulated = list(messages)
+        else:
+            state.accumulated.extend(messages)
+
+        totals, total_bytes = _classify_accumulated_categories(state.accumulated)
+        categories = {}
+        for cat in CATEGORIES:
+            b = totals[cat]
+            pct = round(b / total_bytes * 100, 1) if total_bytes > 0 else 0.0
+            categories[cat] = {"bytes": b, "pct": pct}
+
+        state.turn_results.append({
+            "turn": turn_number,
+            "msgs": len(state.accumulated),
+            "compacted": compacted,
+            "composition": {
+                "total_bytes": total_bytes,
+                "est_tokens": total_bytes // 4,
+                "categories": categories,
+            },
+        })
+        state.max_turn_processed = turn_number
+
+
+def _full_rebuild_per_turn_state(
+    conn: sqlite3.Connection,
+    session_id: str,
+) -> Optional[_PerTurnState]:
+    """Fetch all turns and fold them into a fresh per-turn state."""
+    turns = conn.execute(
+        """SELECT turn_number, storage_mode, request_messages
+           FROM conversation_turns
+           WHERE session_id = ?
+           ORDER BY turn_number ASC""",
+        (session_id,),
+    ).fetchall()
+    if not turns:
+        return None
+    state = _PerTurnState()
+    _fold_delta_into_per_turn_state(state, [dict(t) for t in turns])
+    return state
+
+
 def analyze_session_composition_per_turn(
     conn: sqlite3.Connection,
     session_id: str,
 ) -> Optional[dict]:
     """Analyze per-turn composition for a session. Returns sampled data for large sessions.
+
+    Uses an incremental cache: only turns past max_turn_processed are fetched
+    and folded. Sampling is applied on each call against the full result list.
 
     Returns dict with: session_id, total_turns, sampled, turns[].
     Returns None if no history data exists.
@@ -375,43 +603,56 @@ def analyze_session_composition_per_turn(
         "SELECT MAX(turn_number) AS max_turn FROM conversation_turns WHERE session_id = ?",
         (session_id,),
     ).fetchone()
-
     if not row or row["max_turn"] is None:
         return None
-
     max_turn = row["max_turn"]
 
-    # Cache check
     cached = _per_turn_cache.get(session_id)
-    if cached and cached[0] == max_turn:
-        return cached[1]
 
-    turns = conn.execute(
-        """SELECT turn_number, storage_mode, request_messages
-           FROM conversation_turns
-           WHERE session_id = ?
-           ORDER BY turn_number ASC""",
-        (session_id,),
-    ).fetchall()
+    if cached is not None and max_turn < cached.max_turn_processed:
+        logger.warning(
+            "max_turn regressed for %s (per-turn cached=%d, now=%d) — rebuilding",
+            session_id, cached.max_turn_processed, max_turn,
+        )
+        cached = None
 
-    if not turns:
-        return None
+    if cached is None or max_turn > cached.max_turn_processed:
+        start_after = cached.max_turn_processed if cached is not None else 0
+        new_turns = conn.execute(
+            """SELECT turn_number, storage_mode, request_messages
+               FROM conversation_turns
+               WHERE session_id = ? AND turn_number > ?
+               ORDER BY turn_number ASC""",
+            (session_id, start_after),
+        ).fetchall()
 
-    turns_data = [dict(t) for t in turns]
-    all_turns = _reconstruct_per_turn(turns_data)
+        if not new_turns and cached is None:
+            return None
 
-    sampled = len(all_turns) > 50
-    sampled_turns = _sample_turns(all_turns) if sampled else all_turns
+        state = cached if cached is not None else _PerTurnState()
+        try:
+            _fold_delta_into_per_turn_state(state, [dict(t) for t in new_turns])
+        except Exception:
+            logger.exception("Per-turn incremental fold failed for %s — rebuilding", session_id)
+            rebuilt = _full_rebuild_per_turn_state(conn, session_id)
+            if rebuilt is None:
+                _per_turn_cache.pop(session_id, None)
+                return None
+            state = rebuilt
 
-    result = {
+        _per_turn_cache[session_id] = state
+    else:
+        state = cached
+
+    sampled = len(state.turn_results) > 50
+    sampled_turns = _sample_turns(state.turn_results) if sampled else state.turn_results
+
+    return {
         "session_id": session_id,
-        "total_turns": len(all_turns),
+        "total_turns": len(state.turn_results),
         "sampled": sampled,
         "turns": sampled_turns,
     }
-
-    _per_turn_cache[session_id] = (max_turn, result)
-    return result
 
 
 def clear_cache(session_id: Optional[str] = None) -> None:

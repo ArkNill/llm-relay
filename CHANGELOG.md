@@ -4,9 +4,13 @@ All notable changes to llm-relay are documented here.
 
 ## [Unreleased]
 
+### Performance
+- **Incremental composition cache** (`composition.py`, #16): `analyze_session_composition` and `analyze_session_composition_per_turn` now fold delta turns into cached state instead of re-walking the full session on every new turn. Previously the cache invalidated whenever any new turn arrived, forcing an O(n²) replay; on long-running sessions this caused `/api/v1/turns` to balloon to tens of seconds and daemon RSS to climb above 10 GB within ~30 min of normal multi-agent traffic. Cache now keys on `session_id` alone with `(max_turn_processed, accumulated, totals, …)` state; new turns trigger a `WHERE turn_number > max_turn_processed` fetch. Compaction events (`storage_mode="full"`) reset accumulated state and re-absorb the snapshot. Exception during fold falls back to a full rebuild so an incremental error can't poison the cache.
+
 ### Changed
 - **Claude Code zone defaults rescaled to 665K ceiling**: Yellow 332K / Orange 465K / Red 600K / Hard 665K (`_zones.py`, `tui.py`, `display.py`, `.env.public`). Rationale: Claude Code's client-side auto-compact (re-introduced in v2.1.139) triggers around 650-670K cumulative context; the new defaults let operators hand off to a new session before compaction degrades context continuity. Override via `LLM_TOKEN_A_*` / `LLM_TOKEN_CEILING` env vars if a different ceiling is needed (e.g. `500000` for public deployments without 1M entitlement).
 - **Red-zone message split for CC vs Codex** (`i18n.py`): new keys `zone.abs.red.cc` and `zone.ratio.red.cc` carry an explicit "Auto-compact imminent — hand off to a new session" guideline used by CC paths. Codex paths keep the existing "Session rotation required" wording (Codex has no client-side compaction; the 400K hard limit semantics differ).
+- **`duplicate_reads` no longer accumulates across compaction** (`composition.py`): when a `storage_mode="full"` turn arrives, read counts reset together with the accumulated context. Previously reads from pre-compaction turns were counted as duplicates of post-compaction reads, inflating `duplicate_read_count` and triggering spurious `duplicate_read_warning` flips. Visible in `/api/v1/turns`, `/api/v1/display`, dashboard Context Health, and TUI duplicate-file listings.
 
 ### Tests
 - `tests/test_api/test_turns.py::_zone_env` autouse fixture now patches both `_zones` and `routes` modules so legacy 1M-scale assertions stay stable against new production defaults.

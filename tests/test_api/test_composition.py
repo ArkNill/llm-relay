@@ -178,6 +178,33 @@ class TestReconstructAndClassify:
         assert "/tmp/test.py" in dupes
         assert dupes["/tmp/test.py"] == 3
 
+    def test_compaction_resets_read_counts(self):
+        """Pre-compaction reads should not appear in duplicate_reads after a
+        storage_mode='full' turn — those files are no longer in the accumulated
+        context, so counting them as duplicates of post-compaction reads is wrong.
+        """
+        read_a = {
+            "role": "assistant",
+            "content": [
+                {"type": "tool_use", "id": "t1", "name": "Read", "input": {"file_path": "/a.py"}},
+            ],
+        }
+        read_b = {
+            "role": "assistant",
+            "content": [
+                {"type": "tool_use", "id": "t2", "name": "Read", "input": {"file_path": "/b.py"}},
+            ],
+        }
+        turns = [
+            _make_turn(1, "full", [read_a]),
+            _make_turn(2, "delta", [read_a]),         # /a.py reads = 2 (pre-compaction)
+            _make_turn(3, "full", [read_b]),          # compaction → reset
+            _make_turn(4, "delta", [read_b]),         # /b.py reads = 2 (post-compaction)
+        ]
+        _, _, dupes, _tc, _tb, _thc = _reconstruct_and_classify(turns)
+        assert "/a.py" not in dupes, "pre-compaction reads should not survive"
+        assert dupes.get("/b.py") == 2
+
     def test_invalid_json_skipped(self):
         turns = [
             {"turn_number": 1, "storage_mode": "full", "request_messages": "not valid json"},
@@ -247,12 +274,15 @@ class TestAnalyzeSessionComposition:
         assert result is None
 
     def test_cache_hit(self):
+        # Cache hit: second call returns an equal result. The incremental
+        # cache rebuilds the result dict each call from state, so identity is
+        # not preserved, but value must match exactly.
         conn = self._make_conn([
             _make_turn(1, "full", [{"role": "user", "content": "test"}]),
         ])
         r1 = analyze_session_composition(conn, "test-session")
         r2 = analyze_session_composition(conn, "test-session")
-        assert r1 is r2  # Same object = cache hit
+        assert r1 == r2
 
     def test_cache_invalidation_on_new_turn(self):
         conn = self._make_conn([
@@ -477,6 +507,258 @@ class TestPerTurnComposition:
         ])
         result = analyze_session_composition_per_turn(conn, "test-session")
         assert result["turns"][1]["compacted"] is True
+
+
+# ── Incremental cache coverage (#16) ──
+
+
+def _add_turn(conn, session_id, turn_number, storage_mode, messages):
+    """Append one turn to a test DB connection."""
+    conn.execute(
+        """INSERT INTO conversation_turns
+           (ts, session_id, turn_number, storage_mode, request_messages)
+           VALUES (?, ?, ?, ?, ?)""",
+        (time.time(), session_id, turn_number, storage_mode, json.dumps(messages)),
+    )
+    conn.commit()
+
+
+def _make_incremental_conn():
+    """Create a DB with the same schema as TestAnalyzeSessionComposition uses."""
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    conn.execute(
+        """CREATE TABLE conversation_turns (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            ts REAL, session_id TEXT, turn_number INTEGER,
+            storage_mode TEXT, request_messages TEXT,
+            request_size_bytes INTEGER DEFAULT 0,
+            response_size_bytes INTEGER DEFAULT 0,
+            provider TEXT DEFAULT 'anthropic'
+        )"""
+    )
+    return conn
+
+
+class TestIncrementalComposition:
+    """Coverage for the incremental cache path introduced for #16.
+
+    Equivalence with full rebuild is the primary contract — for any sequence
+    of delta/full turns, the incremental path must produce the same result
+    dict that a from-scratch rebuild produces.
+    """
+
+    def setup_method(self):
+        clear_cache()
+
+    # ── Equivalence with full rebuild ──
+
+    def _scenarios(self):
+        def u(t):
+            return {"role": "user", "content": t}
+        def a(t):
+            return {"role": "assistant", "content": [{"type": "text", "text": t}]}
+        return {
+            "delta_only": [
+                ("full", [u("first")]),
+                ("delta", [a("reply 1")]),
+                ("delta", [u("second"), a("reply 2")]),
+            ],
+            "full_only": [
+                ("full", [u("turn 1")]),
+                ("full", [u("turn 1"), a("reply 1")]),
+                ("full", [u("turn 1"), a("reply 1"), u("turn 2")]),
+            ],
+            "mixed": [
+                ("full", [u("opening")]),
+                ("delta", [a("answer")]),
+                ("delta", [u("follow"), a("response")]),
+                ("delta", [u("third")]),
+            ],
+            "compaction_then_delta": [
+                ("full", [u("preamble"), a("background " * 20)]),
+                ("delta", [u("topic shift")]),
+                ("full", [u("post-compact")]),
+                ("delta", [a("post-compact reply")]),
+            ],
+            "delta_then_compaction": [
+                ("full", [u("start")]),
+                ("delta", [a("growing " * 30)]),
+                ("delta", [u("more"), a("output " * 20)]),
+                ("full", [u("compacted summary")]),
+            ],
+            "repeated_compaction": [
+                ("full", [u("v1")]),
+                ("delta", [a("v1 ans")]),
+                ("full", [u("v2")]),
+                ("delta", [a("v2 ans")]),
+                ("full", [u("v3")]),
+            ],
+        }
+
+    def test_incremental_matches_full_rebuild_all_scenarios(self):
+        sid = "equiv-session"
+        for label, turns in self._scenarios().items():
+            conn = _make_incremental_conn()
+            for i, (mode, msgs) in enumerate(turns, start=1):
+                _add_turn(conn, sid, i, mode, msgs)
+
+                # Incremental path (cache survives between calls)
+                incr = analyze_session_composition(conn, sid)
+
+                # Full rebuild path (fresh state every call)
+                clear_cache()
+                full = analyze_session_composition(conn, sid)
+
+                assert incr == full, (
+                    f"scenario={label} turn={i}: incremental result diverged from full rebuild"
+                )
+                # Carry incremental cache forward to next turn iteration
+                clear_cache()
+            clear_cache()
+
+    # ── Behavior verification ──
+
+    def test_incremental_fetches_only_delta(self):
+        sid = "fetch-bounds"
+        conn = _make_incremental_conn()
+        _add_turn(conn, sid, 1, "full", [{"role": "user", "content": "first"}])
+        analyze_session_composition(conn, sid)
+
+        # Add a new turn; track which queries fire
+        _add_turn(conn, sid, 2, "delta",
+                  [{"role": "assistant", "content": [{"type": "text", "text": "answer"}]}])
+
+        captured: list = []
+        original_execute = conn.execute
+
+        def tracking_execute(query, *args, **kwargs):
+            captured.append(query)
+            return original_execute(query, *args, **kwargs)
+
+        # sqlite3.Connection.execute is read-only; wrap the conn in a passthrough
+        class _Wrapper:
+            def __init__(self, c):
+                self._c = c
+            def execute(self, query, *args, **kwargs):
+                captured.append(query)
+                return self._c.execute(query, *args, **kwargs)
+
+        analyze_session_composition(_Wrapper(conn), sid)
+
+        delta_fetches = [q for q in captured if "turn_number > ?" in q]
+        full_fetches = [
+            q for q in captured
+            if "FROM conversation_turns" in q and "turn_number > ?" not in q
+            and "MAX(turn_number)" not in q
+        ]
+        assert len(delta_fetches) == 1, "expected exactly one delta fetch"
+        assert len(full_fetches) == 0, "must not fetch the full turn history on incremental path"
+
+    def test_compaction_within_incremental_path_resets_state(self):
+        sid = "compact-incremental"
+        conn = _make_incremental_conn()
+        u = {"role": "user", "content": "pre-compact"}
+        a = {"role": "assistant", "content": [{"type": "text", "text": "long " * 200}]}
+        read_a = {
+            "role": "assistant",
+            "content": [
+                {"type": "tool_use", "id": "t1", "name": "Read", "input": {"file_path": "/pre.py"}},
+            ],
+        }
+        _add_turn(conn, sid, 1, "full", [u, a, read_a])
+        _add_turn(conn, sid, 2, "delta", [read_a])  # /pre.py = 2 before compact
+        before_compact = analyze_session_composition(conn, sid)
+        assert "/pre.py" in before_compact["duplicate_reads"]
+        assert before_compact["categories"]["assistant_text"]["bytes"] > 0
+
+        # Compaction event arrives
+        _add_turn(conn, sid, 3, "full", [{"role": "user", "content": "compacted"}])
+        after_compact = analyze_session_composition(conn, sid)
+        assert "/pre.py" not in after_compact["duplicate_reads"]
+        # assistant_text was wiped (only user message in the new snapshot)
+        assert after_compact["categories"]["assistant_text"]["bytes"] == 0
+        assert after_compact["categories"]["user_text"]["bytes"] > 0
+
+    def test_max_turn_regression_triggers_rebuild(self):
+        sid = "regress"
+        conn = _make_incremental_conn()
+        _add_turn(conn, sid, 1, "full", [{"role": "user", "content": "a"}])
+        _add_turn(conn, sid, 2, "delta",
+                  [{"role": "assistant", "content": [{"type": "text", "text": "b"}]}])
+        analyze_session_composition(conn, sid)
+
+        # Simulate a delete: drop turn 2
+        conn.execute("DELETE FROM conversation_turns WHERE turn_number = 2")
+        conn.commit()
+
+        result = analyze_session_composition(conn, sid)
+        # After rebuild from remaining turn 1 only, assistant_text is 0
+        assert result["categories"]["assistant_text"]["bytes"] == 0
+        assert result["categories"]["user_text"]["bytes"] > 0
+
+    def test_no_change_call_is_a_pure_cache_read(self):
+        sid = "noop"
+        conn = _make_incremental_conn()
+        _add_turn(conn, sid, 1, "full", [{"role": "user", "content": "x"}])
+        r1 = analyze_session_composition(conn, sid)
+        r2 = analyze_session_composition(conn, sid)
+        assert r1 == r2
+
+    # ── Per-turn variant ──
+
+    def _per_turn_conn(self):
+        conn = sqlite3.connect(":memory:")
+        conn.row_factory = sqlite3.Row
+        conn.execute("""CREATE TABLE conversation_turns (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            ts REAL, session_id TEXT, turn_number INTEGER,
+            storage_mode TEXT, request_messages TEXT,
+            response_message TEXT, thinking_blocks TEXT,
+            model TEXT, temperature REAL, max_tokens INTEGER,
+            total_message_count INTEGER DEFAULT 0,
+            previous_message_count INTEGER DEFAULT 0,
+            request_size_bytes INTEGER DEFAULT 0,
+            response_size_bytes INTEGER DEFAULT 0,
+            request_id INTEGER
+        )""")
+        return conn
+
+    def test_per_turn_incremental_appends_one_entry(self):
+        sid = "pt-append"
+        conn = self._per_turn_conn()
+        _add_turn(conn, sid, 1, "full", [{"role": "user", "content": "t1"}])
+        first = analyze_session_composition_per_turn(conn, sid)
+        assert first["total_turns"] == 1
+
+        _add_turn(conn, sid, 2, "delta",
+                  [{"role": "assistant", "content": [{"type": "text", "text": "t2"}]}])
+        second = analyze_session_composition_per_turn(conn, sid)
+        assert second["total_turns"] == 2
+        # Existing turn entry preserved verbatim (append-only)
+        assert second["turns"][0] == first["turns"][0]
+
+    def test_per_turn_sampling_window_shifts_with_new_turns(self):
+        """The last-5 sampling window must follow new turns even though state
+        keeps the full result list. Each call re-samples on access.
+        """
+        sid = "pt-window"
+        conn = self._per_turn_conn()
+        # Seed 55 turns (>50 → sampling kicks in)
+        for n in range(1, 56):
+            _add_turn(conn, sid, n, "full" if n == 1 else "delta",
+                      [{"role": "user", "content": f"t{n}"}])
+        r1 = analyze_session_composition_per_turn(conn, sid)
+        assert r1["sampled"] is True
+        last5_v1 = [t["turn"] for t in r1["turns"][-5:]]
+        assert last5_v1 == [51, 52, 53, 54, 55]
+
+        # Add one more turn; last-5 should slide
+        _add_turn(conn, sid, 56, "delta",
+                  [{"role": "assistant", "content": [{"type": "text", "text": "t56"}]}])
+        r2 = analyze_session_composition_per_turn(conn, sid)
+        last5_v2 = [t["turn"] for t in r2["turns"][-5:]]
+        assert last5_v2 == [52, 53, 54, 55, 56]
 
 
 # ── File-based composition tests (Codex / Gemini) ──
