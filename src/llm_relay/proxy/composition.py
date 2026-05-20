@@ -166,6 +166,37 @@ def _count_thinking_blocks(msg: dict) -> int:
 # ── Reconstruction ──
 
 
+def _classify_messages_delta(
+    messages: List[dict],
+) -> Tuple[Dict[str, int], Dict[str, int], Dict[str, Dict[str, int]], int]:
+    """Classify a list of messages into category byte totals + tool details.
+
+    Returns (totals, tool_call_counts, tool_byte_totals, thinking_count) where each
+    value is the contribution from `messages` alone. Callers either use the result
+    directly (final-state classification) or fold it into a running state
+    (incremental classification).
+    """
+    totals: Dict[str, int] = {cat: 0 for cat in CATEGORIES}
+    tool_call_counts: Dict[str, int] = defaultdict(int)
+    tool_byte_totals: Dict[str, Dict[str, int]] = defaultdict(lambda: {"use": 0, "result": 0})
+    thinking_count = 0
+
+    for msg in messages:
+        sizes = _classify_message(msg)
+        for cat in CATEGORIES:
+            totals[cat] += sizes.get(cat, 0)
+        for name in _extract_tool_names(msg):
+            tool_call_counts[name] += 1
+        for name, bytes_info in _extract_tool_use_bytes(msg).items():
+            if name == "__result__":
+                continue
+            tool_byte_totals[name]["use"] += bytes_info["use"]
+            tool_byte_totals[name]["result"] += bytes_info["result"]
+        thinking_count += _count_thinking_blocks(msg)
+
+    return totals, dict(tool_call_counts), dict(tool_byte_totals), thinking_count
+
+
 def _reconstruct_and_classify(
     turns_data: List[dict],
 ) -> Tuple[Dict[str, int], int, Dict[str, int], Dict[str, int], Dict[str, Dict[str, int]], int]:
@@ -196,35 +227,16 @@ def _reconstruct_and_classify(
         else:
             accumulated.extend(messages)
 
-        # Track reads and tool calls
         for msg in messages:
             for target in _extract_read_targets(msg):
                 read_counts[target] += 1
 
-    # Classify accumulated context + extract tool details
-    totals: Dict[str, int] = {cat: 0 for cat in CATEGORIES}
-    tool_call_counts: Dict[str, int] = defaultdict(int)
-    tool_byte_totals: Dict[str, Dict[str, int]] = defaultdict(lambda: {"use": 0, "result": 0})
-    thinking_count = 0
-
-    for msg in accumulated:
-        sizes = _classify_message(msg)
-        for cat in CATEGORIES:
-            totals[cat] += sizes.get(cat, 0)
-        # Per-tool counting
-        for name in _extract_tool_names(msg):
-            tool_call_counts[name] += 1
-        for name, bytes_info in _extract_tool_use_bytes(msg).items():
-            if name == "__result__":
-                continue
-            tool_byte_totals[name]["use"] += bytes_info["use"]
-            tool_byte_totals[name]["result"] += bytes_info["result"]
-        thinking_count += _count_thinking_blocks(msg)
+    totals, tool_call_counts, tool_byte_totals, thinking_count = _classify_messages_delta(accumulated)
 
     total_bytes = sum(totals.values())
     dupes = {k: v for k, v in read_counts.items() if v > 1}
 
-    return totals, total_bytes, dupes, dict(tool_call_counts), dict(tool_byte_totals), thinking_count
+    return totals, total_bytes, dupes, tool_call_counts, tool_byte_totals, thinking_count
 
 
 # ── Public API ──
