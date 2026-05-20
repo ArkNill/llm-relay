@@ -278,6 +278,168 @@ def env_fingerprint(fmt: str, no_doctor: bool, ports_str: str) -> None:
         click.echo(json.dumps(snapshot, indent=2, ensure_ascii=False))
 
 
+# ── verify ──────────────────────────────────────────────────────────────────
+
+
+_VERIFY_FORMAT_OPTION = click.option(
+    "--format", "fmt",
+    type=click.Choice(["text", "json"]),
+    default="text",
+    help="Output format (default: text, json for agent consumption).",
+)
+_VERIFY_QUIET_OPTION = click.option(
+    "--quiet", "-q",
+    is_flag=True,
+    help="Suppress checks that passed; show only warn/fail/skipped.",
+)
+_VERIFY_NO_REMEDIATION_OPTION = click.option(
+    "--no-remediation",
+    is_flag=True,
+    help="Omit remediation hints from output.",
+)
+
+
+def _render_verify_report(report, fmt: str, quiet: bool, no_remediation: bool) -> int:
+    """Render a VerifyReport. Returns the desired exit code."""
+    import json as _json
+
+    data = report.to_dict()
+
+    if fmt == "json":
+        if no_remediation:
+            for c in data["checks"]:
+                c.pop("remediation", None)
+        if quiet:
+            data["checks"] = [c for c in data["checks"] if c["status"] != "pass"]
+        click.echo(_json.dumps(data, indent=2, ensure_ascii=False))
+    else:
+        status_styles = {"pass": "green", "fail": "red", "warn": "yellow", "skipped": "blue"}
+        click.echo("target:  {}".format(data["target"]))
+        click.echo("overall: {}".format(
+            click.style(data["overall"], fg=status_styles.get(data["overall"], ""))
+        ))
+        summary = data["summary"]
+        click.echo("summary: {}".format(
+            " ".join("{}={}".format(k, v) for k, v in summary.items())
+        ))
+        click.echo("")
+        for c in data["checks"]:
+            if quiet and c["status"] == "pass":
+                continue
+            status_str = click.style(
+                "[{:7s}]".format(c["status"]),
+                fg=status_styles.get(c["status"], ""),
+            )
+            click.echo("{} {}: {}".format(status_str, c["id"], c["detail"]))
+            if c.get("remediation") and not no_remediation:
+                click.echo("          → {}".format(c["remediation"]))
+        click.echo("")
+
+    # Exit code: 0 on pass/warn, 1 on fail.
+    return 0 if data["overall"] != "fail" else 1
+
+
+@cli.group("verify")
+def verify_group() -> None:
+    """Idempotent verification checks for install / config / integration.
+
+    Designed to be consumed by an agent automating an llm-relay install:
+    `--format json` emits a stable schema (see src/llm_relay/verify/__init__.py).
+
+    Exit code is 0 on pass/warn, 1 on fail.
+    """
+
+
+@verify_group.command("install")
+@_VERIFY_FORMAT_OPTION
+@_VERIFY_QUIET_OPTION
+@_VERIFY_NO_REMEDIATION_OPTION
+def verify_install_cmd(fmt: str, quiet: bool, no_remediation: bool) -> None:
+    """Verify the llm-relay package itself is correctly installed."""
+    from llm_relay.verify.install import verify_install
+
+    report = verify_install()
+    exit_code = _render_verify_report(report, fmt, quiet, no_remediation)
+    raise SystemExit(exit_code)
+
+
+@verify_group.command("config")
+@click.option("--port", default=8083, type=int, help="Proxy port to probe (default: 8083).")
+@_VERIFY_FORMAT_OPTION
+@_VERIFY_QUIET_OPTION
+@_VERIFY_NO_REMEDIATION_OPTION
+def verify_config_cmd(port: int, fmt: str, quiet: bool, no_remediation: bool) -> None:
+    """Verify the local llm-relay config (db, config file, port)."""
+    from llm_relay.verify.config import verify_config
+
+    report = verify_config(port=port)
+    exit_code = _render_verify_report(report, fmt, quiet, no_remediation)
+    raise SystemExit(exit_code)
+
+
+@verify_group.command("integration")
+@click.option(
+    "--cli", "cli_id",
+    type=click.Choice(["claude-code", "openai-codex", "gemini-cli", "all"]),
+    default="all",
+    help="Which CLI integration to verify (default: all).",
+)
+@click.option(
+    "--live",
+    is_flag=True,
+    help="Also probe /_health on the proxy port (requires running server).",
+)
+@click.option("--port", default=8083, type=int, help="Proxy port for --live (default: 8083).")
+@_VERIFY_FORMAT_OPTION
+@_VERIFY_QUIET_OPTION
+@_VERIFY_NO_REMEDIATION_OPTION
+def verify_integration_cmd(
+    cli_id: str,
+    live: bool,
+    port: int,
+    fmt: str,
+    quiet: bool,
+    no_remediation: bool,
+) -> None:
+    """Verify a CLI is wired through llm-relay (settings, proxy route, MCP)."""
+    from llm_relay.verify.integration import verify_integration
+
+    report = verify_integration(cli_id, live=live, port=port)
+    exit_code = _render_verify_report(report, fmt, quiet, no_remediation)
+    raise SystemExit(exit_code)
+
+
+@verify_group.command("all")
+@click.option("--port", default=8083, type=int, help="Proxy port (default: 8083).")
+@click.option("--live", is_flag=True, help="Include live proxy /_health probe.")
+@_VERIFY_FORMAT_OPTION
+@_VERIFY_QUIET_OPTION
+@_VERIFY_NO_REMEDIATION_OPTION
+def verify_all_cmd(
+    port: int,
+    live: bool,
+    fmt: str,
+    quiet: bool,
+    no_remediation: bool,
+) -> None:
+    """Run install + config + integration (all CLIs) and aggregate."""
+    from llm_relay.verify import aggregate
+    from llm_relay.verify.config import verify_config
+    from llm_relay.verify.install import verify_install
+    from llm_relay.verify.integration import verify_integration
+
+    combined = aggregate(
+        "all",
+        [
+            verify_install(),
+            verify_config(port=port),
+            verify_integration("all", live=live, port=port),
+        ],
+    )
+    exit_code = _render_verify_report(combined, fmt, quiet, no_remediation)
+    raise SystemExit(exit_code)
+
+
 @cli.command()
 @click.option("--host", default="0.0.0.0", help="Bind address.")
 @click.option("--port", "-p", default=8083, type=int, help="Listen port.")
