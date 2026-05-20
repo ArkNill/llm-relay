@@ -127,6 +127,24 @@ llm-relay-mcp               # stdio transport, 8 tools
 llm-relay connect   # Auto-configures Claude Code proxy
 ```
 
+### Agent-driven setup
+
+If you would rather have your existing coding agent (Claude Code, Codex,
+Gemini) run the install for you, point it at
+[`docs/AGENT_SETUP.md`](docs/AGENT_SETUP.md). It is a structured playbook
+the agent follows step by step, using `llm-relay env-fingerprint` and
+`llm-relay verify` to probe and check each step without scraping output.
+
+```bash
+llm-relay env-fingerprint --format json        # state snapshot
+llm-relay verify install --format json         # is the package usable?
+llm-relay verify config --format json          # is local state set up?
+llm-relay verify integration --cli claude-code # is the CLI wired?
+llm-relay verify all                            # everything at once
+```
+
+Exit code is 0 on pass/warn, 1 on fail.
+
 ## CLI Status
 
 | CLI | Status |
