@@ -83,7 +83,7 @@ def _render_session_panel(s: Dict[str, Any]) -> Panel:
     # ── Token metrics ──
     current = s.get("current_ctx", 0)
     peak = s.get("peak_ctx", 0)
-    ceiling = s.get("ceiling", 665_000)
+    ceiling = s.get("ceiling", 1_000_000)
     recent = s.get("recent_peak", 0)
     cumul = s.get("cumul_unique", 0)
     zone = s.get("zone", "green")
