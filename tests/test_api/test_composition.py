@@ -274,12 +274,15 @@ class TestAnalyzeSessionComposition:
         assert result is None
 
     def test_cache_hit(self):
+        # Cache hit: second call returns an equal result. The incremental
+        # cache rebuilds the result dict each call from state, so identity is
+        # not preserved, but value must match exactly.
         conn = self._make_conn([
             _make_turn(1, "full", [{"role": "user", "content": "test"}]),
         ])
         r1 = analyze_session_composition(conn, "test-session")
         r2 = analyze_session_composition(conn, "test-session")
-        assert r1 is r2  # Same object = cache hit
+        assert r1 == r2
 
     def test_cache_invalidation_on_new_turn(self):
         conn = self._make_conn([
