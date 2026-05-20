@@ -178,6 +178,33 @@ class TestReconstructAndClassify:
         assert "/tmp/test.py" in dupes
         assert dupes["/tmp/test.py"] == 3
 
+    def test_compaction_resets_read_counts(self):
+        """Pre-compaction reads should not appear in duplicate_reads after a
+        storage_mode='full' turn — those files are no longer in the accumulated
+        context, so counting them as duplicates of post-compaction reads is wrong.
+        """
+        read_a = {
+            "role": "assistant",
+            "content": [
+                {"type": "tool_use", "id": "t1", "name": "Read", "input": {"file_path": "/a.py"}},
+            ],
+        }
+        read_b = {
+            "role": "assistant",
+            "content": [
+                {"type": "tool_use", "id": "t2", "name": "Read", "input": {"file_path": "/b.py"}},
+            ],
+        }
+        turns = [
+            _make_turn(1, "full", [read_a]),
+            _make_turn(2, "delta", [read_a]),         # /a.py reads = 2 (pre-compaction)
+            _make_turn(3, "full", [read_b]),          # compaction → reset
+            _make_turn(4, "delta", [read_b]),         # /b.py reads = 2 (post-compaction)
+        ]
+        _, _, dupes, _tc, _tb, _thc = _reconstruct_and_classify(turns)
+        assert "/a.py" not in dupes, "pre-compaction reads should not survive"
+        assert dupes.get("/b.py") == 2
+
     def test_invalid_json_skipped(self):
         turns = [
             {"turn_number": 1, "storage_mode": "full", "request_messages": "not valid json"},

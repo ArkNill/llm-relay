@@ -224,6 +224,10 @@ def _reconstruct_and_classify(
 
         if storage_mode == "full":
             accumulated = list(messages)
+            # Compaction replaces the accumulated context, so prior reads
+            # are no longer present. Reset read_counts so duplicate_reads
+            # reflects only files still in the current accumulated state.
+            read_counts = defaultdict(int)
         else:
             accumulated.extend(messages)
 
