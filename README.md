@@ -18,6 +18,37 @@ Unified LLM usage management — API proxy, session diagnostics, multi-CLI orche
 
 ## Install
 
+### One-command install (Windows native)
+
+For Windows users who just want it running, after Python 3.9+ is installed:
+
+```powershell
+irm https://raw.githubusercontent.com/ArkNill/llm-relay/main/scripts/install.ps1 | iex
+```
+
+That script `pip install`s `llm-relay[all]`, starts the proxy as a Windows
+background daemon, health-gates it, and only then routes Claude Code through
+it. Routing is never activated unless the proxy actually responds, so this is
+safe to run on a machine where Claude Code is already configured -- the
+worst case is the install aborts with a clear message and leaves your
+existing setup untouched. See [Prerequisites](#prerequisites) below for the
+Python requirement and venv guidance.
+
+If you would rather do it by hand (Linux, macOS, or just to see each step),
+keep reading.
+
+### Prerequisites
+
+- **Python 3.9 or newer** (3.12 recommended). We do not bundle a Python
+  runtime; install it once and llm-relay reuses it.
+  - Windows: `winget install Python.Python.3.12` or
+    [python.org/downloads](https://www.python.org/downloads/)
+  - macOS: `brew install python@3.12`
+  - Linux: your distribution's package manager (`apt install python3.12`,
+    `dnf install python3.12`, etc.)
+- **(Recommended) A virtual environment.** Clean uninstall, no PATH
+  surprises, isolated dependency tree.
+
 ### 1. Set up Python environment
 
 <details>
