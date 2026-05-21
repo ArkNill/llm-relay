@@ -168,4 +168,38 @@ class TestRunInit:
         monkeypatch.setenv("HOME", str(tmp_path))
         monkeypatch.setenv("LLM_RELAY_DB", str(tmp_path / ".llm-relay" / "usage.db"))
         summary = run_init(port=59997, skip_server=True)
-        assert summary["server"] is None or "not started" in str(summary.get("server", ""))
+        # New contract (atomic ordering, 0.9.6): server is skipped explicitly
+        server_str = str(summary.get("server", ""))
+        assert "skip" in server_str.lower() or "not started" in server_str.lower(), \
+            "server status should indicate it was skipped, got: {!r}".format(server_str)
+
+    def test_skip_server_does_not_write_settings_json(self, tmp_path, monkeypatch):
+        """Regression for the 2026-05-21 dogfood failure.
+
+        `--skip-server` previously still wrote ANTHROPIC_BASE_URL into
+        ~/.claude/settings.json, which broke any Claude Code session that
+        tried to reach the (non-existent) proxy on the next request. After
+        the atomic re-ordering in 0.9.6, settings.json must remain
+        untouched when the server isn't started.
+        """
+        # Claude Code config dir + dummy settings.json to ensure init would
+        # otherwise consider it present.
+        claude_dir = tmp_path / ".claude"
+        claude_dir.mkdir()
+        settings_path = claude_dir / "settings.json"
+        original_settings = '{"numStartups": 1}'
+        settings_path.write_text(original_settings)
+
+        monkeypatch.setenv("HOME", str(tmp_path))
+        monkeypatch.setenv("USERPROFILE", str(tmp_path))  # Windows path used by some helpers
+        monkeypatch.setenv("LLM_RELAY_DB", str(tmp_path / ".llm-relay" / "usage.db"))
+
+        summary = run_init(port=59996, skip_server=True)
+
+        # settings.json must NOT have been touched
+        assert settings_path.read_text() == original_settings, \
+            "settings.json was modified despite --skip-server (atomic ordering bug)"
+        # claude_code entry should explicitly say routing was not configured
+        cc_msgs = summary.get("claude_code", [])
+        assert any("NOT configured" in m or "skipped" in m.lower() for m in cc_msgs), \
+            "summary should signal routing was intentionally skipped, got: {!r}".format(cc_msgs)

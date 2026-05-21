@@ -272,9 +272,17 @@ def _write_config(db_dir: Path, port: int) -> str:
 
 
 def _start_server(port: int) -> Tuple[bool, str]:
-    """Start the proxy server in background."""
+    """Start the proxy server in background.
+
+    Windows delegates to win_service.start_daemon which uses pythonw plus
+    CREATE_BREAKAWAY_FROM_JOB so the server survives the parent SSH or
+    terminal exit. The plain Popen path below would still leave the child
+    tied to its job object on Windows and the OS kills it when the parent
+    disconnects (observed during 2026-05-21 hmj PC dogfood).
+
+    POSIX uses uvicorn in a new session (setsid), which is sufficient.
+    """
     if _is_port_in_use(port):
-        # Verify it's llm-relay
         try:
             import urllib.request
             resp = urllib.request.urlopen(
@@ -287,21 +295,23 @@ def _start_server(port: int) -> Tuple[bool, str]:
             pass
         return False, "Port {} is in use by another process".format(port)
 
-    # Start uvicorn in background
+    if sys.platform == "win32":
+        try:
+            from llm_relay.win_service import start_daemon
+        except ImportError as exc:
+            return False, "Windows daemon helper unavailable: {}".format(exc)
+        ok = start_daemon(port=port)
+        if ok:
+            return True, "Started on port {} (Windows daemon via pythonw)".format(port)
+        return False, "Windows daemon start failed (see service-error.log under db dir)"
+
+    # POSIX: uvicorn in a detached session
     try:
         env = os.environ.copy()
         env["LLM_RELAY_HISTORY"] = "1"
 
         log_path = db_dir_for_env() / "server.log"
         log_file = open(str(log_path), "a")  # noqa: SIM115
-
-        # Detach the server process so it survives parent exit.
-        # Windows: CREATE_NEW_PROCESS_GROUP; POSIX: start_new_session (setsid).
-        detach_kwargs = {}  # type: dict
-        if sys.platform == "win32":
-            detach_kwargs["creationflags"] = subprocess.CREATE_NEW_PROCESS_GROUP
-        else:
-            detach_kwargs["start_new_session"] = True
 
         proc = subprocess.Popen(
             [
@@ -315,10 +325,9 @@ def _start_server(port: int) -> Tuple[bool, str]:
             stdout=log_file,
             stderr=log_file,
             stdin=subprocess.DEVNULL,
-            **detach_kwargs,
+            start_new_session=True,
         )
 
-        # Wait for startup
         for _ in range(20):
             time.sleep(0.5)
             if _is_port_in_use(port):
@@ -439,32 +448,75 @@ def run_init(
     # Step 5: Initialize knowledge directory
     summary["knowledge"] = _init_knowledge(db_dir, dry_run=dry_run)
 
-    # Step 6: Configure Claude Code
     has_cc = any(c["id"] == "claude-code" for c in summary["clis"])
+
+    # ── Atomic ordering rationale (2026-05-21 dogfood lesson) ────────────
+    # We DO NOT mutate ~/.claude/settings.json's ANTHROPIC_BASE_URL until
+    # the proxy is actually serving traffic. Otherwise a fresh Claude Code
+    # session next launched by the user (or the agent running this command
+    # under Claude Code) reroutes to a port that isn't listening, and the
+    # symptom looks like a generic API connection error.
+    #
+    # Order:
+    #   start server  →  health-gate  →  write settings.json
+    # `--skip-server` therefore also skips the settings.json mutation;
+    # we never half-configure.
+
+    # Step 6: Start server (or honour --skip-server / --dry-run)
+    if skip_server:
+        summary["server"] = "Skipped (--skip-server)"
+        summary["health"] = "Skipped (--skip-server)"
+        if has_cc:
+            summary["claude_code"] = [
+                "Claude Code routing NOT configured (--skip-server). "
+                "Run `llm-relay serve` and re-run `llm-relay init` to activate.",
+            ]
+        else:
+            summary["claude_code"] = ["Claude Code not detected (skipped)"]
+        summary["urls"] = {}
+        return summary
+
+    if dry_run:
+        summary["server"] = "[dry-run] Would start server on port {}".format(port)
+        summary["health"] = "[dry-run] Would health-gate before routing"
+        if has_cc:
+            summary["claude_code"] = ["[dry-run] Would configure Claude Code routing AFTER health-gate passes"]
+        else:
+            summary["claude_code"] = ["Claude Code not detected (skipped)"]
+        summary["urls"] = {
+            "dashboard": "http://localhost:{}/dashboard/".format(port),
+            "display": "http://localhost:{}/display/".format(port),
+            "history": "http://localhost:{}/history/".format(port),
+            "proxy": "http://localhost:{}".format(port),
+        }
+        return summary
+
+    ok, msg = _start_server(port)
+    summary["server"] = msg
+    if not ok:
+        summary["health"] = "Skipped (server not running)"
+        summary["claude_code"] = ["Skipped (server not running -- routing NOT modified)"]
+        summary["urls"] = {}
+        return summary
+
+    # Step 7: Health gate -- only proceed if /_health responds
+    all_ok, results = _health_check(port)
+    summary["health"] = results
+    if not all_ok:
+        summary["claude_code"] = [
+            "Skipped (server started but /_health failed -- routing NOT modified, "
+            "inspect server log before re-running init).",
+        ]
+        summary["urls"] = {}
+        return summary
+
+    # Step 8: Configure Claude Code (only after server is verified healthy)
     if has_cc:
-        summary["claude_code"] = _configure_claude_code(port, dry_run=dry_run)
+        summary["claude_code"] = _configure_claude_code(port, dry_run=False)
     else:
         summary["claude_code"] = ["Claude Code not detected (skipped)"]
 
-    # Step 6: Start server
-    if not skip_server and not dry_run:
-        ok, msg = _start_server(port)
-        summary["server"] = msg
-        if not ok:
-            summary["health"] = "Skipped (server not running)"
-            summary["urls"] = {}
-            return summary
-    elif dry_run:
-        summary["server"] = "[dry-run] Would start server on port {}".format(port)
-
-    # Step 7: Health check
-    if not skip_server and not dry_run:
-        all_ok, results = _health_check(port)
-        summary["health"] = results
-    else:
-        summary["health"] = "Skipped"
-
-    # Step 8: URLs
+    # Step 9: URLs
     summary["urls"] = {
         "dashboard": "http://localhost:{}/dashboard/".format(port),
         "display": "http://localhost:{}/display/".format(port),

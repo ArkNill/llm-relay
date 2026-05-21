@@ -4,16 +4,72 @@ All notable changes to llm-relay are documented here.
 
 ## [Unreleased]
 
+## [0.9.6] - 2026-05-21
+
+> Single-command Windows install + atomic `llm-relay init`. Surfaced by
+> 2026-05-21 hmj PC dogfood: the previous `init` would write
+> `ANTHROPIC_BASE_URL` into `~/.claude/settings.json` before the proxy
+> server was actually serving traffic, so any running Claude Code session
+> would route to a dead port and the symptom looked like a generic API
+> connection error. This release makes that ordering atomic and ships a
+> PowerShell one-line installer.
+
+### Added
+- **One-command Windows installer** (`scripts/install.ps1`): for users
+  with Python 3.9+ already installed, the entire install flow collapses
+  to one PowerShell command:
+  ```powershell
+  irm https://raw.githubusercontent.com/ArkNill/llm-relay/main/scripts/install.ps1 | iex
+  ```
+  The script verifies Python, detects an active venv (uses it if
+  present, else falls back to `--user` with a PATH hint), `pip install`s
+  `llm-relay[all]`, then calls `llm-relay init` which handles
+  daemon + health-gate + routing in the right order. Documented in
+  `README.md` "One-command install (Windows native)".
+- **README "Prerequisites" section** spelling out the Python 3.9+
+  requirement, the recommended venv setup, and platform-specific install
+  hints (winget / Homebrew / apt).
+
+### Changed
+- **`llm-relay init` is now atomic** (`setup_init.run_init`). New ordering:
+  1. Detect CLIs, find port, init DB, write config, init knowledge dir.
+  2. **Start the proxy server.**
+  3. Health-gate (`/_health` polling).
+  4. Configure Claude Code (`ANTHROPIC_BASE_URL`, MCP) **only after**
+     the server is verified healthy.
+  Routing is never activated unless the proxy actually responds, so an
+  abort at step 2 or step 3 leaves `~/.claude/settings.json` untouched
+  -- no more "ConnectionRefused on port 8083" surprises in your next
+  Claude Code session.
+- **`--skip-server` now also skips routing**. Previously it was a UX
+  trap: server skipped, but `settings.json` still gained an
+  `ANTHROPIC_BASE_URL` pointing at the not-running port. Now
+  `--skip-server` skips the server, the health gate, AND the
+  Claude Code routing change as a single decision. The summary message
+  surfaces this explicitly so a follow-up `llm-relay serve` + re-run is
+  the documented path to enabling routing.
+- **Windows background daemon goes through `win_service.start_daemon`**
+  (`_start_server` in `setup_init.py`). The previous Popen + 
+  `CREATE_NEW_PROCESS_GROUP` left the proxy tied to its job object on
+  Windows so it died when the parent SSH session disconnected (observed
+  during the 2026-05-21 dogfood). The win_service path uses pythonw plus
+  `CREATE_BREAKAWAY_FROM_JOB`, which detaches cleanly.
+
+### Tests
+- New `test_skip_server_does_not_write_settings_json` regression in
+  `tests/test_api/test_init.py` pins the atomic contract.
+
 ### Fixed
-- **Docker image build** (`Dockerfile`): removed the unconditional
-  `COPY vendor/tokpress /tmp/tokpress` + `pip install` step. The vendor
-  source is kept outside the repository, so the COPY always failed in
-  GitHub Actions and the Docker workflow has been broken on every tag
-  since `v0.9.2`. The proxy already imports `tokpress` inside a
-  `try/except ImportError` guard, so the image runs unchanged when the
-  package is absent (`_tokpress_available` simply stays `False`). The
-  v0.9.5 image is rebuilt via `gh workflow run docker.yml -f tag=0.9.5`
-  after this change lands on `main`.
+- **Docker image build** (`Dockerfile`, 0.9.5 carry-over): removed the
+  unconditional `COPY vendor/tokpress /tmp/tokpress` + `pip install`
+  step. The vendor source is kept outside the repository, so the COPY
+  always failed in GitHub Actions and the Docker workflow had been
+  broken on every tag since v0.9.2. The proxy already imports `tokpress`
+  inside a `try/except ImportError` guard, so the image runs unchanged
+  when the package is absent (`_tokpress_available` simply stays
+  `False`). The v0.9.5 image was rebuilt via
+  `gh workflow run docker.yml -f tag=0.9.5` after the change landed on
+  main; the v0.9.6 image rebuilds automatically on the new tag.
 
 ## [0.9.5] - 2026-05-21
 
