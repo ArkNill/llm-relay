@@ -4,6 +4,25 @@ All notable changes to llm-relay are documented here.
 
 ## [Unreleased]
 
+## [0.9.5] - 2026-05-21
+
+> Hotfix release surfaced by dogfooding `verify install` and `--help` on a
+> Windows host immediately after 0.9.4 went live on PyPI.
+
+### Fixed
+- **`__version__` was stale at `0.9.2`** (`src/llm_relay/__init__.py`,
+  `src/llm_relay/detect/__init__.py`). The 0.9.4 release bumped only
+  `pyproject.toml`, leaving the importable runtime version out of sync;
+  `verify install`'s `version_consistency` check correctly flagged this
+  as a warn. Both sources now read `0.9.5`.
+- **`UnicodeEncodeError` on `--help` under Windows + Korean locale (cp949)**
+  (`src/llm_relay/detect/cli.py`). Three occurrences of the em-dash
+  character (`—`) inside Click docstrings / `click.echo` calls were
+  unprintable on cp949 stdout and caused `llm-relay --help` to crash
+  before showing any subcommands. Replaced with ASCII `--`. No behavior
+  change beyond making the command actually usable on Windows-Korean
+  hosts.
+
 ## [0.9.4] - 2026-05-21
 
 > First PyPI release since 0.9.1. Collapses the locally-tagged 0.9.2 and 0.9.3

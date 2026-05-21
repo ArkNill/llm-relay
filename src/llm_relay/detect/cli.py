@@ -506,7 +506,7 @@ def top(host: str, port: int, refresh: float) -> None:
 @click.option("--skip-server", is_flag=True, help="Configure only, don't start the server.")
 @click.option("--dry-run", is_flag=True, help="Show what would be done without making changes.")
 def init(port: int, skip_server: bool, dry_run: bool) -> None:
-    """One-command setup — detect CLIs, configure proxy, start server.
+    """One-command setup -- detect CLIs, configure proxy, start server.
 
     \b
     What this does:
@@ -578,7 +578,7 @@ def init(port: int, skip_server: bool, dry_run: bool) -> None:
             if result.get("ok"):
                 click.echo("  {} {}".format(click.style("OK", fg="green"), name))
             else:
-                click.echo("  {} {} — {}".format(
+                click.echo("  {} {} -- {}".format(
                     click.style("FAIL", fg="red"), name, result.get("error", ""),
                 ))
                 all_ok = False
@@ -599,7 +599,7 @@ def init(port: int, skip_server: bool, dry_run: bool) -> None:
 
     if dry_run:
         click.echo()
-        click.echo("(dry run — no changes were made)")
+        click.echo("(dry run -- no changes were made)")
 
 
 @cli.group()
