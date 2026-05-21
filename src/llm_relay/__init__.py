@@ -1,7 +1,7 @@
 """llm-relay: Unified LLM usage management -- proxy, diagnostics, orchestration.
 
-Unified LLM usage management — API proxy, session diagnostics, multi-CLI orchestration.
+Unified LLM usage management -- API proxy, session diagnostics, multi-CLI orchestration.
 Part of the Mirror Agent ecosystem (open-network DLC).
 """
 
-__version__ = "0.9.2"
+__version__ = "0.9.5"
