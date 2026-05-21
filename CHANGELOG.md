@@ -4,6 +4,17 @@ All notable changes to llm-relay are documented here.
 
 ## [Unreleased]
 
+### Fixed
+- **Docker image build** (`Dockerfile`): removed the unconditional
+  `COPY vendor/tokpress /tmp/tokpress` + `pip install` step. The vendor
+  source is kept outside the repository, so the COPY always failed in
+  GitHub Actions and the Docker workflow has been broken on every tag
+  since `v0.9.2`. The proxy already imports `tokpress` inside a
+  `try/except ImportError` guard, so the image runs unchanged when the
+  package is absent (`_tokpress_available` simply stays `False`). The
+  v0.9.5 image is rebuilt via `gh workflow run docker.yml -f tag=0.9.5`
+  after this change lands on `main`.
+
 ## [0.9.5] - 2026-05-21
 
 > Hotfix release surfaced by dogfooding `verify install` and `--help` on a

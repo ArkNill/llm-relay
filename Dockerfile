@@ -5,9 +5,11 @@ WORKDIR /app
 # Install build deps
 RUN pip install --no-cache-dir hatchling
 
-# Install tokpress (from vendored copy)
-COPY vendor/tokpress /tmp/tokpress
-RUN pip install --no-cache-dir /tmp/tokpress && rm -rf /tmp/tokpress
+# tokpress is an optional compression layer the proxy will use if it can
+# import it at runtime (see src/llm_relay/proxy/proxy.py -- ImportError
+# is caught and the feature simply stays disabled). Its sources live
+# outside this repository, so the Docker image ships without it; nothing
+# else in the proxy depends on it.
 
 # Install llm-relay dependencies
 COPY pyproject.toml README.md ./
