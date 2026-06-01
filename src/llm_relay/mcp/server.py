@@ -17,8 +17,9 @@ mcp = FastMCP(
     "llm-relay",
     instructions=(
         "CLI orchestration tools for delegating tasks to Claude Code, "
-        "OpenAI Codex, and Gemini CLI. Provides smart routing, "
-        "usage tracking, and multi-CLI session diagnostics."
+        "OpenAI Codex, and Gemini CLI, plus HTTP-API delegation for "
+        "providers without a local CLI (currently xAI Grok). Provides "
+        "smart routing, usage tracking, and multi-CLI session diagnostics."
     ),
 )
 
@@ -129,22 +130,127 @@ def cli_delegate(
     })
 
 
+# ── Tool 1b: api_delegate ──
+
+
+@mcp.tool()
+def api_delegate(
+    provider: str,
+    prompt: str,
+    model: str = "",
+    system: str = "",
+    timeout: int = 120,
+    max_tokens: int = 4000,
+) -> str:
+    """Delegate a task to an HTTP-only LLM provider (no local CLI binary).
+
+    Mirrors cli_delegate but targets providers that expose only an HTTP API,
+    not a CLI tool. Currently supported: "grok" (xAI Grok via chat-completions).
+
+    API key resolution: reads from a file path first, then env var.
+    For grok: ~/.llm-relay/grok.key (or XAI_API_KEY_PATH); falls back to
+    ~/grok.key for backward compatibility; finally to XAI_API_KEY env var.
+
+    Args:
+        provider: Which provider to use ("grok")
+        prompt: The user-role prompt content
+        model: Optional model override (default: grok-4.3 for grok)
+        system: Optional system-role prompt to prepend
+        timeout: Request timeout in seconds (default 120)
+        max_tokens: Max completion tokens (default 4000)
+    """
+    from llm_relay.orch.api_executor import execute_api, list_api_providers
+    from llm_relay.orch.executor import prompt_hash, prompt_preview
+
+    if provider not in list_api_providers():
+        return _json({
+            "success": False,
+            "error": "Unknown API provider {!r}. Available: {}".format(
+                provider, list_api_providers()
+            ),
+        })
+
+    result = execute_api(
+        provider,
+        prompt,
+        model=model or None,
+        system=system or None,
+        timeout=timeout,
+        max_tokens=max_tokens,
+    )
+
+    # Log to delegation DB using the same surface as cli_delegate.
+    try:
+        from llm_relay.orch.db import get_orch_conn, log_delegation
+        conn = get_orch_conn()
+        log_delegation(
+            conn,
+            cli_id=result.cli_id,
+            auth_method=result.auth_method.value,
+            prompt_hash=prompt_hash(prompt),
+            prompt_preview=prompt_preview(prompt),
+            model=model or None,
+            working_dir=None,
+            success=result.success,
+            exit_code=result.exit_code,
+            duration_ms=result.duration_ms,
+            output_chars=len(result.output),
+            error=result.error,
+            strategy="api-direct",
+        )
+        conn.close()
+    except Exception:
+        logger.debug("Failed to log api_delegate", exc_info=True)
+
+    if os.getenv("LLM_RELAY_HISTORY", "0") == "1":
+        try:
+            from llm_relay.proxy.db import get_conn as get_proxy_conn
+            from llm_relay.proxy.history import capture_delegation_turn
+            hconn = get_proxy_conn()
+            capture_delegation_turn(
+                hconn,
+                session_id="api-delegation-{}".format(int(time.time() * 1000)),
+                cli_id=result.cli_id,
+                prompt=prompt,
+                output=result.output,
+                model=model or None,
+                duration_ms=result.duration_ms,
+            )
+        except Exception:
+            logger.debug("Failed to capture api_delegate history", exc_info=True)
+
+    return _json({
+        "success": result.success,
+        "cli_id": result.cli_id,
+        "output": result.output,
+        "error": result.error,
+        "duration_ms": round(result.duration_ms, 1),
+        "exit_code": result.exit_code,
+        "model_used": result.model_used,
+    })
+
+
 # ── Tool 2: cli_status ──
 
 
 @mcp.tool()
 def cli_status() -> str:
-    """Check which CLI tools are installed and authenticated.
+    """Check which CLI tools and API providers are installed/authenticated.
 
     Returns the status of all registered CLI tools (Claude Code, Codex, Gemini)
-    including installation path, authentication status, and preferred auth method.
+    plus HTTP-only providers wired into api_delegate (currently xAI Grok).
+    Each entry includes installation/authentication status and the preferred
+    auth method. CLI tools and API providers are distinguished by the "kind"
+    field ("cli-binary" vs "http-api").
     """
+    from llm_relay.orch.api_executor import api_provider_status, list_api_providers
     from llm_relay.orch.discovery import discover_all
 
     statuses = discover_all()
-    return _json([
+    out = [
         {
             "cli_id": s.cli_id,
+            "kind": "cli-binary",
             "binary_name": s.binary_name,
             "installed": s.installed,
             "authenticated": s.cli_authenticated,
@@ -154,7 +260,23 @@ def cli_status() -> str:
             "usable": s.is_usable(),
         }
         for s in statuses
-    ])
+    ]
+    for short_name in list_api_providers():
+        st = api_provider_status(short_name)
+        if "error" in st:
+            continue
+        out.append({
+            "cli_id": st["provider_id"],
+            "kind": st["kind"],
+            "binary_name": short_name,
+            "installed": True,  # HTTP providers don't need a local binary
+            "authenticated": st["api_key_available"],
+            "api_key_available": st["api_key_available"],
+            "preferred_auth": st["auth_method"],
+            "version": None,
+            "usable": st["usable"],
+        })
+    return _json(out)
 
 
 # ── Tool 3: cli_probe ──
@@ -162,11 +284,14 @@ def cli_status() -> str:
 
 @mcp.tool()
 def cli_probe(cli: str) -> str:
-    """Deep probe of a specific CLI: version, auth status, default model, binary path.
+    """Deep probe of a specific CLI or API provider.
+
+    Returns version, auth status, default model, and binary/endpoint path.
 
     Args:
-        cli: Which CLI to probe ("claude", "codex", or "gemini")
+        cli: Which provider to probe ("claude", "codex", "gemini", or "grok")
     """
+    from llm_relay.orch.api_executor import api_provider_status, list_api_providers
     from llm_relay.orch.discovery import discover_all
 
     cli_map = {"claude": "claude-code", "codex": "openai-codex", "gemini": "gemini-cli"}
@@ -176,6 +301,7 @@ def cli_probe(cli: str) -> str:
         if s.cli_id == cli_id or s.binary_name == cli:
             return _json({
                 "cli_id": s.cli_id,
+                "kind": "cli-binary",
                 "binary_name": s.binary_name,
                 "binary_path": s.binary_path,
                 "installed": s.installed,
@@ -187,7 +313,12 @@ def cli_probe(cli: str) -> str:
                 "usable": s.is_usable(),
             })
 
-    return _json({"error": "CLI '{}' not found in registry".format(cli)})
+    if cli in list_api_providers():
+        st = api_provider_status(cli)
+        if "error" not in st:
+            return _json(st)
+
+    return _json({"error": "Provider '{}' not found in CLI or API registry".format(cli)})
 
 
 # ── Tool 4: orch_delegate ──
