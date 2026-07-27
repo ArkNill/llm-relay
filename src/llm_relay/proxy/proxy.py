@@ -65,6 +65,15 @@ if os.getenv("LLM_RELAY_CACHE_FIX", "0") == "1":
     except ImportError:
         pass
 
+# CC effort fix (opt-out, LLM_RELAY_EFFORT_FIX=0)
+_effort_fix_available = False
+if os.getenv("LLM_RELAY_EFFORT_FIX", "1") == "1":
+    try:
+        from .cc_effort_fix import normalize_request as _normalize_effort
+        _effort_fix_available = True
+    except ImportError:
+        pass
+
 logger = logging.getLogger("llm-relay")
 
 UPSTREAM = os.getenv("LLM_RELAY_UPSTREAM", "https://api.anthropic.com")
@@ -345,6 +354,10 @@ async def _proxy(request: Request) -> Response:
                         body = json.dumps(req_json, ensure_ascii=False).encode("utf-8")
                     if cf_diag:
                         log_cache_diagnostic(_get_conn(), session_id=sid, **cf_diag)
+                if _effort_fix_available and path.startswith("/v1/messages"):
+                    ef_modified, _ef_original = _normalize_effort(req_json)
+                    if ef_modified:
+                        body = json.dumps(req_json, ensure_ascii=False).encode("utf-8")
                 if _tokpress_available:
                     body = _try_compress(req_json, body)
         except (json.JSONDecodeError, UnicodeDecodeError):

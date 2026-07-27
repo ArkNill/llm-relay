@@ -4,6 +4,14 @@ All notable changes to llm-relay are documented here.
 
 ## [Unreleased]
 
+### Fixed
+- **Web tool calls failing with 400 at effort `xhigh` / `max`** (2026-07-27): Claude Code sends
+  WebSearch/WebFetch subrequests with thinking disabled but keeps the session's effort level,
+  which the API rejects (`output_config.effort 'xhigh' is not supported when thinking is
+  disabled`). Requests that disable thinking now have `output_config.effort` clamped to `high`
+  (`proxy/cc_effort_fix.py`); requests with thinking enabled are left untouched.
+  `LLM_RELAY_EFFORT_FIX=0` turns it off, `LLM_RELAY_EFFORT_FIX_TARGET` changes the target.
+
 ## [0.9.6] - 2026-05-21
 
 > Single-command Windows install + atomic `llm-relay init`. Surfaced by
