@@ -376,6 +376,35 @@ def _get_composition_safe(conn: Any, session_id: str) -> Optional[dict]:
         return None
 
 
+def _get_growth_safe(
+    conn: Any, session_id: str, current_ctx: int, next_threshold: Optional[int]
+) -> dict:
+    """Growth-rate + ETA display fields for a session; safe zeros on any failure.
+
+    eta_next_s extrapolates the recent turn rate to the next zone threshold;
+    it is None when the session is idle, shrinking, or already past the
+    threshold.
+    """
+    fields = {"growth_per_turn": 0, "turns_per_min": 0.0, "eta_next_s": None}
+    try:
+        from llm_relay.proxy.db import get_session_growth
+
+        g = get_session_growth(conn, session_id=session_id)
+        fields["growth_per_turn"] = g["growth_per_turn"]
+        fields["turns_per_min"] = g["turns_per_min"]
+        if (
+            next_threshold
+            and next_threshold > current_ctx
+            and g["growth_per_turn"] > 0
+            and g["turns_per_min"] > 0
+        ):
+            turns_needed = (next_threshold - current_ctx) / g["growth_per_turn"]
+            fields["eta_next_s"] = int(turns_needed / g["turns_per_min"] * 60.0)
+    except Exception as exc:
+        logger.debug("Growth stats failed for %s: %s", session_id, exc)
+    return fields
+
+
 # ── GET /api/v1/display ──
 
 async def _api_display(request: Request) -> Response:
@@ -467,6 +496,10 @@ async def _api_display(request: Request) -> Response:
                 "connection_type": detect_connection_type(term.get("cc_pid") or 0),
                 # Context composition (requires LLM_RELAY_HISTORY=1)
                 "composition": _get_composition_safe(conn, r["session_id"]),
+                # Context growth rate + ETA to next zone threshold
+                **_get_growth_safe(
+                    conn, r["session_id"], r["current_ctx"], zones.get("next_threshold")
+                ),
             })
 
         # Merge Codex/Gemini (and CC on Windows) sessions discovered from session files

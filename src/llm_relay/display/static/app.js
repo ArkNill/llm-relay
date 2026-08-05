@@ -270,7 +270,8 @@
              ":" + (s.model_window || 0) +
              ":" + (s.last_prompt_ts || "") + ":" + (s.tty || "") +
              ":" + (s.provider || "") + ":" + compHash +
-             ":" + (s.cache_hit_rate || 0) + ":" + (s.ttl_tier || "");
+             ":" + (s.cache_hit_rate || 0) + ":" + (s.ttl_tier || "") +
+             ":" + (s.growth_per_turn || 0) + ":" + (s.eta_next_s || 0);
     }).join("|");
 
     if (hash === lastHash) {
@@ -355,6 +356,25 @@
           (nextThreshold ? '<span><span class="ml">Next</span> ' + formatTokens(nextThreshold) + '</span>' : '') +
           (estTokens ? '<span><span class="ml">Est</span> ' + formatTokens(estTokens) + '</span>' : '') +
         '</div>';
+
+      // Context growth rate + ETA to next zone threshold
+      var growthLine = "";
+      if (s.growth_per_turn && s.growth_per_turn > 0) {
+        var growthSpans =
+          '<span><span class="ml">Growth</span> +' + formatTokens(s.growth_per_turn) + '/turn</span>';
+        if (s.turns_per_min) {
+          growthSpans += '<span><span class="ml">Rate</span> ' + s.turns_per_min.toFixed(1) + '/min</span>';
+        }
+        if (s.eta_next_s !== null && s.eta_next_s !== undefined && nextThreshold) {
+          var etaAttr = s.eta_next_s < 600 ? ' class="eta-soon"' : '';
+          growthSpans += '<span' + etaAttr + '><span class="ml">' + formatTokens(nextThreshold) +
+                         ' ETA</span> ~' + formatDuration(s.eta_next_s) + '</span>';
+        }
+        growthLine =
+          '<div class="metric-small metric-growth has-tip" data-tip="' +
+          escapeHtml(msg("ui.growth.tip")) + '">' + growthSpans + '</div>';
+      }
+      metricsHtml += growthLine;
 
       // Cache hit rate + TTL tier badges (always shown, N/A as placeholder)
       var cacheRate = s.cache_hit_rate;

@@ -8,6 +8,7 @@ from __future__ import annotations
 import json
 import os
 import sqlite3
+import statistics
 import time
 from pathlib import Path
 from typing import Any, Optional
@@ -661,6 +662,56 @@ def get_all_turn_counts(
         (cutoff,),
     ).fetchall()
     return [dict(r) for r in rows]
+
+
+def get_session_growth(
+    conn: sqlite3.Connection,
+    session_id: str,
+    last_n: int = 40,
+    rate_window_s: float = 1800.0,
+    idle_cutoff_s: float = 600.0,
+) -> dict[str, Any]:
+    """Context growth stats for one session, from its most recent requests.
+
+    growth_per_turn is the median of positive ctx deltas over the last
+    `last_n` requests -- negative deltas are compaction/branch resets and
+    are skipped so they don't drag the median below the true growth rate.
+    turns_per_min is measured over the trailing `rate_window_s` ending at
+    the session's last request; a session idle longer than `idle_cutoff_s`
+    reports 0.0 so callers suppress ETA display instead of extrapolating
+    from stale activity.
+    """
+    rows = conn.execute(
+        """SELECT ts,
+                  cache_read + cache_creation + input_tokens AS ctx
+           FROM requests
+           WHERE session_id = ?
+             AND endpoint = '/v1/messages'
+           ORDER BY ts DESC
+           LIMIT ?""",
+        (session_id, last_n),
+    ).fetchall()
+    if not rows:
+        return {"growth_per_turn": 0, "turns_per_min": 0.0, "last_ts_epoch": None}
+
+    seq = [(_ts_to_epoch(r["ts"]), int(r["ctx"] or 0)) for r in reversed(rows)]
+    deltas = [b[1] - a[1] for a, b in zip(seq, seq[1:]) if b[1] > a[1]]
+    growth = int(statistics.median(deltas)) if deltas else 0
+
+    last_ts = seq[-1][0]
+    turns_per_min = 0.0
+    if last_ts is not None and (time.time() - last_ts) <= idle_cutoff_s:
+        window_start = max(seq[0][0], last_ts - rate_window_s)
+        recent = [t for t, _ in seq if t is not None and t >= window_start]
+        span = last_ts - window_start
+        if len(recent) >= 2 and span > 0:
+            turns_per_min = (len(recent) - 1) / (span / 60.0)
+
+    return {
+        "growth_per_turn": growth,
+        "turns_per_min": round(turns_per_min, 2),
+        "last_ts_epoch": last_ts,
+    }
 
 
 def get_recent(

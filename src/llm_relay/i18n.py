@@ -47,6 +47,11 @@ MESSAGES = {
         # UI strings
         "ui.no_active_sessions": "No active sessions",
         "ui.no_prompt": "(No prompt)",
+        "ui.growth.tip": (
+            "Median context growth per turn (last 40 turns) and estimated time "
+            "to the next zone threshold at the recent turn rate. Idle sessions "
+            "show no ETA."
+        ),
         "ui.no_history": "No session history recorded yet.",
         "ui.enable_history": "Enable with LLM_RELAY_HISTORY=1",
 
@@ -96,6 +101,10 @@ MESSAGES = {
 
         "ui.no_active_sessions": "활성 세션 없음",
         "ui.no_prompt": "(프롬프트 없음)",
+        "ui.growth.tip": (
+            "최근 40턴 기준 턴당 컨텍스트 성장 중앙값과 최근 턴 속도로 계산한 "
+            "다음 임계값 도달 예상 시간. 유휴 세션은 ETA 미표시"
+        ),
         "ui.no_history": "세션 기록이 없습니다.",
         "ui.enable_history": "LLM_RELAY_HISTORY=1로 활성화하세요",
 

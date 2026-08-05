@@ -4,6 +4,12 @@ All notable changes to llm-relay are documented here.
 
 ## [Unreleased]
 
+### Added
+- **Context growth rate and ETA on `/display/`** (2026-08-05): Claude Code session cards show
+  the median context growth per turn over the last 40 requests, the recent turn rate, and the
+  estimated time to the next zone threshold (`db.get_session_growth`; `/api/v1/display` fields
+  `growth_per_turn`, `turns_per_min`, `eta_next_s`). Idle sessions show no ETA.
+
 ### Fixed
 - **Web tool calls failing with 400 at effort `xhigh` / `max`** (2026-07-27): Claude Code sends
   WebSearch/WebFetch subrequests with thinking disabled but keeps the session's effort level,

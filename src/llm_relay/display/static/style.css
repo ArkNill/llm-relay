@@ -197,6 +197,11 @@ main { margin-bottom: 2rem; }
 }
 .metric-small .ml { color: #8b949e; }
 
+/* Growth rate + ETA line (below secondary metrics) */
+.metric-growth { color: #7d8590; }
+.metric-growth .eta-soon, .eta-soon { color: #f0883e; font-weight: 600; }
+.metric-growth .eta-soon .ml { color: #f0883e; }
+
 /* Cache / TTL metric badges */
 .metric-badges {
   display: flex;
