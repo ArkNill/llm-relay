@@ -9,6 +9,10 @@ All notable changes to llm-relay are documented here.
   the median context growth per turn over the last 40 requests, the recent turn rate, and the
   estimated time to the next zone threshold (`db.get_session_growth`; `/api/v1/display` fields
   `growth_per_turn`, `turns_per_min`, `eta_next_s`). Idle sessions show no ETA.
+- **Stream stall diagnostics** (2026-09-28): streamed requests record `content_deltas`,
+  `first_delta_ms`, `last_delta_ms`, `message_stop` and `stream_end` (`completed` /
+  `client_disconnect` / `upstream_error`) in `requests.raw_usage`, so an aborted or stalled
+  stream can be told apart from a long generation. No schema change.
 
 ### Fixed
 - **Web tool calls failing with 400 at effort `xhigh` / `max`** (2026-07-27): Claude Code sends

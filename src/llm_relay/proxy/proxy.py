@@ -485,6 +485,15 @@ async def _proxy_stream(client, method, url, headers, body, path, t0, body_bytes
         "model": None,
         "ephemeral_1h_tokens": 0,
         "ephemeral_5m_tokens": 0,
+        # Stall-vs-long-generation diagnostics (2026-09-28). Persisted through
+        # raw_usage JSON, so no schema change is needed. output_tokens alone
+        # cannot tell an aborted stream from a stalled one (it is only updated
+        # on message_delta); these fields can.
+        "content_deltas": 0,
+        "first_delta_ms": None,
+        "last_delta_ms": None,
+        "message_stop": False,
+        "stream_end": "unknown",
     }
 
     # History: accumulate response content blocks from SSE events
@@ -512,6 +521,16 @@ async def _proxy_stream(client, method, url, headers, body, path, t0, body_bytes
         except (json.JSONDecodeError, KeyError):
             return
         etype = event.get("type", "")
+        # Diagnostics: count content deltas for every stream, independent of
+        # the history feature below.
+        if etype == "content_block_delta":
+            now_ms = round((time.time() - t0) * 1000, 1)
+            usage_acc["content_deltas"] += 1
+            if usage_acc["first_delta_ms"] is None:
+                usage_acc["first_delta_ms"] = now_ms
+            usage_acc["last_delta_ms"] = now_ms
+        elif etype == "message_stop":
+            usage_acc["message_stop"] = True
         if etype == "message_start":
             msg = event.get("message", {})
             u = _extract_usage(msg)
@@ -596,6 +615,14 @@ async def _proxy_stream(client, method, url, headers, body, path, t0, body_bytes
                 line_buf = lines[-1]
                 for line in lines[:-1]:
                     _process_sse_line(line)
+            usage_acc["stream_end"] = "completed"
+        except (GeneratorExit, asyncio.CancelledError):
+            # Client went away (Starlette drops the generator at the yield site).
+            usage_acc["stream_end"] = "client_disconnect"
+            raise
+        except Exception:
+            usage_acc["stream_end"] = "upstream_error"
+            raise
         finally:
             # Step 1 -- flush the decoder (sync, safe under GeneratorExit).
             if _SSE_PARSE_USAGE:
