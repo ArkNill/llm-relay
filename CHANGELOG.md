@@ -34,6 +34,13 @@ All notable changes to llm-relay are documented here.
   instead of an opaque 500, and a client that disconnects before the upstream response headers
   arrive cancels the upstream request (checked every `LLM_RELAY_DISCONNECT_POLL_S`). Both cases
   are recorded in `requests` (status 499 / `stream_end=upstream_error`).
+- **MCP server, CLI and test suite using a different database than the relay** (2026-09-28):
+  only the proxy loaded `.env.public` / `.env.local`, so entry points started with an empty
+  environment (`llm-relay-mcp` spawned by Claude Code, the CLI, pytest) fell back to the SQLite
+  file while the relay wrote to PostgreSQL. `proxy/db.py` now loads both files (explicit
+  variables still win) before choosing the backend, and `orch/db.py` reuses that decision.
+  `tests/conftest.py` forces the suite onto a temporary SQLite database (`LLM_RELAY_TEST_DB`
+  to override).
 
 ## [0.9.6] - 2026-05-21
 

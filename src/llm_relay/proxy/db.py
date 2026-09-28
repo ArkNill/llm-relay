@@ -13,6 +13,37 @@ import time
 from pathlib import Path
 from typing import Any, Optional
 
+
+def _load_env_files() -> None:
+    """Load ``.env.public`` then ``.env.local`` from the repo root (setdefault only).
+
+    2026-09-28: only proxy/proxy.py used to load these, so every other entry point
+    (``llm-relay-mcp`` spawned by Claude Code with an empty env, the CLI, pytest)
+    silently fell back to the SQLite file while the relay itself wrote to PG --
+    delegation rows since 2026-05-14 landed only in ``~/.llm-relay/usage.db``.
+    Loading here makes the backend decision identical for every process that
+    imports this module. Explicit environment variables still win. Outside an
+    editable checkout the files do not exist and this is a no-op.
+    """
+    base = Path(__file__).resolve().parent.parent.parent.parent  # repo root
+    for name in (".env.public", ".env.local"):
+        env_path = base / name
+        if not env_path.is_file():
+            continue
+        try:
+            with open(env_path, encoding="utf-8") as f:
+                for line in f:
+                    line = line.strip()
+                    if not line or line.startswith("#") or "=" not in line:
+                        continue
+                    key, _, value = line.partition("=")
+                    os.environ.setdefault(key.strip(), value.strip())
+        except OSError:
+            continue
+
+
+_load_env_files()
+
 _DB_URL = os.getenv("LLM_RELAY_DB", str(Path.home() / ".llm-relay" / "usage.db"))
 _USE_PG = _DB_URL.startswith("postgresql://") or _DB_URL.startswith("postgres://")
 
