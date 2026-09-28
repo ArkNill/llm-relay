@@ -80,6 +80,18 @@ logger = logging.getLogger("llm-relay")
 UPSTREAM = os.getenv("LLM_RELAY_UPSTREAM", "https://api.anthropic.com")
 WARN_READ_RATIO = float(os.getenv("LLM_RELAY_WARN_RATIO", "50.0"))
 
+# Upstream connection pool (2026-09-28). The old cap of 20 was exceeded in
+# production (31 concurrent streams on 9/21 when one session fanned out
+# sub-agents); requests beyond the cap queued inside httpx for up to the pool
+# timeout while the client saw nothing. A short pool timeout turns a residual
+# exhaustion into a visible 503 that the client retries instead of a hang.
+_MAX_CONNECTIONS = int(os.getenv("LLM_RELAY_MAX_CONNECTIONS", "100"))
+_MAX_KEEPALIVE = int(os.getenv("LLM_RELAY_MAX_KEEPALIVE", "20"))
+_POOL_TIMEOUT_S = float(os.getenv("LLM_RELAY_POOL_TIMEOUT_S", "30"))
+# How often to check that the client is still connected while we wait for
+# upstream response headers (pool wait + first byte).
+_DISCONNECT_POLL_S = float(os.getenv("LLM_RELAY_DISCONNECT_POLL_S", "1.0"))
+
 # Performance toggles (default OFF for low-overhead proxying).
 # Set =1 to re-enable the corresponding diagnostic/compression path.
 _SCAN_ENABLED = os.getenv("LLM_RELAY_SCAN_ENABLED", "0") == "1"
@@ -272,8 +284,11 @@ def _get_client():
     if _client is None:
         _client = httpx.AsyncClient(
             base_url=UPSTREAM,
-            timeout=httpx.Timeout(300.0, connect=30.0),
-            limits=httpx.Limits(max_connections=20, max_keepalive_connections=10),
+            timeout=httpx.Timeout(300.0, connect=30.0, pool=_POOL_TIMEOUT_S),
+            limits=httpx.Limits(
+                max_connections=_MAX_CONNECTIONS,
+                max_keepalive_connections=_MAX_KEEPALIVE,
+            ),
         )
     return _client
 
@@ -308,6 +323,100 @@ def _warn_if_poor(usage: dict, endpoint: str) -> None:
                 usage["cache_creation"],
                 endpoint,
             )
+
+
+class _ClientGone(Exception):
+    """The client closed its connection before upstream response headers arrived."""
+
+
+def _session_of(headers: dict) -> str | None:
+    return headers.get("x-claude-code-session-id") or headers.get("x-session-id")
+
+
+async def _send_watching_client(client: httpx.AsyncClient, req: httpx.Request, request: Request) -> httpx.Response:
+    """``client.send(stream=True)`` that is cancelled if the client disconnects first.
+
+    Before 2026-09-28 a request waiting in the httpx pool or for the upstream
+    first byte kept running after the client gave up and retried, so the
+    original and the retry both held pool slots and both reached upstream
+    (isolated test: client left at 2s, relay held the upstream connection until
+    the 12s response). Polling ``request.is_disconnected()`` costs nothing on
+    the happy path because ``asyncio.wait`` returns as soon as headers arrive.
+    """
+    send_task = asyncio.ensure_future(client.send(req, stream=True))
+    try:
+        while True:
+            done, _pending = await asyncio.wait({send_task}, timeout=_DISCONNECT_POLL_S)
+            if done:
+                return send_task.result()
+            if await request.is_disconnected():
+                send_task.cancel()
+                try:
+                    await send_task
+                except asyncio.CancelledError:
+                    pass
+                except Exception:
+                    pass
+                raise _ClientGone()
+    except asyncio.CancelledError:
+        send_task.cancel()
+        raise
+
+
+def _client_gone_response(headers: dict, path: str, t0: float, body_bytes: int, is_stream: bool) -> Response:
+    """Record a client disconnect that happened before upstream headers; answer 499."""
+    latency_ms = (time.time() - t0) * 1000
+    sid = _session_of(headers)
+    logger.info(
+        "client disconnected before upstream headers after %.0f ms -- %s session=%s",
+        latency_ms, path, sid or "unknown",
+    )
+    _db_writer.submit(
+        log_request,
+        session_id=sid,
+        model=None,
+        status_code=499,
+        latency_ms=latency_ms,
+        endpoint=path,
+        is_stream=is_stream,
+        raw_usage={"stream_end": "client_disconnect_before_headers"},
+        request_body_bytes=body_bytes,
+    )
+    return Response(status_code=499)
+
+
+def _upstream_error_response(
+    exc: Exception, headers: dict, path: str, t0: float, body_bytes: int, is_stream: bool,
+) -> Response:
+    """Turn an httpx transport failure into a structured API error the client retries.
+
+    These used to surface as an opaque 500 and were never recorded.
+    """
+    if isinstance(exc, httpx.PoolTimeout):
+        status = 503
+        msg = "connection pool exhausted (waited {:.0f}s for a free upstream slot)".format(_POOL_TIMEOUT_S)
+    elif isinstance(exc, (httpx.ConnectTimeout, httpx.ConnectError)):
+        status, msg = 502, "could not connect to upstream"
+    elif isinstance(exc, (httpx.ReadTimeout, httpx.WriteTimeout)):
+        status, msg = 504, "upstream did not respond in time"
+    else:
+        status, msg = 502, "upstream request failed ({})".format(type(exc).__name__)
+    latency_ms = (time.time() - t0) * 1000
+    sid = _session_of(headers)
+    logger.warning("upstream %s on %s after %.0f ms -- %s: %s", type(exc).__name__, path, latency_ms, msg, exc)
+    _db_writer.submit(
+        log_request,
+        session_id=sid,
+        model=None,
+        status_code=status,
+        latency_ms=latency_ms,
+        endpoint=path,
+        is_stream=is_stream,
+        raw_usage={"stream_end": "upstream_error", "error": type(exc).__name__},
+        request_body_bytes=body_bytes,
+    )
+    body = json.dumps({"type": "error", "error": {"type": "api_error", "message": "llm-relay: " + msg}})
+    return Response(body, status_code=status, media_type="application/json")
 
 
 async def _proxy(request: Request) -> Response:
@@ -368,20 +477,26 @@ async def _proxy(request: Request) -> Response:
     t0 = time.time()
 
     if is_stream:
-        return await _proxy_stream(client, request.method, url, headers, body, path, t0, body_bytes)
+        return await _proxy_stream(client, request, url, headers, body, path, t0, body_bytes)
 
     # Non-streaming
-    upstream_resp = await client.request(
-        method=request.method,
-        url=url,
-        headers=headers,
-        content=body,
-    )
+    req = client.build_request(method=request.method, url=url, headers=headers, content=body)
+    try:
+        upstream_resp = await _send_watching_client(client, req, request)
+    except _ClientGone:
+        return _client_gone_response(headers, path, t0, body_bytes, is_stream=False)
+    except httpx.HTTPError as exc:
+        return _upstream_error_response(exc, headers, path, t0, body_bytes, is_stream=False)
+    try:
+        resp_body = await upstream_resp.aread()
+    except httpx.HTTPError as exc:
+        return _upstream_error_response(exc, headers, path, t0, body_bytes, is_stream=False)
+    finally:
+        await upstream_resp.aclose()
 
     latency_ms = (time.time() - t0) * 1000
 
     # Parse and log usage
-    resp_body = upstream_resp.content
     rl_headers = _extract_ratelimit_headers(upstream_resp.headers)
 
     # Feature flag routing (local-only extension -- no-op if module absent)
@@ -466,15 +581,20 @@ async def _proxy(request: Request) -> Response:
     )
 
 
-async def _proxy_stream(client, method, url, headers, body, path, t0, body_bytes=0):
+async def _proxy_stream(client, request, url, headers, body, path, t0, body_bytes=0):
     """Handle streaming responses -- true streaming proxy via client.stream().
 
     Uses an incremental UTF-8 decoder + line buffer so multibyte characters and
     SSE lines that span chunk boundaries are decoded correctly (C2 fix from
     audit-full-source-20260410.md -- mojibake root cause candidate).
     """
-    req = client.build_request(method=method, url=url, headers=headers, content=body)
-    upstream_resp = await client.send(req, stream=True)
+    req = client.build_request(method=request.method, url=url, headers=headers, content=body)
+    try:
+        upstream_resp = await _send_watching_client(client, req, request)
+    except _ClientGone:
+        return _client_gone_response(headers, path, t0, body_bytes, is_stream=True)
+    except httpx.HTTPError as exc:
+        return _upstream_error_response(exc, headers, path, t0, body_bytes, is_stream=True)
 
     rl_headers = _extract_ratelimit_headers(upstream_resp.headers)
 
@@ -707,6 +827,11 @@ async def _health(request: Request) -> Response:
     payload = {
         "status": "ok",
         "upstream": UPSTREAM,
+        "pool": {
+            "max_connections": _MAX_CONNECTIONS,
+            "max_keepalive": _MAX_KEEPALIVE,
+            "pool_timeout_s": _POOL_TIMEOUT_S,
+        },
         "db_writer": _db_writer.snapshot(),
     }
     return Response(json.dumps(payload), media_type="application/json")

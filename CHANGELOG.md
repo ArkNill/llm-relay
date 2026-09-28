@@ -27,6 +27,13 @@ All notable changes to llm-relay are documented here.
   retried on a fresh connection (`LLM_RELAY_DB_WRITE_RETRIES`, 3) and spilled to
   `~/.llm-relay/spill-YYYYMMDD.jsonl` (`LLM_RELAY_SPILL_DIR`) instead of being dropped. The
   queue drains on shutdown, and `GET /_health` reports the writer counters.
+- **Requests hanging when the upstream pool is exhausted** (2026-09-28): the upstream pool grows
+  from 20 to 100 connections (keep-alive 10 to 20; `LLM_RELAY_MAX_CONNECTIONS`,
+  `LLM_RELAY_MAX_KEEPALIVE`), and a pool wait longer than `LLM_RELAY_POOL_TIMEOUT_S` (30 s)
+  returns a 503 API error instead of hanging. Transport failures return 502/504 API errors
+  instead of an opaque 500, and a client that disconnects before the upstream response headers
+  arrive cancels the upstream request (checked every `LLM_RELAY_DISCONNECT_POLL_S`). Both cases
+  are recorded in `requests` (status 499 / `stream_end=upstream_error`).
 
 ## [0.9.6] - 2026-05-21
 
