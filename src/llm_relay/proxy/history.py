@@ -12,13 +12,36 @@ import logging
 import sqlite3
 from typing import Any, Dict, List, Optional, Tuple
 
-from .db import log_compaction_event, log_conversation_turn
+from .db import get_last_turn_state, log_compaction_event, log_conversation_turn
 
 logger = logging.getLogger("llm-relay.history")
 
 # Per-session previous-turn message count cache (process lifetime).
 # Key: session_id, Value: (turn_number, message_count, input_tokens)
 _session_prev: Dict[str, Tuple[int, int, int]] = {}
+
+
+def _prev_state(conn: sqlite3.Connection, session_id: str) -> Optional[Tuple[int, int, int]]:
+    """Previous-turn state for a session, re-seeded from the DB after a process restart.
+
+    Without this every relay restart reset turn_number to 1 and stored a fresh
+    full snapshot, leaving duplicate turn numbers inside one session (2026-09-28).
+    input_tokens is unknown after a restart, so the token-drop compaction
+    heuristic is off for the first captured turn; the message-count check still runs.
+    """
+    prev = _session_prev.get(session_id)
+    if prev is not None:
+        return prev
+    try:
+        seeded = get_last_turn_state(conn, session_id)
+    except Exception:
+        logger.debug("turn-state seed lookup failed for %s", session_id, exc_info=True)
+        return None
+    if seeded is None:
+        return None
+    prev = (seeded[0], seeded[1], 0)
+    _session_prev[session_id] = prev
+    return prev
 
 
 # ── Delta computation ──
@@ -261,7 +284,7 @@ def capture_delegation_turn(
         )
 
         # Use a delegation-scoped turn counter
-        prev = _session_prev.get(session_id)
+        prev = _prev_state(conn, session_id)
         turn_number = (prev[0] + 1) if prev else 1
 
         log_conversation_turn(
@@ -302,7 +325,7 @@ def _do_capture(
 ) -> None:
     """Core capture logic shared by streaming and non-streaming paths."""
     current_count = len(messages)
-    prev = _session_prev.get(session_id)
+    prev = _prev_state(conn, session_id)
     previous_count = prev[1] if prev else 0
     previous_tokens = prev[2] if prev else 0
     turn_number = (prev[0] + 1) if prev else 1

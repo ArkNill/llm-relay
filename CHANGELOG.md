@@ -41,6 +41,9 @@ All notable changes to llm-relay are documented here.
   variables still win) before choosing the backend, and `orch/db.py` reuses that decision.
   `tests/conftest.py` forces the suite onto a temporary SQLite database (`LLM_RELAY_TEST_DB`
   to override).
+- **Duplicate turn numbers after a relay restart** (2026-09-28): the first capture of a session
+  after a restart seeds its turn counter and delta baseline from the newest stored turn
+  (`db.get_last_turn_state`) instead of starting again at turn 1 with a full snapshot.
 
 ## [0.9.6] - 2026-05-21
 

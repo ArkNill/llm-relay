@@ -998,6 +998,23 @@ def log_conversation_turn(
     return cursor.lastrowid or 0
 
 
+def get_last_turn_state(conn: sqlite3.Connection, session_id: str) -> Optional[tuple]:
+    """(turn_number, total_message_count) of the newest stored turn for a session, or None.
+
+    Re-seeds history's in-memory per-session state after a process restart so turn
+    numbers stay unique per session and the delta is computed against the last
+    stored snapshot (2026-09-28: every relay restart produced a second 1..N run).
+    """
+    row = conn.execute(
+        """SELECT turn_number, total_message_count FROM conversation_turns
+           WHERE session_id = ? ORDER BY turn_number DESC, id DESC LIMIT 1""",
+        (session_id,),
+    ).fetchone()
+    if not row:
+        return None
+    return int(row["turn_number"]), int(row["total_message_count"] or 0)
+
+
 def log_compaction_event(
     conn: sqlite3.Connection,
     *,
