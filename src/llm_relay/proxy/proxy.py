@@ -46,6 +46,7 @@ from starlette.responses import Response, StreamingResponse  # noqa: E402
 from starlette.routing import Mount, Route  # noqa: E402
 
 from .db import get_conn, log_budget_event, log_microcompact, log_request  # noqa: E402
+from .dbwriter import get_writer  # noqa: E402
 
 # GrowthBook intercept (local-only, file excluded via .gitignore)
 try:
@@ -176,8 +177,8 @@ def _scan_budget_enforcement(req_json: dict, session_id: str | None) -> None:
             marker = "suspiciously_small"
 
         if truncated:
-            log_budget_event(
-                _get_conn(),
+            _db_writer.submit(
+                log_budget_event,
                 session_id=session_id,
                 msg_index=idx,
                 tool_name=tool_name,
@@ -245,8 +246,8 @@ def _scan_microcompact(req_json: dict, session_id: str | None) -> None:
             cleared_indices[:10],
             session_id or "unknown",
         )
-        log_microcompact(
-            _get_conn(),
+        _db_writer.submit(
+            log_microcompact,
             session_id=session_id,
             cleared_count=len(cleared_indices),
             total_tool_results=total_tool_results,
@@ -254,8 +255,9 @@ def _scan_microcompact(req_json: dict, session_id: str | None) -> None:
             message_count=len(messages),
         )
 
-_conn = None
+_conn = None  # main-thread connection: read-only use (/_stats, /_recent, API routes)
 _client = None
+_db_writer = get_writer()  # every write goes through the background writer (dbwriter.py)
 
 
 def _get_conn():
@@ -353,7 +355,7 @@ async def _proxy(request: Request) -> Response:
                     if cf_modified:
                         body = json.dumps(req_json, ensure_ascii=False).encode("utf-8")
                     if cf_diag:
-                        log_cache_diagnostic(_get_conn(), session_id=sid, **cf_diag)
+                        _db_writer.submit(log_cache_diagnostic, session_id=sid, **cf_diag)
                 if _effort_fix_available and path.startswith("/v1/messages"):
                     ef_modified, _ef_original = _normalize_effort(req_json)
                     if ef_modified:
@@ -394,8 +396,8 @@ async def _proxy(request: Request) -> Response:
                     "\U0001f6e1 INTERCEPTED %s -- %d flags: %s",
                     path, len(touched), ", ".join(touched),
                 )
-                log_intercept_event(
-                    _get_conn(),
+                _db_writer.submit(
+                    log_intercept_event,
                     session_id=sid,
                     endpoint=path,
                     flags_overridden=touched,
@@ -407,17 +409,16 @@ async def _proxy(request: Request) -> Response:
         resp_json = json.loads(resp_body)
         usage = _extract_usage(resp_json)
         _warn_if_poor(usage, path)
-        # Synchronous log -- WAL mode keeps this ~0.6ms. Moving to a worker
-        # thread via asyncio.to_thread inside starlette response flow was
-        # dropping records when the response task was torn down mid-await.
+        # Writes go to the background DB writer: a synchronous enqueue (no
+        # await) that response teardown cannot cut short -- see dbwriter.py.
         sid = headers.get("x-claude-code-session-id") or headers.get("x-session-id")
         # Extract ephemeral TTL tier tokens for non-streaming path
         resp_usage = resp_json.get("usage", {})
         cc_detail = resp_usage.get("cache_creation", {})
         eph_1h = cc_detail.get("ephemeral_1h_input_tokens", 0) if isinstance(cc_detail, dict) else 0
         eph_5m = cc_detail.get("ephemeral_5m_input_tokens", 0) if isinstance(cc_detail, dict) else 0
-        log_request(
-            _get_conn(),
+        _db_writer.submit(
+            log_request,
             session_id=sid,
             model=usage["model"],
             input_tokens=usage["input_tokens"],
@@ -438,8 +439,8 @@ async def _proxy(request: Request) -> Response:
         if _HISTORY_ENABLED and req_json and path.startswith("/v1/messages"):
             try:
                 from .history import capture_turn
-                capture_turn(
-                    _get_conn(),
+                _db_writer.submit(
+                    capture_turn,
                     session_id=sid,
                     req_json=req_json,
                     resp_json=resp_json,
@@ -636,42 +637,40 @@ async def _proxy_stream(client, method, url, headers, body, path, t0, body_bytes
                 except Exception:
                     logger.debug("SSE decoder flush failed", exc_info=True)
 
-            # Step 2 -- LOG FIRST (sync, must run even if aclose/GC cancels the
+            # Step 2 -- ENQUEUE FIRST (sync, must run even if aclose/GC cancels the
             # generator). Starlette discards the async generator without calling
             # aclose(), so GeneratorExit fires at the yield site and any later
-            # `await` in the finally chain can be cut short. Putting log_request
-            # before the await guarantees the usage row lands in SQLite.
+            # `await` in the finally chain can be cut short. submit() never awaits,
+            # so the usage row reaches the background writer before that can
+            # happen; the writer retries and spills to disk rather than drop it.
             latency_ms = (time.time() - t0) * 1000
             _warn_if_poor(usage_acc, path)
             sid = headers.get("x-claude-code-session-id") or headers.get("x-session-id")
-            try:
-                log_request(
-                    _get_conn(),
-                    session_id=sid,
-                    model=usage_acc["model"],
-                    input_tokens=usage_acc["input_tokens"],
-                    output_tokens=usage_acc["output_tokens"],
-                    cache_creation=usage_acc["cache_creation"],
-                    cache_read=usage_acc["cache_read"],
-                    status_code=upstream_resp.status_code,
-                    latency_ms=latency_ms,
-                    endpoint=path,
-                    is_stream=True,
-                    raw_usage=dict(usage_acc),
-                    request_body_bytes=body_bytes,
-                    ratelimit_headers=rl_headers,
-                    ephemeral_1h_tokens=usage_acc.get("ephemeral_1h_tokens", 0),
-                    ephemeral_5m_tokens=usage_acc.get("ephemeral_5m_tokens", 0),
-                )
-            except Exception:
-                logger.warning("log_request failed (stream path)", exc_info=True)
+            _db_writer.submit(
+                log_request,
+                session_id=sid,
+                model=usage_acc["model"],
+                input_tokens=usage_acc["input_tokens"],
+                output_tokens=usage_acc["output_tokens"],
+                cache_creation=usage_acc["cache_creation"],
+                cache_read=usage_acc["cache_read"],
+                status_code=upstream_resp.status_code,
+                latency_ms=latency_ms,
+                endpoint=path,
+                is_stream=True,
+                raw_usage=dict(usage_acc),
+                request_body_bytes=body_bytes,
+                ratelimit_headers=rl_headers,
+                ephemeral_1h_tokens=usage_acc.get("ephemeral_1h_tokens", 0),
+                ephemeral_5m_tokens=usage_acc.get("ephemeral_5m_tokens", 0),
+            )
 
-            # Step 2b -- session history capture (sync, same safety as log_request)
+            # Step 2b -- session history capture (same sync enqueue as log_request)
             if _history_active and _history_req_json:
                 try:
                     from .history import capture_turn_streamed
-                    capture_turn_streamed(
-                        _get_conn(),
+                    _db_writer.submit(
+                        capture_turn_streamed,
                         session_id=sid,
                         req_json=_history_req_json,
                         accumulated_content=_history_content,
@@ -705,7 +704,12 @@ async def _proxy_stream(client, method, url, headers, body, path, t0, body_bytes
 
 
 async def _health(request: Request) -> Response:
-    return Response(json.dumps({"status": "ok", "upstream": UPSTREAM}), media_type="application/json")
+    payload = {
+        "status": "ok",
+        "upstream": UPSTREAM,
+        "db_writer": _db_writer.snapshot(),
+    }
+    return Response(json.dumps(payload), media_type="application/json")
 
 
 async def _stats(request: Request) -> Response:
@@ -742,8 +746,12 @@ async def _watchdog_loop():
 
 @asynccontextmanager
 async def _lifespan(app):
+    _db_writer.start()
     asyncio.create_task(_watchdog_loop())
     yield
+    # Drain pending DB writes before the process exits (unit TimeoutStopSec=10;
+    # anything still unwritten after the drain timeout is spilled to disk).
+    await asyncio.to_thread(_db_writer.stop, 8.0)
 
 
 # Build unified route list -- API and dashboard before catch-all proxy

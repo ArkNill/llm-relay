@@ -21,6 +21,12 @@ All notable changes to llm-relay are documented here.
   disabled`). Requests that disable thinking now have `output_config.effort` clamped to `high`
   (`proxy/cc_effort_fix.py`); requests with thinking enabled are left untouched.
   `LLM_RELAY_EFFORT_FIX=0` turns it off, `LLM_RELAY_EFFORT_FIX_TARGET` changes the target.
+- **Database writes on the event loop** (2026-09-28): usage, diagnostic and history rows are
+  now written by a background thread (`proxy/dbwriter.py`). `submit()` is a synchronous
+  enqueue that response teardown cannot cut short; rows are written in submission order,
+  retried on a fresh connection (`LLM_RELAY_DB_WRITE_RETRIES`, 3) and spilled to
+  `~/.llm-relay/spill-YYYYMMDD.jsonl` (`LLM_RELAY_SPILL_DIR`) instead of being dropped. The
+  queue drains on shutdown, and `GET /_health` reports the writer counters.
 
 ## [0.9.6] - 2026-05-21
 
