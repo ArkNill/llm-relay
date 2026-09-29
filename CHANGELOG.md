@@ -54,6 +54,7 @@ All notable changes to llm-relay are documented here.
   tools) verbatim — 24 MB rows, 3.7 GB in a single day. `request_messages` now keeps the
   block shape with `data: ""` plus `source.omitted_bytes`; `request_size_bytes` still
   records the real request body size (`history._strip_binary_payloads`).
+- `/display/` no longer starts a new poll while the previous one is still in flight.
 
 ### Notes
 - Rows stored before this change can be rewritten in place with the same transform. The

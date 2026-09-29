@@ -246,7 +246,20 @@
 
   var lastHash = "";
 
+  // One poll at a time: a slow /display response must not pile up overlapping
+  // requests behind the 2 s interval (2026-09-29).
+  var _loading = false;
   async function load() {
+    if (_loading) return;
+    _loading = true;
+    try {
+      await loadOnce();
+    } finally {
+      _loading = false;
+    }
+  }
+
+  async function loadOnce() {
     var container = document.getElementById("session-cards");
     var updated = document.getElementById("updated");
     var countEl = document.getElementById("session-count");
