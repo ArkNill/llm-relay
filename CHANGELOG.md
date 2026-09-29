@@ -103,6 +103,13 @@ All notable changes to llm-relay are documented here.
   measured its response, so the history page's per-session response total was 0 for every
   Claude Code session. It now records the UTF-8 size of the accumulated text, thinking and
   tool-input blocks (`history.content_bytes`).
+- **Relay INFO diagnostics never reached the journal** (2026-09-29): under uvicorn the
+  `llm-relay` logger had no handler and propagated to a bare root logger, so its INFO lines
+  (cache fix, compaction, client gone before headers) were dropped and its warnings only
+  surfaced through logging's last-resort handler. The proxy now installs a stderr handler for
+  its own loggers when nothing else has configured logging (the CLI's `basicConfig` is left
+  alone). The main logger still runs at WARNING; `LLM_RELAY_LOG_LEVEL=INFO` turns the
+  diagnostics on.
 
 ### Notes
 - Rows stored before this change can be rewritten in place with the same transform. The

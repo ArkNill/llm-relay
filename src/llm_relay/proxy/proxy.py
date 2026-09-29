@@ -80,6 +80,34 @@ if os.getenv("LLM_RELAY_EFFORT_FIX", "1") == "1":
         pass
 
 logger = logging.getLogger("llm-relay")
+# Request start lines (see _RequestLog); INFO regardless of the main logger's level.
+_access_log = logging.getLogger("llm-relay.access")
+
+
+def _setup_logging() -> None:
+    """Give the relay's loggers an output when nothing else has configured logging.
+
+    Under uvicorn only uvicorn's own loggers get handlers. The "llm-relay"
+    logger propagated to a bare root logger, so its INFO diagnostics (cache
+    fix, compaction, client gone before headers) never reached the journal
+    and its warnings came out through logging's last-resort handler
+    (2026-09-29: 0 INFO lines in two days of journal). A handler is installed
+    once, only when neither root nor "llm-relay" has one -- the CLI's
+    basicConfig is left alone. "llm-relay" keeps inheriting WARNING unless
+    LLM_RELAY_LOG_LEVEL names a level; "llm-relay.access" runs at INFO.
+    """
+    if not logging.getLogger().handlers and not logger.handlers:
+        handler = logging.StreamHandler()
+        handler.setFormatter(logging.Formatter("%(levelname)s:     %(message)s"))
+        logger.addHandler(handler)
+    level_name = os.getenv("LLM_RELAY_LOG_LEVEL", "").strip().upper()
+    if level_name:
+        level = logging.getLevelName(level_name)
+        logger.setLevel(level if isinstance(level, int) else logging.WARNING)
+    _access_log.setLevel(logging.INFO)
+
+
+_setup_logging()
 
 UPSTREAM = os.getenv("LLM_RELAY_UPSTREAM", "https://api.anthropic.com")
 WARN_READ_RATIO = float(os.getenv("LLM_RELAY_WARN_RATIO", "50.0"))
