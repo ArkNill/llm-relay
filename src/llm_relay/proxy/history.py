@@ -44,6 +44,79 @@ def _prev_state(conn: sqlite3.Connection, session_id: str) -> Optional[Tuple[int
     return prev
 
 
+# ── Inline binary payload stripping ──
+
+# Content blocks whose ``source`` carries an inline binary payload (images,
+# PDF documents). The payload is dropped from the stored copy and replaced by
+# its size: it is useless for replay/analysis, and keeping it turned turns
+# into 24 MB rows (2026-09-29: three image-reading subagents wrote 3.7 GB in
+# one day, and the dashboard's composition load of that session OOM-killed
+# the relay).
+_INLINE_SOURCE_TYPES = frozenset({"base64"})
+
+
+def _strip_binary_payloads(messages: List[Any]) -> List[Any]:
+    """Return ``messages`` with inline binary ``source.data`` replaced by a size marker.
+
+    ``source.data`` becomes ``""`` and ``source.omitted_bytes`` records the
+    length of the dropped base64 text; ``media_type`` and the block type are
+    kept. Copy-on-write: the input (still referenced by the proxy) is never
+    mutated, only the containers on the path to a replaced block are copied,
+    and when nothing needs stripping the input list itself is returned.
+    """
+    stripped: List[Any] = []
+    changed = False
+    for msg in messages:
+        new_msg = _strip_message(msg)
+        if new_msg is not msg:
+            changed = True
+        stripped.append(new_msg)
+    return stripped if changed else messages
+
+
+def _strip_message(msg: Any) -> Any:
+    if not isinstance(msg, dict):
+        return msg
+    content = msg.get("content")
+    if not isinstance(content, list):
+        return msg
+    new_content = _strip_blocks(content)
+    if new_content is content:
+        return msg
+    new_msg = dict(msg)
+    new_msg["content"] = new_content
+    return new_msg
+
+
+def _strip_blocks(blocks: List[Any]) -> List[Any]:
+    out: List[Any] = []
+    changed = False
+    for block in blocks:
+        new_block = block
+        if isinstance(block, dict):
+            source = block.get("source")
+            if (
+                isinstance(source, dict)
+                and source.get("type") in _INLINE_SOURCE_TYPES
+                and isinstance(source.get("data"), str)
+                and source["data"]
+            ):
+                new_source = dict(source)
+                new_source["data"] = ""
+                new_source["omitted_bytes"] = len(source["data"])
+                new_block = dict(block)
+                new_block["source"] = new_source
+            elif block.get("type") == "tool_result" and isinstance(block.get("content"), list):
+                inner = _strip_blocks(block["content"])
+                if inner is not block["content"]:
+                    new_block = dict(block)
+                    new_block["content"] = inner
+        if new_block is not block:
+            changed = True
+        out.append(new_block)
+    return out if changed else blocks
+
+
 # ── Delta computation ──
 
 
@@ -376,8 +449,8 @@ def _do_capture(
     if model_override:
         model = model_override
 
-    # Serialize request messages
-    request_msg_json = json.dumps(msgs_to_store, ensure_ascii=False)
+    # Serialize request messages (inline images/documents reduced to size markers)
+    request_msg_json = json.dumps(_strip_binary_payloads(msgs_to_store), ensure_ascii=False)
 
     log_conversation_turn(
         conn,

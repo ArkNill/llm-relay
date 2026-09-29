@@ -50,6 +50,16 @@ All notable changes to llm-relay are documented here.
   the first dashboard poll after each restart pushed the process past `MemoryMax` and
   systemd's start limit left the port closed. Cold loads now start at the newest `full`
   snapshot, which yields the same result (`composition._cold_start_turn`).
+- **Session history stored inline base64 payloads** (images / PDF documents returned by
+  tools) verbatim — 24 MB rows, 3.7 GB in a single day. `request_messages` now keeps the
+  block shape with `data: ""` plus `source.omitted_bytes`; `request_size_bytes` still
+  records the real request body size (`history._strip_binary_payloads`).
+
+### Notes
+- Rows stored before this change can be rewritten in place with the same transform. The
+  leftover check is `jsonb_path_exists(request_messages,
+  'strict $.**.source ? (@.type == "base64" && @.data != "")')` — testing only
+  `source.type` also matches already-stripped rows.
 
 ## [0.9.6] - 2026-05-21
 

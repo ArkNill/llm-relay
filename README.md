@@ -143,7 +143,8 @@ llm-relay serve --port 8080
 Then open:
 - `/dashboard/` — CLI status, cost, delegation history, Turn Monitor (alive sessions only; `?include_dead=1` to bypass)
 - `/display/` — Turn counter with CC/Codex/Gemini session cards (alive filter: CC via cc_pid+TTY fallback, Codex/Gemini via fd-open; Windows uses mtime+process detection)
-- `/history/` — Session conversation history browser
+- `/history/` — Session conversation history browser. Stored turns keep message text only:
+  inline base64 image/document payloads are replaced by `source.omitted_bytes`.
 
 ### MCP server
 
