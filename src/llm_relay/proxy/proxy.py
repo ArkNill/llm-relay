@@ -13,14 +13,18 @@ from pathlib import Path
 from typing import Any
 
 
-def _load_env_files():
-    """Load .env.public and .env.local (2-tier env) for native (non-Docker) runs.
+def _load_env_files(base: Path | None = None) -> None:
+    """Load .env.local then .env.public (2-tier env) for native (non-Docker) runs.
 
     Only sets variables that are not already in the environment, so explicit
-    env vars and Docker env_file both take precedence.
+    env vars and Docker env_file both take precedence, and .env.local (loaded
+    first) overrides .env.public. Before 2026-09-29 the files were loaded in
+    the opposite order, so outside systemd (whose EnvironmentFile order was
+    already right) a key present in both files kept the public value.
     """
-    base = Path(__file__).resolve().parent.parent.parent.parent  # repo root
-    for name in (".env.public", ".env.local"):
+    if base is None:
+        base = Path(__file__).resolve().parent.parent.parent.parent  # repo root
+    for name in (".env.local", ".env.public"):
         env_path = base / name
         if not env_path.is_file():
             continue

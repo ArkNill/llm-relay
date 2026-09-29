@@ -86,6 +86,12 @@ All notable changes to llm-relay are documented here.
   which point the full parse is dropped. Five concurrent 24 MB image requests: peak 510 MB
   to 248 MB, resident after the burst 463 MB to 202 MB (isolated relay, fake upstream).
   Stored history rows are unchanged.
+- **`.env.local` not overriding `.env.public` outside systemd** (2026-09-29): the native env
+  loaders in `proxy/proxy.py` and `proxy/db.py` applied `.env.public` first with
+  `setdefault`, so a key present in both files kept the public value when the process was
+  started by hand, by pytest or as the MCP server (`LLM_RELAY_CACHE_FIX` was the only
+  affected key; the systemd unit's `EnvironmentFile` order was already right). `.env.local`
+  is now loaded first; explicit environment variables still win over both files.
 
 ### Notes
 - Rows stored before this change can be rewritten in place with the same transform. The

@@ -14,8 +14,8 @@ from pathlib import Path
 from typing import Any, Optional
 
 
-def _load_env_files() -> None:
-    """Load ``.env.public`` then ``.env.local`` from the repo root (setdefault only).
+def _load_env_files(base: Optional[Path] = None) -> None:
+    """Load ``.env.local`` then ``.env.public`` from the repo root (setdefault only).
 
     2026-09-28: only proxy/proxy.py used to load these, so every other entry point
     (``llm-relay-mcp`` spawned by Claude Code with an empty env, the CLI, pytest)
@@ -24,9 +24,15 @@ def _load_env_files() -> None:
     Loading here makes the backend decision identical for every process that
     imports this module. Explicit environment variables still win. Outside an
     editable checkout the files do not exist and this is a no-op.
+
+    2026-09-29: ``.env.local`` is loaded first so that, with setdefault, it
+    overrides ``.env.public`` the way the systemd unit's EnvironmentFile order
+    already did; the previous public-first order let a key present in both
+    files keep the public value in every non-systemd process.
     """
-    base = Path(__file__).resolve().parent.parent.parent.parent  # repo root
-    for name in (".env.public", ".env.local"):
+    if base is None:
+        base = Path(__file__).resolve().parent.parent.parent.parent  # repo root
+    for name in (".env.local", ".env.public"):
         env_path = base / name
         if not env_path.is_file():
             continue
