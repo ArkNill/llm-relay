@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import threading
 
+from llm_relay.proxy import dbwriter
 from llm_relay.proxy.dbwriter import DBWriter
 
 
@@ -102,3 +103,77 @@ def test_shutdown_timeout_spills_leftover_jobs(tmp_path):
     spilled = [json.loads(line) for line in files[0].read_text(encoding="utf-8").splitlines()]
     assert [r["kwargs"] for r in spilled] == [{"i": 2}]
     assert writer.stats["spilled"] == 1
+
+
+# ── queue byte cap (LLM_RELAY_DB_QUEUE_MAX_BYTES) ──
+
+
+def _blocked_writer(tmp_path):
+    """A writer whose consumer blocks on ``gate`` so jobs pile up in the queue."""
+    gate = threading.Event()
+    calls = []
+
+    def slow_fn(conn, **kw):
+        gate.wait(5)
+        calls.append(kw)
+
+    writer = DBWriter(conn_factory=lambda: _FakeConn(), spill_dir=tmp_path)
+    writer.start()
+    return writer, slow_fn, calls, gate
+
+
+def test_queued_bytes_follow_size_hints_until_the_job_is_written(tmp_path):
+    writer, slow_fn, calls, gate = _blocked_writer(tmp_path)
+    writer.submit(slow_fn, size_hint=1000, i=1)  # taken by the worker at once, still counted
+    writer.submit(slow_fn, size_hint=500, i=2)
+    writer.submit(slow_fn, i=3)
+
+    snap = writer.snapshot()
+    assert snap["queued_bytes"] == 3 * dbwriter._JOB_OVERHEAD_BYTES + 1500
+    assert snap["queue_max_bytes"] == dbwriter._QUEUE_MAX_BYTES
+    gate.set()
+    writer.stop(timeout=5)
+    assert [c["i"] for c in calls] == [1, 2, 3]  # size_hint is not passed on to the job
+    assert writer.snapshot()["queued_bytes"] == 0
+
+
+def test_a_job_over_the_byte_cap_is_spilled_at_once_and_order_is_kept(tmp_path, monkeypatch):
+    overhead = dbwriter._JOB_OVERHEAD_BYTES
+    monkeypatch.setattr("llm_relay.proxy.dbwriter._QUEUE_MAX_BYTES", 2 * overhead + 150)
+    writer, slow_fn, calls, gate = _blocked_writer(tmp_path)
+    writer.submit(slow_fn, size_hint=100, i=1)  # fits
+    writer.submit(slow_fn, size_hint=100, i=2)  # would exceed the cap -> spilled now
+    writer.submit(slow_fn, size_hint=40, i=3)  # fits behind job 1
+
+    assert writer.stats["spilled"] == 1
+    assert writer.snapshot()["queued_bytes"] == 2 * overhead + 140
+    gate.set()
+    writer.stop(timeout=5)
+    assert [c["i"] for c in calls] == [1, 3]
+    spilled = [json.loads(line) for line in next(tmp_path.glob("spill-*.jsonl")).read_text("utf-8").splitlines()]
+    assert [(r["kwargs"], r["reason"]) for r in spilled] == [({"i": 2}, "queue bytes")]
+    assert writer.snapshot()["queued_bytes"] == 0
+
+
+def test_zero_disables_the_byte_cap(tmp_path, monkeypatch):
+    monkeypatch.setattr("llm_relay.proxy.dbwriter._QUEUE_MAX_BYTES", 0)
+    writer, fn, calls, _ = _make_writer(tmp_path)
+    writer.start()
+    writer.submit(fn, size_hint=10**12, i=1)
+    writer.stop(timeout=5)
+    assert calls == [{"i": 1}]
+    assert writer.stats["spilled"] == 0
+
+
+def test_shutdown_drain_releases_the_bytes_of_spilled_jobs(tmp_path):
+    writer, slow_fn, _calls, gate = _blocked_writer(tmp_path)
+    writer.submit(slow_fn, size_hint=500, i=1)
+    writer.submit(slow_fn, size_hint=500, i=2)
+    writer.stop(timeout=0.2)  # job 1 still blocked -> job 2 is drained to the spill file
+
+    assert writer.stats["spilled"] == 1
+    assert writer.snapshot()["queued_bytes"] == dbwriter._JOB_OVERHEAD_BYTES + 500  # job 1 still running
+    gate.set()
+    writer._q.put(None)
+    writer._thread.join(5)
+    assert writer.snapshot()["queued_bytes"] == 0

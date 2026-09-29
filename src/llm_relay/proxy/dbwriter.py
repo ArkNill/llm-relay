@@ -15,6 +15,9 @@ Guarantees -- every CC conversation turn MUST land in the DB:
   * transient failures are retried on a fresh connection; persistent failures
     are spilled to ``~/.llm-relay/spill-YYYYMMDD.jsonl`` and never silently
     dropped;
+  * the queue is bounded by count and by bytes (``LLM_RELAY_DB_QUEUE_MAX``,
+    ``LLM_RELAY_DB_QUEUE_MAX_BYTES``); a job that does not fit is spilled at
+    once rather than kept in RAM while the database is slow;
   * ``stop()`` (lifespan shutdown) drains the queue; anything left after the
     timeout is spilled.
 """
@@ -33,9 +36,17 @@ from typing import Any, Callable, Dict, Optional, Tuple
 
 logger = logging.getLogger("llm-relay.dbwriter")
 
-Job = Tuple[Callable[..., Any], Dict[str, Any]]
+# (fn, kwargs, approximate bytes the job keeps alive while it waits in the queue)
+Job = Tuple[Callable[..., Any], Dict[str, Any], int]
 
 _QUEUE_MAX = int(os.getenv("LLM_RELAY_DB_QUEUE_MAX", "20000"))
+# Byte cap on the queue (2026-09-29): the count cap alone lets a stalled database
+# hold thousands of conversation captures (p50 0.7 MB, p95 2.1 MB each) in RAM,
+# well past the unit's MemoryMax. A job that would push the queued total over
+# the cap is spilled straight away instead. 0 disables the cap.
+_QUEUE_MAX_BYTES = int(os.getenv("LLM_RELAY_DB_QUEUE_MAX_BYTES", str(256 * 1024 * 1024)))
+# Counted for every job on top of its size hint (kwargs, tuple, a raw_usage dict).
+_JOB_OVERHEAD_BYTES = 2048
 _RETRIES = int(os.getenv("LLM_RELAY_DB_WRITE_RETRIES", "3"))
 _SPILL_DIR = Path(os.getenv("LLM_RELAY_SPILL_DIR", str(Path.home() / ".llm-relay")))
 
@@ -55,6 +66,10 @@ class DBWriter:
         self._thread: Optional[threading.Thread] = None
         self._lock = threading.Lock()
         self._stopped = False
+        # Bytes held by queued and in-progress jobs; producer (event loop) and
+        # consumer (writer thread) both touch it, so it has its own lock.
+        self._queued_bytes = 0
+        self._bytes_lock = threading.Lock()
         self.stats: Dict[str, int] = {"enqueued": 0, "written": 0, "retried": 0, "spilled": 0, "direct": 0}
 
     # -- lifecycle ---------------------------------------------------------
@@ -86,14 +101,28 @@ class DBWriter:
         return self._thread is not None and self._thread.is_alive()
 
     def snapshot(self) -> Dict[str, Any]:
-        return {"alive": self.alive(), "queued": self._q.qsize(), **self.stats}
+        with self._bytes_lock:
+            queued_bytes = self._queued_bytes
+        return {
+            "alive": self.alive(),
+            "queued": self._q.qsize(),
+            "queued_bytes": queued_bytes,
+            "queue_max_bytes": _QUEUE_MAX_BYTES,
+            **self.stats,
+        }
 
     # -- producer side -----------------------------------------------------
 
-    def submit(self, fn: Callable[..., Any], **kwargs: Any) -> None:
-        """Enqueue ``fn(conn, **kwargs)``. Synchronous; never blocks, never raises."""
+    def submit(self, fn: Callable[..., Any], *, size_hint: int = 0, **kwargs: Any) -> None:
+        """Enqueue ``fn(conn, **kwargs)``. Synchronous; never blocks, never raises.
+
+        ``size_hint`` is the caller's estimate of the bytes the job keeps alive
+        while it waits (a conversation capture holds its stripped request and
+        the response); it counts against ``LLM_RELAY_DB_QUEUE_MAX_BYTES`` and
+        is not passed on to ``fn``.
+        """
         self.stats["enqueued"] += 1
-        job: Job = (fn, kwargs)
+        job: Job = (fn, kwargs, _JOB_OVERHEAD_BYTES + max(0, int(size_hint or 0)))
         if not self._stopped and not self.alive():
             self.start()
         if self._stopped or not self.alive():
@@ -103,10 +132,23 @@ class DBWriter:
             self.stats["direct"] += 1
             self._write_or_spill(job, attempts=1)
             return
+        with self._bytes_lock:
+            over = _QUEUE_MAX_BYTES > 0 and self._queued_bytes + job[2] > _QUEUE_MAX_BYTES
+            if not over:
+                self._queued_bytes += job[2]
+        if over:
+            self._spill(job, reason="queue bytes")
+            return
         try:
             self._q.put_nowait(job)
         except queue.Full:
+            self._release(job)
             self._spill(job, reason="queue full")
+
+    def _release(self, job: Job) -> None:
+        """The job left the queue (written, spilled or drained): stop counting its bytes."""
+        with self._bytes_lock:
+            self._queued_bytes = max(0, self._queued_bytes - job[2])
 
     # -- consumer side -----------------------------------------------------
 
@@ -120,6 +162,8 @@ class DBWriter:
             except Exception:  # pragma: no cover - _write_or_spill handles its own errors
                 logger.exception("dbwriter: unexpected error")
             finally:
+                if job is not None:
+                    self._release(job)
                 self._q.task_done()
         self._reset_conn()
 
@@ -142,7 +186,7 @@ class DBWriter:
                 pass
 
     def _write_or_spill(self, job: Job, attempts: int) -> None:
-        fn, kwargs = job
+        fn, kwargs, _size = job
         name = getattr(fn, "__name__", repr(fn))
         delay = 0.5
         attempts = max(1, attempts)
@@ -168,10 +212,11 @@ class DBWriter:
                 return
             if job is not None:
                 self._spill(job, reason=reason)
+                self._release(job)
             self._q.task_done()
 
     def _spill(self, job: Job, reason: str) -> None:
-        fn, kwargs = job
+        fn, kwargs, _size = job
         name = getattr(fn, "__name__", repr(fn))
         self.stats["spilled"] += 1
         try:

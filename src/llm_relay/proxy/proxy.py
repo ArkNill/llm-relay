@@ -503,6 +503,7 @@ async def _proxy(request: Request) -> Response:
     is_stream = False
     req_json = None
     history_json = None
+    history_bytes = 0
     rewrite_skipped = False
     body_bytes = len(body) if body else 0
     if body:
@@ -538,14 +539,15 @@ async def _proxy(request: Request) -> Response:
                     body = _try_compress(req_json, body)
             if _HISTORY_ENABLED and path.startswith("/v1/messages"):
                 from .history import history_view
-                history_json = history_view(req_json)
+                history_json, history_bytes = history_view(req_json, body_bytes)
     req_json = None
 
     t0 = time.time()
 
     if is_stream:
         return await _proxy_stream(
-            client, request, url, headers, body, path, t0, body_bytes, history_json, rewrite_skipped,
+            client, request, url, headers, body, path, t0, body_bytes,
+            history_json=history_json, history_bytes=history_bytes, rewrite_skipped=rewrite_skipped,
         )
 
     # Non-streaming
@@ -629,6 +631,7 @@ async def _proxy(request: Request) -> Response:
                 from .history import capture_turn
                 _db_writer.submit(
                     capture_turn,
+                    size_hint=history_bytes + len(resp_body),
                     session_id=sid,
                     req_json=history_json,
                     resp_json=resp_json,
@@ -655,7 +658,8 @@ async def _proxy(request: Request) -> Response:
 
 
 async def _proxy_stream(
-    client, request, url, headers, body, path, t0, body_bytes=0, history_json=None, rewrite_skipped=False,
+    client, request, url, headers, body, path, t0, body_bytes=0,
+    history_json=None, history_bytes=0, rewrite_skipped=False,
 ):
     """Handle streaming responses -- true streaming proxy via client.stream().
 
@@ -665,8 +669,9 @@ async def _proxy_stream(
 
     ``history_json`` is the caller's single parse of the request with inline
     binary payloads already stripped (None = no history capture for this
-    request); the body is not parsed again here. ``rewrite_skipped`` marks a
-    body sent upstream unchanged because it exceeded
+    request) and ``history_bytes`` the size it keeps alive (the writer's queue
+    byte cap counts it); the body is not parsed again here. ``rewrite_skipped``
+    marks a body sent upstream unchanged because it exceeded
     ``LLM_RELAY_MAX_REWRITE_BYTES``; it is recorded in ``raw_usage``.
     """
     req = client.build_request(method=request.method, url=url, headers=headers, content=body)
@@ -864,9 +869,11 @@ async def _proxy_stream(
             # Step 2b -- session history capture (same sync enqueue as log_request)
             if _history_active:
                 try:
-                    from .history import capture_turn_streamed
+                    from .history import capture_turn_streamed, content_bytes
+                    response_bytes = content_bytes(_history_content)
                     _db_writer.submit(
                         capture_turn_streamed,
+                        size_hint=history_bytes + response_bytes,
                         session_id=sid,
                         req_json=history_json,
                         accumulated_content=_history_content,

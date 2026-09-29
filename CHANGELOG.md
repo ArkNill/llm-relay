@@ -19,6 +19,13 @@ All notable changes to llm-relay are documented here.
   the rewrite reorders tools on most requests, so skipping it on one large request changes
   the prompt prefix and costs a cache miss. A valve for image-heavy bursts, not for normal
   traffic.
+- **`LLM_RELAY_DB_QUEUE_MAX_BYTES`** (2026-09-29): the background DB writer bounds the bytes its
+  queue keeps alive (default 256 MB; 0 disables). Every job carries a size estimate (a
+  conversation capture: request body minus the stripped inline base64, plus the response text),
+  and a job that would push the queued total over the cap is written to the spill file at once
+  (`reason: queue bytes`) instead of growing the process while the database is slow or down.
+  The count cap `LLM_RELAY_DB_QUEUE_MAX` stays. `GET /_health` reports `db_writer.queued_bytes`
+  and `queue_max_bytes`.
 
 ### Fixed
 - **Web tool calls failing with 400 at effort `xhigh` / `max`** (2026-07-27): Claude Code sends

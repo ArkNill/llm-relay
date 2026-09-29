@@ -135,7 +135,7 @@ def _strip_blocks(blocks: List[Any]) -> List[Any]:
     return out if changed else blocks
 
 
-def history_view(req_json: Dict[str, Any]) -> Dict[str, Any]:
+def history_view(req_json: Dict[str, Any], request_size: int = 0) -> Tuple[Dict[str, Any], int]:
     """Shallow copy of a parsed request whose ``messages`` carry size markers instead of inline base64.
 
     The proxy builds this right after its single parse of the body and hands it
@@ -145,12 +145,69 @@ def history_view(req_json: Dict[str, Any]) -> Dict[str, Any]:
     2026-09-29). Everything ``_do_capture`` reads (``messages``, ``model``,
     ``temperature``, ``max_tokens``) is preserved; stripping again in
     ``_do_capture`` is a no-op on an already stripped list.
+
+    Returns ``(view, held_bytes)``: ``held_bytes`` is ``request_size`` (the
+    body length the caller already knows) minus the inline base64 that was
+    stripped, i.e. roughly the text the copy keeps alive. The background
+    writer counts it against its queue byte cap. The stripped total is only
+    walked when something was stripped (copy-on-write returns the same list
+    otherwise).
     """
     view = dict(req_json)
+    held = max(0, int(request_size or 0))
     messages = req_json.get("messages")
     if isinstance(messages, list):
-        view["messages"] = _strip_binary_payloads(messages)
-    return view
+        stripped = _strip_binary_payloads(messages)
+        view["messages"] = stripped
+        if stripped is not messages:
+            held = max(0, held - omitted_bytes(stripped))
+    return view, held
+
+
+def omitted_bytes(messages: List[Any]) -> int:
+    """Total base64 bytes that ``_strip_binary_payloads`` replaced by size markers in ``messages``."""
+    total = 0
+    for msg in messages:
+        content = msg.get("content") if isinstance(msg, dict) else None
+        if isinstance(content, list):
+            total += _omitted_in_blocks(content)
+    return total
+
+
+def _omitted_in_blocks(blocks: List[Any]) -> int:
+    total = 0
+    for block in blocks:
+        if not isinstance(block, dict):
+            continue
+        source = block.get("source")
+        if isinstance(source, dict):
+            omitted = source.get("omitted_bytes")
+            if isinstance(omitted, int):
+                total += omitted
+        elif block.get("type") == "tool_result" and isinstance(block.get("content"), list):
+            total += _omitted_in_blocks(block["content"])
+    return total
+
+
+def content_bytes(blocks: Any) -> int:
+    """UTF-8 size of the text, thinking and tool-input payloads in accumulated response blocks."""
+    if not isinstance(blocks, list):
+        return 0
+    total = 0
+    for block in blocks:
+        if not isinstance(block, dict):
+            total += len(str(block).encode("utf-8", "replace"))
+            continue
+        for key in ("text", "thinking"):
+            value = block.get(key)
+            if isinstance(value, str):
+                total += len(value.encode("utf-8", "replace"))
+        if "input" in block:
+            try:
+                total += len(json.dumps(block["input"], ensure_ascii=False).encode("utf-8", "replace"))
+            except (TypeError, ValueError):
+                total += len(str(block["input"]).encode("utf-8", "replace"))
+    return total
 
 
 # ── Conversation identity ──

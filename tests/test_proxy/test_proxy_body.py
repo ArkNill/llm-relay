@@ -89,16 +89,22 @@ class _Recorder:
     def __init__(self):
         self.jobs = []
 
-    def submit(self, fn, **kwargs):
-        self.jobs.append((fn.__name__, kwargs))
+    def submit(self, fn, size_hint=0, **kwargs):
+        self.jobs.append((fn.__name__, kwargs, size_hint))
 
     def names(self):
-        return [name for name, _ in self.jobs]
+        return [name for name, _, _ in self.jobs]
 
-    def kwargs(self, name):
-        found = [kw for job, kw in self.jobs if job == name]
+    def _only(self, name):
+        found = [job for job in self.jobs if job[0] == name]
         assert len(found) == 1, "expected one {} job, got {}".format(name, len(found))
         return found[0]
+
+    def kwargs(self, name):
+        return self._only(name)[1]
+
+    def hint(self, name):
+        return self._only(name)[2]
 
 
 class _Upstream:
@@ -231,14 +237,36 @@ def test_read_body_joins_chunks_and_keeps_a_single_chunk_as_is():
 
 def test_history_view_strips_without_touching_the_original():
     req = _request()
-    view = history_view(req)
+    body_len = len(json.dumps(req).encode("utf-8"))
+    view, held = history_view(req, body_len)
 
     assert view is not req
     assert _stripped(view["messages"])
+    assert held == body_len - len(IMAGE_B64)  # what the copy keeps alive: the body minus the image
     assert req["messages"][0]["content"][1]["source"]["data"] == IMAGE_B64
     assert view["model"] == MODEL and view["tools"] is req["tools"]
-    again = history_view(view)
+    again, held_again = history_view(view, body_len)
     assert again["messages"] is view["messages"]  # already stripped: nothing copied
+    assert held_again == body_len  # nothing stripped this time, so the caller's size stands
+
+
+# ── size hints for the DB writer's queue byte cap ──
+
+
+def test_capture_jobs_carry_the_bytes_they_hold(relay):
+    body = _post(relay, _request(stream=True))
+
+    assert relay.writer.hint("capture_turn_streamed") == len(body) - len(IMAGE_B64) + len("pong")
+    assert relay.writer.hint("log_request") == 0
+    assert relay.writer.hint("log_cache_diagnostic") == 0
+
+
+def test_non_stream_capture_hint_includes_the_response_body(relay):
+    body = _post(relay, _request(stream=False))
+
+    turn = relay.writer.kwargs("capture_turn")
+    assert turn["response_size"] > 0
+    assert relay.writer.hint("capture_turn") == len(body) - len(IMAGE_B64) + turn["response_size"]
 
 
 # ── LLM_RELAY_MAX_REWRITE_BYTES ──
