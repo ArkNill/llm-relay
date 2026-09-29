@@ -11,14 +11,14 @@ import pytest
 from test_proxy.test_history import _make_db
 
 from llm_relay.proxy.db import get_last_turn_state
-from llm_relay.proxy.history import _session_prev, capture_turn_streamed
+from llm_relay.proxy.history import _session_prev, capture_turn_streamed, reset_state
 
 
 @pytest.fixture(autouse=True)
 def _clear_session_prev():
-    _session_prev.clear()
+    reset_state()
     yield
-    _session_prev.clear()
+    reset_state()
 
 
 def _req(n_messages: int) -> dict:
@@ -35,7 +35,7 @@ def test_turn_numbers_continue_after_restart():
     capture_turn_streamed(conn, "s1", _req(1), [{"type": "text", "text": "a"}], input_tokens=100)
     capture_turn_streamed(conn, "s1", _req(3), [{"type": "text", "text": "b"}], input_tokens=120)
 
-    _session_prev.clear()  # simulate a relay restart
+    reset_state()  # simulate a relay restart
 
     capture_turn_streamed(conn, "s1", _req(5), [{"type": "text", "text": "c"}], input_tokens=140)
 

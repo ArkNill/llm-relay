@@ -7,18 +7,36 @@ detection, thinking extraction) lives here.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import sqlite3
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Set, Tuple
 
 from .db import get_last_turn_state, log_compaction_event, log_conversation_turn
 
 logger = logging.getLogger("llm-relay.history")
 
-# Per-session previous-turn message count cache (process lifetime).
-# Key: session_id, Value: (turn_number, message_count, input_tokens)
+# Per-session state (process lifetime, re-seeded from the DB after a restart).
+# Key: session_id, Value: (turn_number, message_count, input_tokens) of the last capture.
 _session_prev: Dict[str, Tuple[int, int, int]] = {}
+
+# Per-conversation delta baseline. Several conversations share one session_id
+# (CC subagents, WebSearch/WebFetch helper calls, title generation), so a delta
+# must be computed against the same conversation's previous request, not the
+# session's last capture -- otherwise every interleave looks like a compaction
+# (2026-09-29: 263 false compaction events and 295 full snapshots of up to
+# 24 MB in one session). Key: (session_id, fingerprint of the first message).
+_conv_prev: Dict[Tuple[str, str], Tuple[int, int]] = {}
+# Sessions that captured at least one turn in this process (restart fallback in _baseline).
+_session_seen: Set[str] = set()
+
+
+def reset_state() -> None:
+    """Forget all in-memory capture state (tests, restart simulation)."""
+    _session_prev.clear()
+    _conv_prev.clear()
+    _session_seen.clear()
 
 
 def _prev_state(conn: sqlite3.Connection, session_id: str) -> Optional[Tuple[int, int, int]]:
@@ -115,6 +133,55 @@ def _strip_blocks(blocks: List[Any]) -> List[Any]:
             changed = True
         out.append(new_block)
     return out if changed else blocks
+
+
+# ── Conversation identity ──
+
+
+def _fingerprint_message(msg: Any) -> str:
+    """Stable fingerprint of a message; inline payloads and cache_control markers are ignored.
+
+    The first message of a conversation never changes while it runs (a compaction
+    replaces it with a summary, which correctly starts a new chain), so it
+    identifies the conversation inside a shared session_id.
+    """
+    if isinstance(msg, dict):
+        msg = _strip_binary_payloads([msg])[0]
+        msg = {k: v for k, v in msg.items() if k != "cache_control"}
+        content = msg.get("content")
+        if isinstance(content, list):
+            msg["content"] = [
+                {k: v for k, v in block.items() if k != "cache_control"} if isinstance(block, dict) else block
+                for block in content
+            ]
+    try:
+        payload = json.dumps(msg, sort_keys=True, ensure_ascii=False, default=str)
+    except (TypeError, ValueError):
+        payload = repr(msg)
+    return hashlib.sha1(payload.encode("utf-8", "replace")).hexdigest()[:16]
+
+
+def _conversation_key(session_id: str, messages: List[Any]) -> Tuple[str, str]:
+    return (session_id, _fingerprint_message(messages[0]) if messages else "")
+
+
+def _baseline(
+    session_id: str,
+    conv_key: Tuple[str, str],
+    prev: Optional[Tuple[int, int, int]],
+) -> Tuple[int, int]:
+    """(message_count, input_tokens) the delta / compaction check compares against."""
+    base = _conv_prev.get(conv_key)
+    if base is not None:
+        return base
+    if prev is not None and session_id not in _session_seen:
+        # First capture of this session since the process started: the DB-seeded
+        # session state is the best available baseline, so turn numbers and the
+        # delta continue across restarts (2026-09-28).
+        return (prev[1], prev[2])
+    # A new conversation inside a known session (subagent, helper call): full
+    # snapshot, and no compaction event -- nothing was dropped.
+    return (0, 0)
 
 
 # ── Delta computation ──
@@ -376,6 +443,7 @@ def capture_delegation_turn(
         )
 
         _session_prev[session_id] = (turn_number, 1, 0)
+        _session_seen.add(session_id)
     except Exception:
         logger.debug("history capture failed (delegation)", exc_info=True)
 
@@ -399,9 +467,9 @@ def _do_capture(
     """Core capture logic shared by streaming and non-streaming paths."""
     current_count = len(messages)
     prev = _prev_state(conn, session_id)
-    previous_count = prev[1] if prev else 0
-    previous_tokens = prev[2] if prev else 0
     turn_number = (prev[0] + 1) if prev else 1
+    conv_key = _conversation_key(session_id, messages)
+    previous_count, previous_tokens = _baseline(session_id, conv_key, prev)
 
     # Compute delta
     if raw_mode:
@@ -470,5 +538,7 @@ def _do_capture(
         provider=provider,
     )
 
-    # Update session state
+    # Update session + conversation state
     _session_prev[session_id] = (turn_number, current_count, input_tokens)
+    _conv_prev[conv_key] = (current_count, input_tokens)
+    _session_seen.add(session_id)

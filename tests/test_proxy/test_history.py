@@ -19,10 +19,10 @@ from llm_relay.proxy.history import (
     _extract_model_params,
     _extract_response_content,
     _extract_thinking,
-    _session_prev,
     capture_delegation_turn,
     capture_turn,
     capture_turn_streamed,
+    reset_state,
 )
 
 
@@ -90,9 +90,9 @@ def _make_db():
 @pytest.fixture(autouse=True)
 def _clear_session_prev():
     """Clear the session state cache before each test."""
-    _session_prev.clear()
+    reset_state()
     yield
-    _session_prev.clear()
+    reset_state()
 
 
 # ── TestComputeDelta ──

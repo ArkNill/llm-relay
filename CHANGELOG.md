@@ -54,6 +54,11 @@ All notable changes to llm-relay are documented here.
   tools) verbatim — 24 MB rows, 3.7 GB in a single day. `request_messages` now keeps the
   block shape with `data: ""` plus `source.omitted_bytes`; `request_size_bytes` still
   records the real request body size (`history._strip_binary_payloads`).
+- **False compaction events and repeated full snapshots when several conversations share
+  one session_id** (Claude Code subagents, WebSearch/WebFetch helper calls, title
+  generation): the delta baseline is now kept per conversation (`session_id` + fingerprint
+  of the first message). Only a message-count drop inside the same conversation is
+  recorded as a compaction; a new conversation starts with a full snapshot and no event.
 - `/display/` no longer starts a new poll while the previous one is still in flight.
 
 ### Notes
