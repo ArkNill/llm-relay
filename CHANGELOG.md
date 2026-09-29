@@ -44,6 +44,12 @@ All notable changes to llm-relay are documented here.
 - **Duplicate turn numbers after a relay restart** (2026-09-28): the first capture of a session
   after a restart seeds its turn counter and delta baseline from the newest stored turn
   (`db.get_last_turn_state`) instead of starting again at turn 1 with a full snapshot.
+- **Relay OOM crash loop on dashboard polls** (2026-09-29): with `LLM_RELAY_HISTORY=1`,
+  the composition analysis behind `/api/v1/display` and `/api/v1/turns` loaded every
+  stored turn of a session on a cold cache (one image-heavy session held 3.67 GB), so
+  the first dashboard poll after each restart pushed the process past `MemoryMax` and
+  systemd's start limit left the port closed. Cold loads now start at the newest `full`
+  snapshot, which yields the same result (`composition._cold_start_turn`).
 
 ## [0.9.6] - 2026-05-21
 

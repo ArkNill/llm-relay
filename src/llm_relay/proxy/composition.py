@@ -345,17 +345,40 @@ def _build_composition_result_from_state(state: _CompositionState) -> dict:
     )
 
 
+def _cold_start_turn(conn: sqlite3.Connection, session_id: str) -> int:
+    """turn_number of the newest usable "full" snapshot for a session, or 0 when none.
+
+    Folding a "full" row resets every field of _CompositionState before
+    re-absorbing the snapshot, so folding from the newest full row yields the
+    same state as folding from turn 1. A cold cache therefore only needs the
+    rows from that snapshot onward. Loading the whole session instead
+    OOM-killed the relay on 2026-09-29: one image-heavy session held 3.67 GB
+    of stored turns, and the first dashboard poll after every restart pulled
+    all of it into memory.
+    """
+    row = conn.execute(
+        """SELECT MAX(turn_number) AS max_full FROM conversation_turns
+           WHERE session_id = ? AND storage_mode = 'full'
+             AND request_messages IS NOT NULL""",
+        (session_id,),
+    ).fetchone()
+    if not row or row["max_full"] is None:
+        return 0
+    return int(row["max_full"])
+
+
 def _full_rebuild_composition_state(
     conn: sqlite3.Connection,
     session_id: str,
 ) -> Optional[_CompositionState]:
-    """Fetch all turns for a session and fold them into a fresh state."""
+    """Fetch the turns from the newest full snapshot onward and fold them into a fresh state."""
+    start_after = max(_cold_start_turn(conn, session_id) - 1, 0)
     turns = conn.execute(
         """SELECT turn_number, storage_mode, request_messages
            FROM conversation_turns
-           WHERE session_id = ?
+           WHERE session_id = ? AND turn_number > ?
            ORDER BY turn_number ASC""",
-        (session_id,),
+        (session_id, start_after),
     ).fetchall()
     if not turns:
         return None
@@ -402,7 +425,11 @@ def analyze_session_composition(
     if cached is not None and max_turn == cached.max_turn_processed:
         return _build_composition_result_from_state(cached)
 
-    start_after = cached.max_turn_processed if cached is not None else 0
+    if cached is not None:
+        start_after = cached.max_turn_processed
+    else:
+        # Cold cache: start at the newest full snapshot, not at turn 1 (see _cold_start_turn).
+        start_after = max(_cold_start_turn(conn, session_id) - 1, 0)
     new_turns = conn.execute(
         """SELECT turn_number, storage_mode, request_messages
            FROM conversation_turns
