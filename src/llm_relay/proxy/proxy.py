@@ -45,6 +45,7 @@ _load_env_files()
 
 import httpx  # noqa: E402
 from starlette.applications import Starlette  # noqa: E402
+from starlette.middleware import Middleware  # noqa: E402
 from starlette.requests import Request  # noqa: E402
 from starlette.responses import Response, StreamingResponse  # noqa: E402
 from starlette.routing import Mount, Route  # noqa: E402
@@ -142,6 +143,12 @@ _HISTORY_RAW = os.getenv("LLM_RELAY_HISTORY_RAW", "0") == "1"
 # miss; this is a valve for image-heavy bursts (379 requests over 8 MB in one
 # day), not for normal traffic. History capture is never skipped.
 _MAX_REWRITE_BYTES = int(os.getenv("LLM_RELAY_MAX_REWRITE_BYTES", "0"))
+
+# One "request start" line per request (see _RequestLog); /_health is never logged.
+_LOG_REQUEST_START = os.getenv("LLM_RELAY_LOG_REQUEST_START", "1") == "1"
+# Requests currently inside the app (event-loop thread only, no lock needed):
+# "total" = every HTTP request, "proxy" = /v1/ requests (a stream counts until it ends).
+_in_flight = {"total": 0, "proxy": 0}
 
 CLEARED_MARKER = "[Old tool result content cleared]"
 
@@ -934,12 +941,88 @@ async def _proxy_stream(
     )
 
 
+class _RequestLog:
+    """Pure ASGI middleware: one line when a request *starts*, plus in-flight counters.
+
+    uvicorn's access log is written when a response completes, so a request
+    that takes the process down (the dashboard poll behind the 2026-09-29 OOM
+    loop) leaves no trace. The start line goes to the "llm-relay.access"
+    logger; /_health (polled) is skipped. The counters feed /_health:
+    ``in_flight`` is every HTTP request including the /_health call reporting
+    it, ``proxy_in_flight`` the /v1/ requests, where a stream counts until it
+    ends -- 0 means a restart cuts no client stream. Not BaseHTTPMiddleware:
+    that one buffers streaming responses through a background task.
+    """
+
+    def __init__(self, app):
+        self.app = app
+
+    async def __call__(self, scope, receive, send):
+        if scope["type"] != "http":
+            await self.app(scope, receive, send)
+            return
+        path = scope.get("path", "")
+        is_proxy = path.startswith("/v1/")
+        _in_flight["total"] += 1
+        if is_proxy:
+            _in_flight["proxy"] += 1
+        if _LOG_REQUEST_START and path != "/_health":
+            size = "-"
+            sid = "-"
+            for name, value in scope.get("headers") or ():
+                if name == b"content-length":
+                    size = value.decode("latin-1", "replace")
+                elif name == b"x-claude-code-session-id" or (name == b"x-session-id" and sid == "-"):
+                    sid = value.decode("latin-1", "replace")[:8]
+            client = scope.get("client")
+            _access_log.info(
+                "request start %s %s %sB client=%s session=%s",
+                scope.get("method", "-"), path, size, client[0] if client else "-", sid,
+            )
+        try:
+            await self.app(scope, receive, send)
+        finally:
+            _in_flight["total"] -= 1
+            if is_proxy:
+                _in_flight["proxy"] -= 1
+
+
+_PAGE_SIZE = os.sysconf("SC_PAGE_SIZE") if hasattr(os, "sysconf") else 4096
+
+
+def _rss_mb():
+    """Resident set size of this process in MiB (Linux /proc), None elsewhere."""
+    try:
+        with open("/proc/self/statm", encoding="ascii") as fh:
+            return int(fh.read().split()[1]) * _PAGE_SIZE // (1024 * 1024)
+    except (OSError, ValueError, IndexError):
+        return None
+
+
+def _cgroup_mb():
+    """memory.current of this process's cgroup in MiB (the systemd unit's figure), None if unreadable."""
+    try:
+        with open("/proc/self/cgroup", encoding="ascii") as fh:
+            for line in fh:
+                if line.startswith("0::"):
+                    path = "/sys/fs/cgroup" + line[3:].strip() + "/memory.current"
+                    with open(path, encoding="ascii") as current:
+                        return int(current.read().strip()) // (1024 * 1024)
+    except (OSError, ValueError):
+        pass
+    return None
+
+
 async def _health(request: Request) -> Response:
     from .composition import cache_stats
 
     payload = {
         "status": "ok",
         "upstream": UPSTREAM,
+        "in_flight": _in_flight["total"],
+        "proxy_in_flight": _in_flight["proxy"],
+        "memory_rss_mb": _rss_mb(),
+        "memory_cgroup_mb": _cgroup_mb(),
         "pool": {
             "max_connections": _MAX_CONNECTIONS,
             "max_keepalive": _MAX_KEEPALIVE,
@@ -1051,4 +1134,5 @@ _routes.append(Route("/{path:path}", _proxy, methods=["GET", "POST", "PUT", "DEL
 app = Starlette(
     routes=_routes,
     lifespan=_lifespan,
+    middleware=[Middleware(_RequestLog)],
 )

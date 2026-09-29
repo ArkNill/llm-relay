@@ -26,6 +26,13 @@ All notable changes to llm-relay are documented here.
   (`reason: queue bytes`) instead of growing the process while the database is slow or down.
   The count cap `LLM_RELAY_DB_QUEUE_MAX` stays. `GET /_health` reports `db_writer.queued_bytes`
   and `queue_max_bytes`.
+- **Request start lines and in-flight counters** (2026-09-29): uvicorn's access log is written
+  when a response completes, so the request that took the relay down (the dashboard poll behind
+  the OOM loop) left no trace. An ASGI middleware now logs one line when a request starts
+  (`request start POST /v1/messages 818767B client=127.0.0.1 session=e285e2ec`, logger
+  `llm-relay.access`, `/_health` excluded; `LLM_RELAY_LOG_REQUEST_START=0` turns it off), and
+  `GET /_health` reports `in_flight`, `proxy_in_flight` (`/v1/` requests, a stream counts until
+  it ends: 0 means a restart cuts no client stream), `memory_rss_mb` and `memory_cgroup_mb`.
 
 ### Fixed
 - **Web tool calls failing with 400 at effort `xhigh` / `max`** (2026-07-27): Claude Code sends
