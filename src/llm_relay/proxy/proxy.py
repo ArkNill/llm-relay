@@ -880,7 +880,7 @@ async def _proxy_stream(
                         model=usage_acc["model"],
                         input_tokens=usage_acc["input_tokens"],
                         request_size=body_bytes,
-                        response_size=0,
+                        response_size=response_bytes,
                         raw_mode=_HISTORY_RAW,
                     )
                 except Exception:

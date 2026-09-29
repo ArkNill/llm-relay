@@ -193,6 +193,7 @@ def test_stream_history_gets_the_stripped_view_with_model_params(relay):
     assert (view["model"], view["max_tokens"], view["temperature"]) == (MODEL, 64, 0.5)
     assert turn["accumulated_content"] == [{"type": "text", "text": "pong"}]
     assert turn["request_size"] == len(body)
+    assert turn["response_size"] == len("pong")  # streamed turns used to store 0 here
     logged = relay.writer.kwargs("log_request")
     assert (logged["status_code"], logged["is_stream"], logged["request_body_bytes"]) == (200, True, len(body))
     assert logged["raw_usage"]["stream_end"] == "completed"

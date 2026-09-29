@@ -99,6 +99,10 @@ All notable changes to llm-relay are documented here.
   started by hand, by pytest or as the MCP server (`LLM_RELAY_CACHE_FIX` was the only
   affected key; the systemd unit's `EnvironmentFile` order was already right). `.env.local`
   is now loaded first; explicit environment variables still win over both files.
+- **Streamed turns stored `response_size_bytes = 0`** (2026-09-29): the streaming capture never
+  measured its response, so the history page's per-session response total was 0 for every
+  Claude Code session. It now records the UTF-8 size of the accumulated text, thinking and
+  tool-input blocks (`history.content_bytes`).
 
 ### Notes
 - Rows stored before this change can be rewritten in place with the same transform. The
