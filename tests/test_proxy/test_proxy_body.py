@@ -133,6 +133,7 @@ def relay(monkeypatch):
     monkeypatch.setattr(proxy, "log_cache_diagnostic", log_cache_diagnostic, raising=False)
     monkeypatch.setattr(proxy, "_effort_fix_available", True)
     monkeypatch.setattr(proxy, "_normalize_effort", effort_normalize, raising=False)
+    monkeypatch.setattr(proxy, "_MAX_REWRITE_BYTES", 0)
     return SimpleNamespace(client=TestClient(proxy.app), upstream=upstream, writer=writer)
 
 
@@ -238,3 +239,40 @@ def test_history_view_strips_without_touching_the_original():
     assert view["model"] == MODEL and view["tools"] is req["tools"]
     again = history_view(view)
     assert again["messages"] is view["messages"]  # already stripped: nothing copied
+
+
+# ── LLM_RELAY_MAX_REWRITE_BYTES ──
+
+
+def test_stream_rewrite_is_skipped_above_the_limit(relay, monkeypatch):
+    monkeypatch.setattr(proxy, "_MAX_REWRITE_BYTES", 1024)
+    body = _post(relay, _request(stream=True))
+
+    assert relay.upstream.only.content == body  # original bytes, byte for byte
+    assert relay.writer.names() == ["log_request", "capture_turn_streamed"]  # no diagnostic: fix not run
+    logged = relay.writer.kwargs("log_request")
+    assert logged["raw_usage"]["rewrite_skipped"] is True
+    assert logged["raw_usage"]["stream_end"] == "completed"
+    assert _stripped(relay.writer.kwargs("capture_turn_streamed")["req_json"]["messages"])
+
+
+def test_non_stream_rewrite_is_skipped_above_the_limit(relay, monkeypatch):
+    monkeypatch.setattr(proxy, "_MAX_REWRITE_BYTES", 1024)
+    body = _post(relay, _request(stream=False))
+
+    assert relay.upstream.only.content == body
+    raw = relay.writer.kwargs("log_request")["raw_usage"]
+    assert raw["rewrite_skipped"] is True
+    assert raw["input_tokens"] == JSON_REPLY["usage"]["input_tokens"]  # merged into the upstream usage
+    assert _stripped(relay.writer.kwargs("capture_turn")["req_json"]["messages"])
+
+
+@pytest.mark.parametrize("limit", [0, 10 * 1024 * 1024])
+def test_rewrite_applies_at_or_below_the_limit(relay, monkeypatch, limit):
+    monkeypatch.setattr(proxy, "_MAX_REWRITE_BYTES", limit)
+    body = _post(relay, _request(stream=True))
+
+    sent = relay.upstream.only.content
+    assert sent != body
+    assert json.loads(sent)["output_config"]["effort"] == "high"
+    assert "rewrite_skipped" not in relay.writer.kwargs("log_request")["raw_usage"]

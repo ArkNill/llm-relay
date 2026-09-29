@@ -102,6 +102,15 @@ _SSE_PARSE_USAGE = os.getenv("LLM_RELAY_SSE_PARSE_USAGE", "1") == "1"
 _HISTORY_ENABLED = os.getenv("LLM_RELAY_HISTORY", "0") == "1"
 _HISTORY_RAW = os.getenv("LLM_RELAY_HISTORY_RAW", "0") == "1"
 
+# Request bodies above this many bytes skip the cache-fix / effort-fix / tokpress
+# rewrite: the original bytes go upstream unchanged and the request is flagged
+# with rewrite_skipped in requests.raw_usage. 0 (default) = no limit. The
+# rewrite reorders tools on most production requests (92% on 2026-09-29), so
+# skipping it on one large request changes the prompt prefix and costs a cache
+# miss; this is a valve for image-heavy bursts (379 requests over 8 MB in one
+# day), not for normal traffic. History capture is never skipped.
+_MAX_REWRITE_BYTES = int(os.getenv("LLM_RELAY_MAX_REWRITE_BYTES", "0"))
+
 CLEARED_MARKER = "[Old tool result content cleared]"
 
 # Per-tool result size caps (server-side configuration)
@@ -490,6 +499,7 @@ async def _proxy(request: Request) -> Response:
     is_stream = False
     req_json = None
     history_json = None
+    rewrite_skipped = False
     body_bytes = len(body) if body else 0
     if body:
         try:
@@ -503,18 +513,25 @@ async def _proxy(request: Request) -> Response:
             if _SCAN_ENABLED:
                 _scan_microcompact(req_json, sid)
                 _scan_budget_enforcement(req_json, sid)
-            if _cache_fix_available and path.startswith("/v1/messages"):
-                cf_modified, cf_diag = _normalize_cache(req_json, headers)
-                if cf_modified:
-                    body = json.dumps(req_json, ensure_ascii=False).encode("utf-8")
-                if cf_diag:
-                    _db_writer.submit(log_cache_diagnostic, session_id=sid, **cf_diag)
-            if _effort_fix_available and path.startswith("/v1/messages"):
-                ef_modified, _ef_original = _normalize_effort(req_json)
-                if ef_modified:
-                    body = json.dumps(req_json, ensure_ascii=False).encode("utf-8")
-            if _tokpress_available:
-                body = _try_compress(req_json, body)
+            if _MAX_REWRITE_BYTES and body_bytes > _MAX_REWRITE_BYTES:
+                rewrite_skipped = True
+                logger.info(
+                    "rewrite skipped: %d B body over LLM_RELAY_MAX_REWRITE_BYTES=%d -- %s session=%s",
+                    body_bytes, _MAX_REWRITE_BYTES, path, (sid or "unknown")[:8],
+                )
+            else:
+                if _cache_fix_available and path.startswith("/v1/messages"):
+                    cf_modified, cf_diag = _normalize_cache(req_json, headers)
+                    if cf_modified:
+                        body = json.dumps(req_json, ensure_ascii=False).encode("utf-8")
+                    if cf_diag:
+                        _db_writer.submit(log_cache_diagnostic, session_id=sid, **cf_diag)
+                if _effort_fix_available and path.startswith("/v1/messages"):
+                    ef_modified, _ef_original = _normalize_effort(req_json)
+                    if ef_modified:
+                        body = json.dumps(req_json, ensure_ascii=False).encode("utf-8")
+                if _tokpress_available:
+                    body = _try_compress(req_json, body)
             if _HISTORY_ENABLED and path.startswith("/v1/messages"):
                 from .history import history_view
                 history_json = history_view(req_json)
@@ -523,7 +540,9 @@ async def _proxy(request: Request) -> Response:
     t0 = time.time()
 
     if is_stream:
-        return await _proxy_stream(client, request, url, headers, body, path, t0, body_bytes, history_json)
+        return await _proxy_stream(
+            client, request, url, headers, body, path, t0, body_bytes, history_json, rewrite_skipped,
+        )
 
     # Non-streaming
     req = client.build_request(method=request.method, url=url, headers=headers, content=body)
@@ -578,6 +597,9 @@ async def _proxy(request: Request) -> Response:
         cc_detail = resp_usage.get("cache_creation", {})
         eph_1h = cc_detail.get("ephemeral_1h_input_tokens", 0) if isinstance(cc_detail, dict) else 0
         eph_5m = cc_detail.get("ephemeral_5m_input_tokens", 0) if isinstance(cc_detail, dict) else 0
+        raw_usage = resp_json.get("usage")
+        if rewrite_skipped:
+            raw_usage = dict(raw_usage if isinstance(raw_usage, dict) else {}, rewrite_skipped=True)
         _db_writer.submit(
             log_request,
             session_id=sid,
@@ -590,7 +612,7 @@ async def _proxy(request: Request) -> Response:
             latency_ms=latency_ms,
             endpoint=path,
             is_stream=False,
-            raw_usage=resp_json.get("usage"),
+            raw_usage=raw_usage,
             request_body_bytes=body_bytes,
             ratelimit_headers=rl_headers,
             ephemeral_1h_tokens=eph_1h,
@@ -628,7 +650,9 @@ async def _proxy(request: Request) -> Response:
     )
 
 
-async def _proxy_stream(client, request, url, headers, body, path, t0, body_bytes=0, history_json=None):
+async def _proxy_stream(
+    client, request, url, headers, body, path, t0, body_bytes=0, history_json=None, rewrite_skipped=False,
+):
     """Handle streaming responses -- true streaming proxy via client.stream().
 
     Uses an incremental UTF-8 decoder + line buffer so multibyte characters and
@@ -637,7 +661,9 @@ async def _proxy_stream(client, request, url, headers, body, path, t0, body_byte
 
     ``history_json`` is the caller's single parse of the request with inline
     binary payloads already stripped (None = no history capture for this
-    request); the body is not parsed again here.
+    request); the body is not parsed again here. ``rewrite_skipped`` marks a
+    body sent upstream unchanged because it exceeded
+    ``LLM_RELAY_MAX_REWRITE_BYTES``; it is recorded in ``raw_usage``.
     """
     req = client.build_request(method=request.method, url=url, headers=headers, content=body)
     try:
@@ -667,6 +693,8 @@ async def _proxy_stream(client, request, url, headers, body, path, t0, body_byte
         "message_stop": False,
         "stream_end": "unknown",
     }
+    if rewrite_skipped:
+        usage_acc["rewrite_skipped"] = True
 
     # History: accumulate response content blocks from SSE events. The request
     # side is history_json (stripped view from _proxy); nothing is re-parsed.

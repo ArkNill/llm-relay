@@ -13,6 +13,12 @@ All notable changes to llm-relay are documented here.
   `first_delta_ms`, `last_delta_ms`, `message_stop` and `stream_end` (`completed` /
   `client_disconnect` / `upstream_error`) in `requests.raw_usage`, so an aborted or stalled
   stream can be told apart from a long generation. No schema change.
+- **`LLM_RELAY_MAX_REWRITE_BYTES`** (2026-09-29): request bodies above this many bytes skip
+  the cache-fix / effort-fix / tokpress rewrite and go upstream unchanged, flagged as
+  `rewrite_skipped` in `requests.raw_usage`; history capture is unaffected. Default 0 (off):
+  the rewrite reorders tools on most requests, so skipping it on one large request changes
+  the prompt prefix and costs a cache miss. A valve for image-heavy bursts, not for normal
+  traffic.
 
 ### Fixed
 - **Web tool calls failing with 400 at effort `xhigh` / `max`** (2026-07-27): Claude Code sends
