@@ -135,6 +135,24 @@ def _strip_blocks(blocks: List[Any]) -> List[Any]:
     return out if changed else blocks
 
 
+def history_view(req_json: Dict[str, Any]) -> Dict[str, Any]:
+    """Shallow copy of a parsed request whose ``messages`` carry size markers instead of inline base64.
+
+    The proxy builds this right after its single parse of the body and hands it
+    to the capture functions in place of the full parse, so a streamed
+    request's closure holds the stripped copy only (the full parse of a 25 MB
+    image request otherwise stayed alive for the whole upstream stream,
+    2026-09-29). Everything ``_do_capture`` reads (``messages``, ``model``,
+    ``temperature``, ``max_tokens``) is preserved; stripping again in
+    ``_do_capture`` is a no-op on an already stripped list.
+    """
+    view = dict(req_json)
+    messages = req_json.get("messages")
+    if isinstance(messages, list):
+        view["messages"] = _strip_binary_payloads(messages)
+    return view
+
+
 # ── Conversation identity ──
 
 

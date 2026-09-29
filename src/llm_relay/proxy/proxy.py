@@ -333,6 +333,40 @@ def _session_of(headers: dict) -> str | None:
     return headers.get("x-claude-code-session-id") or headers.get("x-session-id")
 
 
+async def _read_body(request: Request) -> bytes:
+    """Read the request body without leaving a cached copy on the request.
+
+    ``request.body()`` stores the bytes in ``request._body`` for the lifetime
+    of the request, which for a streamed response is the whole upstream
+    stream. Once the cache/effort fix has rewritten the body that copy is dead
+    weight: with it, five concurrent 24 MB image requests peaked at 510 MB
+    (2026-09-29 isolated measurement). Reading the stream directly leaves the
+    proxy's local variable as the only reference, so the original is released
+    as soon as the rewritten body replaces it.
+
+    A large upload arrives as hundreds of 64 KB chunks. They are appended to
+    one growing buffer as they come instead of being collected in a list and
+    joined at the end: the list held a second copy of the body until the join,
+    and its freed pieces fragmented the heap. A body that arrives in a single
+    chunk is returned as is.
+    """
+    first = b""
+    buf = None
+    async for chunk in request.stream():
+        if not chunk:
+            continue
+        if buf is not None:
+            buf += chunk
+        elif first:
+            buf = bytearray(first)
+            buf += chunk
+        else:
+            first = chunk
+    if buf is None:
+        return first
+    return bytes(buf)
+
+
 async def _send_watching_client(client: httpx.AsyncClient, req: httpx.Request, request: Request) -> httpx.Response:
     """``client.send(stream=True)`` that is cancelled if the client disconnects first.
 
@@ -438,7 +472,7 @@ async def _proxy(request: Request) -> Response:
     query = str(request.url.query)
     url = f"{path}?{query}" if query else path
 
-    body = await request.body()
+    body = await _read_body(request)
     headers = dict(request.headers)
     # Strip hop-by-hop headers only. Preserve accept-encoding so the upstream
     # leg (internet) stays gzip-compressed -- httpx auto-decompresses locally and
@@ -447,37 +481,49 @@ async def _proxy(request: Request) -> Response:
     for h in ("host", "transfer-encoding", "connection", "content-length"):
         headers.pop(h, None)
 
+    # The body is parsed exactly once (2026-09-29). Stream detection, the
+    # cache/effort rewrite and history capture all work from this parse: history
+    # gets a copy with inline base64 replaced by size markers, and the full
+    # parse is dropped before the upstream request starts, so a streamed
+    # request's closure no longer holds a 25 MB image request for the whole
+    # stream (the stream path used to parse the body a second time for that).
     is_stream = False
     req_json = None
+    history_json = None
     body_bytes = len(body) if body else 0
     if body:
         try:
             req_json = json.loads(body)
-            is_stream = bool(req_json.get("stream", False))
-            if req_json.get("messages"):
-                sid = headers.get("x-claude-code-session-id") or headers.get("x-session-id")
-                if _SCAN_ENABLED:
-                    _scan_microcompact(req_json, sid)
-                    _scan_budget_enforcement(req_json, sid)
-                if _cache_fix_available and path.startswith("/v1/messages"):
-                    cf_modified, cf_diag = _normalize_cache(req_json, headers)
-                    if cf_modified:
-                        body = json.dumps(req_json, ensure_ascii=False).encode("utf-8")
-                    if cf_diag:
-                        _db_writer.submit(log_cache_diagnostic, session_id=sid, **cf_diag)
-                if _effort_fix_available and path.startswith("/v1/messages"):
-                    ef_modified, _ef_original = _normalize_effort(req_json)
-                    if ef_modified:
-                        body = json.dumps(req_json, ensure_ascii=False).encode("utf-8")
-                if _tokpress_available:
-                    body = _try_compress(req_json, body)
         except (json.JSONDecodeError, UnicodeDecodeError):
-            pass
+            req_json = None
+    if isinstance(req_json, dict):
+        is_stream = bool(req_json.get("stream", False))
+        if req_json.get("messages"):
+            sid = headers.get("x-claude-code-session-id") or headers.get("x-session-id")
+            if _SCAN_ENABLED:
+                _scan_microcompact(req_json, sid)
+                _scan_budget_enforcement(req_json, sid)
+            if _cache_fix_available and path.startswith("/v1/messages"):
+                cf_modified, cf_diag = _normalize_cache(req_json, headers)
+                if cf_modified:
+                    body = json.dumps(req_json, ensure_ascii=False).encode("utf-8")
+                if cf_diag:
+                    _db_writer.submit(log_cache_diagnostic, session_id=sid, **cf_diag)
+            if _effort_fix_available and path.startswith("/v1/messages"):
+                ef_modified, _ef_original = _normalize_effort(req_json)
+                if ef_modified:
+                    body = json.dumps(req_json, ensure_ascii=False).encode("utf-8")
+            if _tokpress_available:
+                body = _try_compress(req_json, body)
+            if _HISTORY_ENABLED and path.startswith("/v1/messages"):
+                from .history import history_view
+                history_json = history_view(req_json)
+    req_json = None
 
     t0 = time.time()
 
     if is_stream:
-        return await _proxy_stream(client, request, url, headers, body, path, t0, body_bytes)
+        return await _proxy_stream(client, request, url, headers, body, path, t0, body_bytes, history_json)
 
     # Non-streaming
     req = client.build_request(method=request.method, url=url, headers=headers, content=body)
@@ -550,14 +596,15 @@ async def _proxy(request: Request) -> Response:
             ephemeral_1h_tokens=eph_1h,
             ephemeral_5m_tokens=eph_5m,
         )
-        # Session history capture (opt-in)
-        if _HISTORY_ENABLED and req_json and path.startswith("/v1/messages"):
+        # Session history capture (opt-in): history_json is the stripped view
+        # built after the single parse above, None when capture is off.
+        if history_json is not None:
             try:
                 from .history import capture_turn
                 _db_writer.submit(
                     capture_turn,
                     session_id=sid,
-                    req_json=req_json,
+                    req_json=history_json,
                     resp_json=resp_json,
                     input_tokens=usage["input_tokens"],
                     request_size=body_bytes,
@@ -581,12 +628,16 @@ async def _proxy(request: Request) -> Response:
     )
 
 
-async def _proxy_stream(client, request, url, headers, body, path, t0, body_bytes=0):
+async def _proxy_stream(client, request, url, headers, body, path, t0, body_bytes=0, history_json=None):
     """Handle streaming responses -- true streaming proxy via client.stream().
 
     Uses an incremental UTF-8 decoder + line buffer so multibyte characters and
     SSE lines that span chunk boundaries are decoded correctly (C2 fix from
     audit-full-source-20260410.md -- mojibake root cause candidate).
+
+    ``history_json`` is the caller's single parse of the request with inline
+    binary payloads already stripped (None = no history capture for this
+    request); the body is not parsed again here.
     """
     req = client.build_request(method=request.method, url=url, headers=headers, content=body)
     try:
@@ -617,18 +668,11 @@ async def _proxy_stream(client, request, url, headers, body, path, t0, body_byte
         "stream_end": "unknown",
     }
 
-    # History: accumulate response content blocks from SSE events
+    # History: accumulate response content blocks from SSE events. The request
+    # side is history_json (stripped view from _proxy); nothing is re-parsed.
     _history_content = []  # list of completed content blocks
     _history_current_block = {}  # block being accumulated
-    _history_active = _HISTORY_ENABLED and path.startswith("/v1/messages")
-
-    # Parse request JSON for history (already parsed upstream, reuse ref)
-    _history_req_json = None
-    if _history_active and body:
-        try:
-            _history_req_json = json.loads(body)
-        except (json.JSONDecodeError, UnicodeDecodeError):
-            _history_active = False
+    _history_active = history_json is not None
 
     def _process_sse_line(line: str) -> None:
         nonlocal _history_current_block
@@ -786,13 +830,13 @@ async def _proxy_stream(client, request, url, headers, body, path, t0, body_byte
             )
 
             # Step 2b -- session history capture (same sync enqueue as log_request)
-            if _history_active and _history_req_json:
+            if _history_active:
                 try:
                     from .history import capture_turn_streamed
                     _db_writer.submit(
                         capture_turn_streamed,
                         session_id=sid,
-                        req_json=_history_req_json,
+                        req_json=history_json,
                         accumulated_content=_history_content,
                         model=usage_acc["model"],
                         input_tokens=usage_acc["input_tokens"],

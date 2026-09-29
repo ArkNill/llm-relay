@@ -69,6 +69,17 @@ All notable changes to llm-relay are documented here.
   bounded by entry count and idle time (`LLM_RELAY_COMPOSITION_CACHE_MAX`, default 64;
   `LLM_RELAY_COMPOSITION_CACHE_TTL_S`, default 28800; 0 disables a bound). `GET /_health`
   reports `composition_cache`.
+- **Request bodies held several times over per in-flight request** (2026-09-29): a
+  `/v1/messages` body was parsed twice (once for the cache/effort rewrite, once more in the
+  stream path for history capture), the Starlette-cached original stayed next to the
+  rewritten copy, the streaming closure held the full parse (inline base64 included) until
+  the upstream stream ended, and a large upload was collected as a list of 64 KB chunks
+  before being joined. The body is now read into one growing buffer without the
+  request-level cache, parsed once, and history capture receives a copy with inline base64
+  replaced by size markers (`history.history_view`) before the upstream request starts, at
+  which point the full parse is dropped. Five concurrent 24 MB image requests: peak 510 MB
+  to 248 MB, resident after the burst 463 MB to 202 MB (isolated relay, fake upstream).
+  Stored history rows are unchanged.
 
 ### Notes
 - Rows stored before this change can be rewritten in place with the same transform. The
