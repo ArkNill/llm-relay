@@ -4,7 +4,8 @@ Breaks down session context into categories:
   system, user_text, assistant_text, tool_use, tool_result, thinking_overhead
 
 Used by /api/v1/display to provide real-time composition visibility.
-Includes in-memory caching keyed by (session_id, max_turn_number).
+Results are cached in memory per session (incremental, bounded by entry count
+and idle time -- see _BoundedCache).
 """
 
 from __future__ import annotations
@@ -14,7 +15,8 @@ import logging
 import os
 import re
 import sqlite3
-from collections import defaultdict
+import time
+from collections import OrderedDict, defaultdict
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -35,11 +37,14 @@ class _CompositionState:
     """Cumulative state for incremental composition analysis.
 
     Built by folding turns one at a time. On storage_mode="full" (compaction),
-    accumulated/totals/tool counts/thinking_count/read_counts all reset and
-    then absorb the snapshot. On "delta", everything is appended to.
+    totals/tool counts/thinking_count/read_counts all reset and then absorb
+    the snapshot. On "delta", everything is added to. Only these aggregates
+    are kept, not the messages: every category is a per-message sum, and the
+    message list this state used to carry was never read yet made up nearly
+    all of the cache's memory (49 sessions: 45 MB with it, 0.2 MB without,
+    2026-09-29).
     """
     max_turn_processed: int = 0
-    accumulated: List[dict] = field(default_factory=list)
     read_counts: Dict[str, int] = field(default_factory=dict)
     totals: Dict[str, int] = field(default_factory=lambda: {cat: 0 for cat in CATEGORIES})
     tool_call_counts: Dict[str, int] = field(default_factory=dict)
@@ -49,14 +54,96 @@ class _CompositionState:
 
 @dataclass
 class _PerTurnState:
-    """Cumulative state for incremental per-turn composition analysis."""
+    """Cumulative state for incremental per-turn composition analysis.
+
+    Keeps running category totals and the context's message count instead of
+    the messages. Adding each turn's delta gives the same numbers as
+    re-classifying the whole context at every turn, without that
+    O(turns x messages) work (3.75 s on the event loop for one 692-turn
+    session on 2026-09-29) or a retained copy of the context.
+    """
     max_turn_processed: int = 0
-    accumulated: List[dict] = field(default_factory=list)
+    msg_count: int = 0
+    totals: Dict[str, int] = field(default_factory=lambda: {cat: 0 for cat in CATEGORIES})
     turn_results: List[dict] = field(default_factory=list)
 
 
+# ── Cache bounds ──
+
+# Nothing else ever empties the caches below (clear_cache() has no production
+# caller), so without a bound every session and session file seen during the
+# process lifetime would stay resident. Eviction only costs a cold reload on
+# the next access, which yields the same result. 0 disables a bound.
+_CACHE_MAX = int(os.getenv("LLM_RELAY_COMPOSITION_CACHE_MAX", "64"))
+_CACHE_TTL_S = float(os.getenv("LLM_RELAY_COMPOSITION_CACHE_TTL_S", "28800"))
+_clock = time.monotonic
+
+
+class _BoundedCache:
+    """Key -> value map bounded by entry count (least recently used first) and idle time.
+
+    Only touched from the event loop thread (the API handlers call the
+    analyzers synchronously), so it needs no lock.
+    """
+
+    def __init__(self) -> None:
+        self._data: OrderedDict[str, Tuple[float, Any]] = OrderedDict()
+        self.evicted = 0
+
+    def get(self, key: str) -> Any:
+        now = _clock()
+        self._expire(now)
+        item = self._data.get(key)
+        if item is None:
+            return None
+        self._data[key] = (now, item[1])
+        self._data.move_to_end(key)
+        return item[1]
+
+    def put(self, key: str, value: Any) -> None:
+        now = _clock()
+        self._data[key] = (now, value)
+        self._data.move_to_end(key)
+        self._expire(now)
+        while _CACHE_MAX > 0 and len(self._data) > _CACHE_MAX:
+            self._data.popitem(last=False)
+            self.evicted += 1
+
+    def pop(self, key: str, default: Any = None) -> Any:
+        item = self._data.pop(key, None)
+        return default if item is None else item[1]
+
+    def sweep(self) -> None:
+        """Drop idle entries now instead of on the next get/put."""
+        self._expire(_clock())
+
+    def clear(self) -> None:
+        self._data.clear()
+
+    def values(self) -> List[Any]:
+        return [value for _ts, value in self._data.values()]
+
+    def __getitem__(self, key: str) -> Any:
+        return self._data[key][1]
+
+    def __contains__(self, key: object) -> bool:
+        return key in self._data
+
+    def __len__(self) -> int:
+        return len(self._data)
+
+    def _expire(self, now: float) -> None:
+        # Entries are kept in access order, so the first one is the idlest.
+        while self._data and _CACHE_TTL_S > 0:
+            key, (ts, _value) = next(iter(self._data.items()))
+            if now - ts <= _CACHE_TTL_S:
+                break
+            del self._data[key]
+            self.evicted += 1
+
+
 # In-memory cache: session_id -> _CompositionState
-_cache: Dict[str, _CompositionState] = {}
+_cache = _BoundedCache()
 
 
 # ── Classification ──
@@ -294,8 +381,8 @@ def _fold_delta_into_composition_state(
     """Fold delta turns into the state in place.
 
     Matches the semantics of _reconstruct_and_classify: storage_mode="full"
-    resets accumulated/totals/tool_calls/tool_bytes/thinking/read_counts and
-    re-absorbs the snapshot; other modes append.
+    resets totals/tool_calls/tool_bytes/thinking/read_counts and re-absorbs
+    the snapshot; other modes add to them.
     """
     for row in new_turns:
         turn_number = row["turn_number"]
@@ -306,14 +393,11 @@ def _fold_delta_into_composition_state(
             continue
 
         if storage_mode == "full":
-            state.accumulated = list(messages)
             state.read_counts = {}
             state.totals = {cat: 0 for cat in CATEGORIES}
             state.tool_call_counts = {}
             state.tool_byte_totals = {}
             state.thinking_count = 0
-        else:
-            state.accumulated.extend(messages)
 
         d_totals, d_calls, d_bytes, d_thinking = _classify_messages_delta(messages)
         for cat in CATEGORIES:
@@ -398,8 +482,8 @@ def analyze_session_composition(
 
     Uses an incremental cache: when new turns arrive, only those past
     max_turn_processed are fetched and folded into existing state. Compaction
-    events (storage_mode="full") reset accumulated/totals/read_counts then
-    re-absorb the snapshot. On any fold exception, falls back to a full
+    events (storage_mode="full") reset totals/read_counts then re-absorb the
+    snapshot. On any fold exception, falls back to a full
     rebuild so a corrupted increment can't poison the cache permanently.
 
     Returns dict with: categories, total_bytes, est_tokens, snr, duplicate_read_count.
@@ -452,13 +536,14 @@ def analyze_session_composition(
             return None
         state = rebuilt
 
-    _cache[session_id] = state
+    _cache.put(session_id, state)
     return _build_composition_result_from_state(state)
 
 
 # ── Per-turn analysis ──
 
-_per_turn_cache: Dict[str, _PerTurnState] = {}
+# session_id -> _PerTurnState
+_per_turn_cache = _BoundedCache()
 
 
 def _reconstruct_per_turn(
@@ -536,10 +621,11 @@ def _sample_turns(turns: List[dict]) -> List[dict]:
 
 
 def _classify_accumulated_categories(accumulated: List[dict]) -> Tuple[Dict[str, int], int]:
-    """Classify an accumulated message list into category byte totals.
+    """Classify a message list into category byte totals.
 
-    Used by the per-turn fold path which only needs categories, not the
-    extended tool-call/tool-bytes/thinking breakdown.
+    Used by the per-turn fold path, which only needs categories, not the
+    extended tool-call/tool-bytes/thinking breakdown, and adds each turn's
+    result to its running totals.
     """
     totals: Dict[str, int] = {cat: 0 for cat in CATEGORIES}
     for msg in accumulated:
@@ -555,9 +641,12 @@ def _fold_delta_into_per_turn_state(
 ) -> None:
     """Fold delta turns into the per-turn state in place.
 
-    For each turn, classifies the full accumulated context at that point and
-    appends a per-turn entry. Compaction events reset `accumulated` to the
-    snapshot before classifying.
+    For each turn, adds the turn's messages to the running category totals
+    and appends the composition of the whole context at that point. A
+    storage_mode="full" row resets the totals to its snapshot first; it counts
+    as a compaction when the snapshot has fewer messages than the context had.
+    Same results as re-classifying the accumulated context every turn
+    (_reconstruct_per_turn), since each category is a per-message sum.
     """
     for row in new_turns:
         turn_number = row["turn_number"]
@@ -569,22 +658,25 @@ def _fold_delta_into_per_turn_state(
 
         compacted = False
         if storage_mode == "full":
-            if state.accumulated and len(messages) < len(state.accumulated):
+            if state.msg_count and len(messages) < state.msg_count:
                 compacted = True
-            state.accumulated = list(messages)
-        else:
-            state.accumulated.extend(messages)
+            state.msg_count = 0
+            state.totals = {cat: 0 for cat in CATEGORIES}
+        state.msg_count += len(messages)
 
-        totals, total_bytes = _classify_accumulated_categories(state.accumulated)
+        d_totals, _ = _classify_accumulated_categories(messages)
+        for cat in CATEGORIES:
+            state.totals[cat] += d_totals[cat]
+        total_bytes = sum(state.totals.values())
         categories = {}
         for cat in CATEGORIES:
-            b = totals[cat]
+            b = state.totals[cat]
             pct = round(b / total_bytes * 100, 1) if total_bytes > 0 else 0.0
             categories[cat] = {"bytes": b, "pct": pct}
 
         state.turn_results.append({
             "turn": turn_number,
-            "msgs": len(state.accumulated),
+            "msgs": state.msg_count,
             "compacted": compacted,
             "composition": {
                 "total_bytes": total_bytes,
@@ -667,7 +759,7 @@ def analyze_session_composition_per_turn(
                 return None
             state = rebuilt
 
-        _per_turn_cache[session_id] = state
+        _per_turn_cache.put(session_id, state)
     else:
         state = cached
 
@@ -683,21 +775,39 @@ def analyze_session_composition_per_turn(
 
 
 def clear_cache(session_id: Optional[str] = None) -> None:
-    """Clear composition cache for a session or all sessions."""
+    """Clear the composition caches for a session, or all of them.
+
+    The file cache (Codex / Gemini) is keyed by session file path and
+    revalidated by mtime on every read, so only a full clear empties it.
+    """
     if session_id:
         _cache.pop(session_id, None)
         _per_turn_cache.pop(session_id, None)
-        _file_cache.pop(session_id, None)
     else:
         _cache.clear()
         _per_turn_cache.clear()
         _file_cache.clear()
 
 
+def cache_stats() -> Dict[str, Any]:
+    """Sizes and eviction count of the composition caches (reported by /_health)."""
+    for cache in (_cache, _per_turn_cache, _file_cache):
+        cache.sweep()
+    return {
+        "sessions": len(_cache),
+        "per_turn_sessions": len(_per_turn_cache),
+        "per_turn_turns": sum(len(state.turn_results) for state in _per_turn_cache.values()),
+        "files": len(_file_cache),
+        "evicted": _cache.evicted + _per_turn_cache.evicted + _file_cache.evicted,
+        "max": _CACHE_MAX,
+        "ttl_s": _CACHE_TTL_S,
+    }
+
+
 # ── File-based composition (Codex / Gemini) ──
 
 # path_str -> (mtime, result_dict)
-_file_cache: Dict[str, Tuple[float, dict]] = {}
+_file_cache = _BoundedCache()
 
 _MAX_FILE_READ = 2 * 1024 * 1024  # 2 MB cap for session file reads
 
@@ -1173,5 +1283,5 @@ def analyze_file_composition(
         totals, dupes, dict(tool_call_counts), dict(tool_byte_totals),
         exec_stats, thinking_count,
     )
-    _file_cache[path] = (mtime, result)
+    _file_cache.put(path, (mtime, result))
     return result

@@ -824,6 +824,8 @@ async def _proxy_stream(client, request, url, headers, body, path, t0, body_byte
 
 
 async def _health(request: Request) -> Response:
+    from .composition import cache_stats
+
     payload = {
         "status": "ok",
         "upstream": UPSTREAM,
@@ -833,6 +835,7 @@ async def _health(request: Request) -> Response:
             "pool_timeout_s": _POOL_TIMEOUT_S,
         },
         "db_writer": _db_writer.snapshot(),
+        "composition_cache": cache_stats(),
     }
     return Response(json.dumps(payload), media_type="application/json")
 

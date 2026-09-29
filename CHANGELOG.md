@@ -60,6 +60,15 @@ All notable changes to llm-relay are documented here.
   of the first message). Only a message-count drop inside the same conversation is
   recorded as a compaction; a new conversation starts with a full snapshot and no event.
 - `/display/` no longer starts a new poll while the previous one is still in flight.
+- **Composition caches growing for the lifetime of the relay** (2026-09-29): nothing evicted an
+  entry (`clear_cache()` has no production caller), and every cached session kept its whole
+  message list although only the aggregates are read (49 sessions: 45 MB with it, 0.2 MB
+  without). The session state now keeps aggregates only; the per-turn analysis keeps running
+  totals instead of re-classifying the whole context at every turn (3.75 s to 1.59 s on the
+  event loop for a 692-turn session); and the session, per-turn and session-file caches are
+  bounded by entry count and idle time (`LLM_RELAY_COMPOSITION_CACHE_MAX`, default 64;
+  `LLM_RELAY_COMPOSITION_CACHE_TTL_S`, default 28800; 0 disables a bound). `GET /_health`
+  reports `composition_cache`.
 
 ### Notes
 - Rows stored before this change can be rewritten in place with the same transform. The
