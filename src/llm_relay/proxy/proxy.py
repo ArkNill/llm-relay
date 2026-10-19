@@ -361,7 +361,8 @@ def _apply_delta_usage(usage_acc: dict, delta_usage: dict) -> None:
     web_fetch), the input and cache counts grow with every tool iteration and
     only the final message_delta carries the totals -- message_start shows the
     first iteration only. Counts never decrease, so a present value replaces
-    the accumulator only when it is larger.
+    the accumulator only when it is larger. The tool call counts go to
+    raw_usage (no schema change).
     """
     if not isinstance(delta_usage, dict):
         return
@@ -385,6 +386,12 @@ def _apply_delta_usage(usage_acc: dict, delta_usage: dict) -> None:
             val = detail.get(src)
             if isinstance(val, int) and val > usage_acc.get(dst, 0):
                 usage_acc[dst] = val
+    stu = delta_usage.get("server_tool_use")
+    if isinstance(stu, dict):
+        for key in ("web_search_requests", "web_fetch_requests"):
+            val = stu.get(key)
+            if isinstance(val, int):
+                usage_acc[key] = val
 
 
 def _extract_ratelimit_headers(headers) -> dict[str, str] | None:

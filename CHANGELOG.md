@@ -33,6 +33,10 @@ All notable changes to llm-relay are documented here.
   `llm-relay.access`, `/_health` excluded; `LLM_RELAY_LOG_REQUEST_START=0` turns it off), and
   `GET /_health` reports `in_flight`, `proxy_in_flight` (`/v1/` requests, a stream counts until
   it ends: 0 means a restart cuts no client stream), `memory_rss_mb` and `memory_cgroup_mb`.
+- **Server-side tool counts in `raw_usage`** (2026-10-19): streamed requests record
+  `web_search_requests` and `web_fetch_requests` from the final `message_delta` usage
+  (`server_tool_use`) in `requests.raw_usage`, so search fees and search-heavy requests can be
+  accounted for. No schema change; non-streamed rows already store the whole `usage` object.
 
 ### Fixed
 - **Web tool calls failing with 400 at effort `xhigh` / `max`** (2026-07-27): Claude Code sends
