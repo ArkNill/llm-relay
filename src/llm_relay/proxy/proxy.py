@@ -353,6 +353,40 @@ def _extract_usage(data: dict) -> dict:
     }
 
 
+def _apply_delta_usage(usage_acc: dict, delta_usage: dict) -> None:
+    """Merge a streaming ``message_delta`` usage block into the accumulator.
+
+    message_delta usage is cumulative for the whole response. output_tokens is
+    always present. When the response used server-side tools (web_search,
+    web_fetch), the input and cache counts grow with every tool iteration and
+    only the final message_delta carries the totals -- message_start shows the
+    first iteration only. Counts never decrease, so a present value replaces
+    the accumulator only when it is larger.
+    """
+    if not isinstance(delta_usage, dict):
+        return
+    out = delta_usage.get("output_tokens")
+    if isinstance(out, int):
+        usage_acc["output_tokens"] = out
+    for src, dst in (
+        ("input_tokens", "input_tokens"),
+        ("cache_creation_input_tokens", "cache_creation"),
+        ("cache_read_input_tokens", "cache_read"),
+    ):
+        val = delta_usage.get(src)
+        if isinstance(val, int) and val > usage_acc.get(dst, 0):
+            usage_acc[dst] = val
+    detail = delta_usage.get("cache_creation")
+    if isinstance(detail, dict):
+        for src, dst in (
+            ("ephemeral_1h_input_tokens", "ephemeral_1h_tokens"),
+            ("ephemeral_5m_input_tokens", "ephemeral_5m_tokens"),
+        ):
+            val = detail.get(src)
+            if isinstance(val, int) and val > usage_acc.get(dst, 0):
+                usage_acc[dst] = val
+
+
 def _extract_ratelimit_headers(headers) -> dict[str, str] | None:
     """Extract rate limit related headers from API response."""
     rl = {k: v for k, v in headers.items() if k.lower().startswith(_RATELIMIT_PREFIXES)}
@@ -787,10 +821,7 @@ async def _proxy_stream(
                     "ephemeral_5m_input_tokens", 0
                 )
         elif etype == "message_delta":
-            delta_usage = event.get("usage", {})
-            usage_acc["output_tokens"] = delta_usage.get(
-                "output_tokens", usage_acc["output_tokens"]
-            )
+            _apply_delta_usage(usage_acc, event.get("usage", {}))
         # History: accumulate content blocks
         elif _history_active and etype == "content_block_start":
             cb = event.get("content_block", {})

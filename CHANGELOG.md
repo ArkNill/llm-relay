@@ -117,6 +117,14 @@ All notable changes to llm-relay are documented here.
   its own loggers when nothing else has configured logging (the CLI's `basicConfig` is left
   alone). The main logger still runs at WARNING; `LLM_RELAY_LOG_LEVEL=INFO` turns the
   diagnostics on.
+- **Streamed requests with server-side tools stored only the first iteration's input**
+  (2026-10-19): with server-side web search or web fetch, one request runs several model
+  iterations; `message_start` reports the first one, and the cumulative totals arrive in the
+  final `message_delta` usage, which the stream path read only for `output_tokens`. Over 36
+  Claude Code runs the stored rows, priced at list rates, came to 51.3% of the cost the CLI
+  reported (that figure also includes the per-search fee, which the relay does not price); runs
+  without server-side searches matched. `message_delta` usage now raises the input, cache-write,
+  cache-read and 1h/5m cache-tier counts to its final values. Earlier rows cannot be corrected.
 
 ### Notes
 - Rows stored before this change can be rewritten in place with the same transform. The
