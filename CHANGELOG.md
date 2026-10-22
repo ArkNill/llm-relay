@@ -53,6 +53,13 @@ All notable changes to llm-relay are documented here.
   (10 waits, no timeouts, same wall time) and survives 24 in flight at 374 MB.
 
 ### Fixed
+- **MCP server failed to import with mcp SDK 2.x** (2026-10-22): `mcp` 2.0 (released 2026-07-28)
+  renamed `FastMCP` to `mcp.server.mcpserver.MCPServer` and turned `mcp.server.fastmcp` into a stub
+  that raises on import, so every fresh `llm-relay[mcp]` install since then crashed at import and
+  CI has been red. `mcp/server.py` now imports whichever name the installed SDK provides; the API
+  llm-relay uses (`FastMCP(name, instructions=)`, `@mcp.tool()`, `run(transport="stdio")`) is
+  identical in both majors. The extras now require `mcp>=1.2` (the first release with FastMCP).
+  Verified: full suite passes under mcp 2.3.0 and 1.27.0.
 - **Request bodies kept alive until the stream ended, and beyond** (2026-10-22): httpx keeps
   `content=bytes` on the request, the response keeps the request, and the response's stream
   keeps the response (a reference cycle), so a 25 MB upload stayed in memory until the

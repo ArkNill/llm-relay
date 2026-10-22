@@ -7,7 +7,10 @@ import logging
 import os
 import time
 
-from mcp.server.fastmcp import FastMCP
+try:
+    from mcp.server.fastmcp import FastMCP  # mcp 1.x
+except ModuleNotFoundError:  # mcp 2.x renamed FastMCP to MCPServer; the API we use is unchanged
+    from mcp.server.mcpserver import MCPServer as FastMCP
 
 from llm_relay.i18n import t
 
