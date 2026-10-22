@@ -4,6 +4,18 @@ All notable changes to llm-relay are documented here.
 
 ## [Unreleased]
 
+## [0.9.7] - 2026-10-22
+
+> Relay hardening after the 2026-09-29 out-of-memory incident, plus the 2026-10-22 brotli
+> pass-through fix. The proxy now bounds what it holds per request (body admission gate, a
+> single parse of the request body, the body released once uploaded, bounded composition
+> caches, batched composition loads), writes usage rows from a background thread that spills
+> to disk instead of dropping them, answers pool exhaustion and transport failures with API
+> errors the client retries, and records what it used to lose: replies without a JSON body,
+> server-side tool usage, stream stall diagnostics, request start lines. Also `mcp` SDK 2.x
+> import compatibility (fresh `llm-relay[mcp]` installs had failed since 2026-07-28), an
+> effort clamp for Claude Code's web tool subrequests, and `THIRD_PARTY_NOTICES.md`.
+
 ### Added
 - **`THIRD_PARTY_NOTICES.md`** (2026-10-22): the MIT notice of cnighswonger/claude-code-cache-fix
   v1.7.2, which `proxy/cc_cache_fix.py` is adapted from, is now reproduced in full at the repository
