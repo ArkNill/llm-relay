@@ -58,6 +58,14 @@ All notable changes to llm-relay are documented here.
   own reference before the upload starts, so the bytes are freed once httpx has sent them.
   Isolated check (16 x 25 MB in flight, 1 GiB limit, gate off): peak 1020 -> 518 MB, resident
   after the burst 945 -> 42 MB.
+- **Composition analysis loading a whole session at once** (2026-10-22): the session and
+  per-turn composition folds now read turn rows in keyset batches of
+  `LLM_RELAY_COMPOSITION_BATCH_TURNS` (64; 0 = one query) ordered by `(turn_number, id)`, so an
+  analysis holds one batch of stored messages instead of the whole session (a 692-turn session
+  added 340 MB on 2026-09-29; the 10/14 session stores 195 MB). Results are unchanged, and rows
+  that share a `turn_number` (restart renumbering before 2026-09-28) are folded exactly once.
+  Isolated check, synthetic 1,200 turns x 160 KB: per-turn composition peak 221 -> 52 MB at
+  the same latency.
 - **Web tool calls failing with 400 at effort `xhigh` / `max`** (2026-07-27): Claude Code sends
   WebSearch/WebFetch subrequests with thinking disabled but keeps the session's effort level,
   which the API rejects (`output_config.effort 'xhigh' is not supported when thinking is

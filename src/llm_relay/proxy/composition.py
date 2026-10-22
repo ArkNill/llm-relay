@@ -18,7 +18,7 @@ import sqlite3
 import time
 from collections import OrderedDict, defaultdict
 from dataclasses import dataclass, field
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, Iterator, List, Optional, Tuple
 
 logger = logging.getLogger("llm-relay.composition")
 
@@ -77,6 +77,12 @@ class _PerTurnState:
 _CACHE_MAX = int(os.getenv("LLM_RELAY_COMPOSITION_CACHE_MAX", "64"))
 _CACHE_TTL_S = float(os.getenv("LLM_RELAY_COMPOSITION_CACHE_TTL_S", "28800"))
 _clock = time.monotonic
+
+# Turn rows are read and folded this many at a time, so an analysis holds one
+# batch of stored messages instead of the whole session (a single fetchall of
+# a 692-turn session added 340 MB on 2026-09-29). Folding is incremental, so
+# the result does not depend on the batch size. 0 reads all rows at once.
+_COMPOSITION_BATCH_TURNS = int(os.getenv("LLM_RELAY_COMPOSITION_BATCH_TURNS", "64"))
 
 
 class _BoundedCache:
@@ -451,23 +457,68 @@ def _cold_start_turn(conn: sqlite3.Connection, session_id: str) -> int:
     return int(row["max_full"])
 
 
+def _iter_turn_batches(
+    conn: sqlite3.Connection,
+    session_id: str,
+    start_after_turn: int,
+    batch_size: int,
+) -> Iterator[List[dict]]:
+    """Yield a session's turn rows past start_after_turn in (turn_number, id) order, batch_size at a time.
+
+    Only non-empty batches are yielded. batch_size <= 0 reads every row in one
+    query. The keyset cursor is (turn_number, id), not turn_number alone: rows
+    stored before 2026-09-28 restarted turn_number at 1 on every relay restart,
+    so a session can hold several rows with the same turn_number, and a
+    turn_number-only cursor would skip the ones that straddle a batch boundary.
+    Ordering by id as well also makes the order of such rows deterministic.
+    """
+    if batch_size <= 0:
+        rows = conn.execute(
+            """SELECT id, turn_number, storage_mode, request_messages
+               FROM conversation_turns
+               WHERE session_id = ? AND turn_number > ?
+               ORDER BY turn_number ASC, id ASC""",
+            (session_id, start_after_turn),
+        ).fetchall()
+        if rows:
+            yield [dict(t) for t in rows]
+        return
+
+    rows = conn.execute(
+        """SELECT id, turn_number, storage_mode, request_messages
+           FROM conversation_turns
+           WHERE session_id = ? AND turn_number > ?
+           ORDER BY turn_number ASC, id ASC
+           LIMIT ?""",
+        (session_id, start_after_turn, batch_size),
+    ).fetchall()
+    while rows:
+        batch = [dict(t) for t in rows]
+        yield batch
+        if len(batch) < batch_size:
+            return
+        last_turn, last_id = batch[-1]["turn_number"], batch[-1]["id"]
+        rows = conn.execute(
+            """SELECT id, turn_number, storage_mode, request_messages
+               FROM conversation_turns
+               WHERE session_id = ? AND (turn_number > ? OR (turn_number = ? AND id > ?))
+               ORDER BY turn_number ASC, id ASC
+               LIMIT ?""",
+            (session_id, last_turn, last_turn, last_id, batch_size),
+        ).fetchall()
+
+
 def _full_rebuild_composition_state(
     conn: sqlite3.Connection,
     session_id: str,
 ) -> Optional[_CompositionState]:
-    """Fetch the turns from the newest full snapshot onward and fold them into a fresh state."""
+    """Fold the turns from the newest full snapshot onward into a fresh state, one batch at a time."""
     start_after = max(_cold_start_turn(conn, session_id) - 1, 0)
-    turns = conn.execute(
-        """SELECT turn_number, storage_mode, request_messages
-           FROM conversation_turns
-           WHERE session_id = ? AND turn_number > ?
-           ORDER BY turn_number ASC""",
-        (session_id, start_after),
-    ).fetchall()
-    if not turns:
-        return None
-    state = _CompositionState()
-    _fold_delta_into_composition_state(state, [dict(t) for t in turns])
+    state: Optional[_CompositionState] = None
+    for batch in _iter_turn_batches(conn, session_id, start_after, _COMPOSITION_BATCH_TURNS):
+        if state is None:
+            state = _CompositionState()
+        _fold_delta_into_composition_state(state, batch)
     return state
 
 
@@ -514,27 +565,23 @@ def analyze_session_composition(
     else:
         # Cold cache: start at the newest full snapshot, not at turn 1 (see _cold_start_turn).
         start_after = max(_cold_start_turn(conn, session_id) - 1, 0)
-    new_turns = conn.execute(
-        """SELECT turn_number, storage_mode, request_messages
-           FROM conversation_turns
-           WHERE session_id = ? AND turn_number > ?
-           ORDER BY turn_number ASC""",
-        (session_id, start_after),
-    ).fetchall()
 
-    if not new_turns and cached is None:
+    state = cached
+    for batch in _iter_turn_batches(conn, session_id, start_after, _COMPOSITION_BATCH_TURNS):
+        if state is None:
+            state = _CompositionState()
+        try:
+            _fold_delta_into_composition_state(state, batch)
+        except Exception:
+            logger.exception("Incremental composition fold failed for %s — rebuilding", session_id)
+            state = _full_rebuild_composition_state(conn, session_id)
+            if state is None:
+                _cache.pop(session_id, None)
+                return None
+            break
+
+    if state is None:  # nothing cached and no rows past start_after
         return None
-
-    state = cached if cached is not None else _CompositionState()
-    try:
-        _fold_delta_into_composition_state(state, [dict(t) for t in new_turns])
-    except Exception:
-        logger.exception("Incremental composition fold failed for %s — rebuilding", session_id)
-        rebuilt = _full_rebuild_composition_state(conn, session_id)
-        if rebuilt is None:
-            _cache.pop(session_id, None)
-            return None
-        state = rebuilt
 
     _cache.put(session_id, state)
     return _build_composition_result_from_state(state)
@@ -691,18 +738,12 @@ def _full_rebuild_per_turn_state(
     conn: sqlite3.Connection,
     session_id: str,
 ) -> Optional[_PerTurnState]:
-    """Fetch all turns and fold them into a fresh per-turn state."""
-    turns = conn.execute(
-        """SELECT turn_number, storage_mode, request_messages
-           FROM conversation_turns
-           WHERE session_id = ?
-           ORDER BY turn_number ASC""",
-        (session_id,),
-    ).fetchall()
-    if not turns:
-        return None
-    state = _PerTurnState()
-    _fold_delta_into_per_turn_state(state, [dict(t) for t in turns])
+    """Fold all turns into a fresh per-turn state, one batch at a time."""
+    state: Optional[_PerTurnState] = None
+    for batch in _iter_turn_batches(conn, session_id, 0, _COMPOSITION_BATCH_TURNS):
+        if state is None:
+            state = _PerTurnState()
+        _fold_delta_into_per_turn_state(state, batch)
     return state
 
 
@@ -737,27 +778,23 @@ def analyze_session_composition_per_turn(
 
     if cached is None or max_turn > cached.max_turn_processed:
         start_after = cached.max_turn_processed if cached is not None else 0
-        new_turns = conn.execute(
-            """SELECT turn_number, storage_mode, request_messages
-               FROM conversation_turns
-               WHERE session_id = ? AND turn_number > ?
-               ORDER BY turn_number ASC""",
-            (session_id, start_after),
-        ).fetchall()
 
-        if not new_turns and cached is None:
+        state = cached
+        for batch in _iter_turn_batches(conn, session_id, start_after, _COMPOSITION_BATCH_TURNS):
+            if state is None:
+                state = _PerTurnState()
+            try:
+                _fold_delta_into_per_turn_state(state, batch)
+            except Exception:
+                logger.exception("Per-turn incremental fold failed for %s — rebuilding", session_id)
+                state = _full_rebuild_per_turn_state(conn, session_id)
+                if state is None:
+                    _per_turn_cache.pop(session_id, None)
+                    return None
+                break
+
+        if state is None:  # nothing cached and no rows past start_after
             return None
-
-        state = cached if cached is not None else _PerTurnState()
-        try:
-            _fold_delta_into_per_turn_state(state, [dict(t) for t in new_turns])
-        except Exception:
-            logger.exception("Per-turn incremental fold failed for %s — rebuilding", session_id)
-            rebuilt = _full_rebuild_per_turn_state(conn, session_id)
-            if rebuilt is None:
-                _per_turn_cache.pop(session_id, None)
-                return None
-            state = rebuilt
 
         _per_turn_cache.put(session_id, state)
     else:
