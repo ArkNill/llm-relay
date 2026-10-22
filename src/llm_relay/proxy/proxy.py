@@ -649,11 +649,16 @@ async def _forward(request: Request, path: str, gate_token: BodyGateToken) -> Re
 
     body = await _read_body(request)
     headers = dict(request.headers)
-    # Strip hop-by-hop headers only. Preserve accept-encoding so the upstream
-    # leg (internet) stays gzip-compressed -- httpx auto-decompresses locally and
-    # we strip content-encoding on the response to send plain bytes to the
-    # client over loopback (bytes saved upstream, not re-encoded on loopback).
-    for h in ("host", "transfer-encoding", "connection", "content-length"):
+    # Strip hop-by-hop headers, and the client's accept-encoding (2026-10-22).
+    # httpx then advertises only the encodings it can decode (gzip, deflate;
+    # br/zstd too once the optional brotli/zstandard packages are installed),
+    # decodes the upstream body locally, and the response leg drops
+    # content-encoding so the client gets plain bytes over loopback. Forwarding
+    # Claude Code's own list (gzip, deflate, br, zstd) let the edge pick brotli,
+    # which this httpx has no decoder for: the compressed bytes went to the
+    # client with the encoding header already stripped, and its JSON parse of a
+    # 529 or a non-streaming 200 failed.
+    for h in ("host", "transfer-encoding", "connection", "content-length", "accept-encoding"):
         headers.pop(h, None)
 
     # The body is parsed exactly once (2026-09-29). Stream detection, the
