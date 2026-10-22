@@ -5,6 +5,9 @@ All notable changes to llm-relay are documented here.
 ## [Unreleased]
 
 ### Added
+- **`THIRD_PARTY_NOTICES.md`** (2026-10-22): the MIT notice of cnighswonger/claude-code-cache-fix
+  v1.7.2, which `proxy/cc_cache_fix.py` is adapted from, is now reproduced in full at the repository
+  root and referenced from the module docstring. No behaviour change.
 - **Context growth rate and ETA on `/display/`** (2026-08-05): Claude Code session cards show
   the median context growth per turn over the last 40 requests, the recent turn rate, and the
   estimated time to the next zone threshold (`db.get_session_growth`; `/api/v1/display` fields

@@ -7,6 +7,9 @@ Fixes two classes of cache invalidation that GrowthBook override cannot address:
 Also captures diagnostics for future Phase 2 fixes (block drift, fingerprint).
 
 Based on: cnighswonger/claude-code-cache-fix v1.7.2 (MIT)
+  Copyright (c) 2026 Chris Nighswonger, Victor Sun (@VictorSun92), @jmarianski
+  Redistributed under the MIT License; the full upstream notice is reproduced in
+  THIRD_PARTY_NOTICES.md at the repository root.
 Toggle: LLM_RELAY_CACHE_FIX=1 (default OFF)
 """
 
