@@ -97,6 +97,7 @@ fi
 TURNS=""
 ZONE=""
 MESSAGE=""
+CTX=""
 API_OK=false
 
 RESP=$(curl -s --connect-timeout 0.3 --max-time 0.5 \
@@ -104,6 +105,7 @@ RESP=$(curl -s --connect-timeout 0.3 --max-time 0.5 \
     TURNS=$(echo "$RESP" | jq -r '.turns // empty')
     ZONE=$(echo "$RESP" | jq -r '.zone // empty')
     MESSAGE=$(echo "$RESP" | jq -r '.message // empty')
+    CTX=$(echo "$RESP" | jq -r '.current_ctx // empty')
     [ -n "$TURNS" ] && API_OK=true
 }
 
@@ -168,6 +170,27 @@ mv -f "$TMPFILE" "$STATUS_FILE"
 
 if [ -n "$MESSAGE" ] && [ "$MESSAGE" != "null" ]; then
     echo "  >> ${SID_SHORT}: ${MESSAGE}" >> "$STATUS_FILE"
+fi
+
+# === Phase 7: turn-end context line for the user (2026-10-20) ===
+# Printed as hook JSON `systemMessage` -> shown in the CC UI only, never sent to the model.
+# Zones follow LLM_TOKEN_A_* (relay display; 2026-10-20 user redefinition): green <600K / yellow 600-680K / orange 680-700K / red >=700K.
+# The green label states the hard limit (700K) and where wrap-up starts (600K).
+# Disable with LLM_TURN_CTX_MESSAGE=0.
+if [ "${LLM_TURN_CTX_MESSAGE:-1}" = "1" ] && [ "$API_OK" = true ] && [ -n "$CTX" ] && [ "$CTX" != "null" ]; then
+    CTX_K=$(( CTX / 1000 ))
+    case "$ZONE" in
+        green)  ZL="그린 <700K (600K부터 마무리 준비)" ;;
+        yellow) ZL="옐로 600~680K · 마무리 준비·인수인계 권장" ;;
+        orange) ZL="주황 680~700K · 지금 인수인계" ;;
+        red)    ZL="레드 ≥700K · 즉시 인수인계(필수)" ;;
+        hard)   ZL="차단 ≥1M" ;;
+        *)      ZL="$ZONE" ;;
+    esac
+    Q=$(curl -s --connect-timeout 0.3 --max-time 0.5 "http://localhost:${API_PORT}/api/v1/quota" 2>/dev/null \
+        | jq -r 'if .available then "7d \((.q7d_utilization|tonumber*100|floor))% · 5h \((.q5h_utilization|tonumber*100|floor))%" else empty end' 2>/dev/null || true)
+    MSG="컨텍스트 ${CTX_K}K · ${ZL}${Q:+ · ${Q}}"
+    jq -cn --arg m "$MSG" '{systemMessage: $m}' 2>/dev/null || true
 fi
 
 exit 0
