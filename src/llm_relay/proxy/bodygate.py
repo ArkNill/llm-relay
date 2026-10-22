@@ -29,8 +29,9 @@ from __future__ import annotations
 import asyncio
 import collections
 import logging
+import os
 import time
-from typing import Deque, Optional, Tuple
+from typing import Any, Callable, Deque, Optional, Tuple
 
 logger = logging.getLogger("llm-relay.bodygate")
 
@@ -53,15 +54,38 @@ def cgroup_memory_max(proc_cgroup: str = "/proc/self/cgroup", cgroup_root: str =
     return None
 
 
+def env_number(name: str, default: Any, cast: Callable[[str], Any] = int) -> Any:
+    """``cast`` of the environment variable ``name``, or ``default`` when it is unset, blank or malformed.
+
+    A knob that failed to parse used to raise at import time and keep the relay
+    from starting at all; a typo in .env.local now costs a warning line and the
+    default instead of the whole proxy.
+    """
+    raw = os.getenv(name)
+    if raw is None or not raw.strip():
+        return default
+    try:
+        return cast(raw.strip())
+    except (TypeError, ValueError):
+        logger.warning("%s=%r is not a number; using the default %r", name, raw, default)
+        return default
+
+
 def default_max_bytes(env_value: Optional[str], memory_max: Optional[int]) -> int:
-    """The budget: ``env_value`` when set, else a quarter of ``memory_max``, else 256 MiB.
+    """The budget: ``env_value`` when set and numeric, else a quarter of ``memory_max``, else 256 MiB.
 
     A quarter leaves room for the second copy each admitted request makes while
     it is parsed and rewritten, and for the rest of the process (history
-    captures, composition caches, the DB writer queue).
+    captures, composition caches, the DB writer queue). A malformed env value
+    logs a warning and falls through to the derived budget (see env_number).
     """
     if env_value is not None and env_value.strip():
-        return int(env_value)
+        try:
+            return int(env_value.strip())
+        except ValueError:
+            logger.warning(
+                "LLM_RELAY_MAX_INFLIGHT_BODY_BYTES=%r is not a number; deriving the budget instead", env_value,
+            )
     if memory_max:
         return memory_max // 4
     return FALLBACK_MAX_BYTES

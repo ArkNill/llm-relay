@@ -29,6 +29,7 @@ from llm_relay.proxy.bodygate import (
     BodyGateTimeout,
     cgroup_memory_max,
     default_max_bytes,
+    env_number,
 )
 from llm_relay.proxy.cc_cache_fix import normalize_request as cache_normalize
 from llm_relay.proxy.cc_effort_fix import normalize_request as effort_normalize
@@ -277,9 +278,34 @@ def _budget(tmp_path, memory_max, env=None):
     ("4294967296", "", 1024 ** 3),  # empty = unset
     ("4294967296", "1000", 1000),  # the env value wins
     ("max", "0", 0),  # 0 = gate off
+    ("4294967296", "1G", 1024 ** 3),  # malformed env falls through to the derived budget
 ])
 def test_default_budget_comes_from_env_then_the_cgroup_limit(tmp_path, memory_max, env, expected):
     assert _budget(tmp_path, memory_max, env) == expected
+
+
+def test_malformed_knobs_warn_and_fall_back_instead_of_raising(tmp_path, monkeypatch, caplog):
+    caplog.set_level(logging.WARNING, logger=GATE_LOG)
+    monkeypatch.setenv("LLM_RELAY_BODY_GATE_MIN_BYTES", "4M")
+    monkeypatch.setenv("LLM_RELAY_BODY_GATE_TIMEOUT_S", "two minutes")
+    monkeypatch.setenv("LLM_RELAY_BODY_GATE_EMPTY", "   ")
+
+    assert env_number("LLM_RELAY_BODY_GATE_MIN_BYTES", 7) == 7
+    assert env_number("LLM_RELAY_BODY_GATE_TIMEOUT_S", 120.0, float) == 120.0
+    assert env_number("LLM_RELAY_BODY_GATE_EMPTY", 5) == 5  # blank = unset, no warning
+    assert env_number("LLM_RELAY_BODY_GATE_UNSET", 9) == 9
+    assert _budget(tmp_path, "4294967296", "1G") == 1024 ** 3
+    warnings = [r.getMessage() for r in caplog.records if r.levelno == logging.WARNING]
+    assert len(warnings) == 3
+    assert any("LLM_RELAY_BODY_GATE_MIN_BYTES='4M'" in w for w in warnings)
+    assert any("LLM_RELAY_MAX_INFLIGHT_BODY_BYTES='1G'" in w for w in warnings)
+
+
+def test_well_formed_knobs_parse_with_the_requested_type(monkeypatch):
+    monkeypatch.setenv("LLM_RELAY_BODY_GATE_MIN_BYTES", " 1048576 ")
+    monkeypatch.setenv("LLM_RELAY_BODY_GATE_TIMEOUT_S", "0.5")
+    assert env_number("LLM_RELAY_BODY_GATE_MIN_BYTES", 7) == 1048576
+    assert env_number("LLM_RELAY_BODY_GATE_TIMEOUT_S", 120.0, float) == 0.5
 
 
 def test_cgroup_memory_max_without_a_proc_file_is_none(tmp_path):

@@ -50,7 +50,16 @@ from starlette.requests import Request  # noqa: E402
 from starlette.responses import Response, StreamingResponse  # noqa: E402
 from starlette.routing import Mount, Route  # noqa: E402
 
-from .bodygate import BodyGate, BodyGateTimeout, BodyGateToken, cgroup_memory_max, default_max_bytes  # noqa: E402
+from .bodygate import (  # noqa: E402
+    DEFAULT_MIN_BYTES,
+    DEFAULT_TIMEOUT_S,
+    BodyGate,
+    BodyGateTimeout,
+    BodyGateToken,
+    cgroup_memory_max,
+    default_max_bytes,
+    env_number,
+)
 from .db import get_conn, log_budget_event, log_microcompact, log_request  # noqa: E402
 from .dbwriter import get_writer  # noqa: E402
 
@@ -158,8 +167,8 @@ _MAX_REWRITE_BYTES = int(os.getenv("LLM_RELAY_MAX_REWRITE_BYTES", "0"))
 # A request still waiting after LLM_RELAY_BODY_GATE_TIMEOUT_S gets a 503 the
 # client retries (0 = no waiting: over budget answers 503 at once).
 _MAX_INFLIGHT_BODY_BYTES = default_max_bytes(os.getenv("LLM_RELAY_MAX_INFLIGHT_BODY_BYTES"), cgroup_memory_max())
-_BODY_GATE_MIN_BYTES = int(os.getenv("LLM_RELAY_BODY_GATE_MIN_BYTES", str(4 * 1024 * 1024)))
-_BODY_GATE_TIMEOUT_S = float(os.getenv("LLM_RELAY_BODY_GATE_TIMEOUT_S", "120"))
+_BODY_GATE_MIN_BYTES = env_number("LLM_RELAY_BODY_GATE_MIN_BYTES", DEFAULT_MIN_BYTES)
+_BODY_GATE_TIMEOUT_S = env_number("LLM_RELAY_BODY_GATE_TIMEOUT_S", DEFAULT_TIMEOUT_S, float)
 _body_gate = BodyGate(_MAX_INFLIGHT_BODY_BYTES, _BODY_GATE_MIN_BYTES, _BODY_GATE_TIMEOUT_S)
 
 # One "request start" line per request (see _RequestLog); /_health is never logged.
