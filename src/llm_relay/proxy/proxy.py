@@ -817,16 +817,22 @@ async def _forward(request: Request, path: str, gate_token: BodyGateToken) -> Re
         except (json.JSONDecodeError, UnicodeDecodeError, TypeError):
             pass
 
-    try:
-        resp_json = json.loads(resp_body)
+    # Writes go to the background DB writer: a synchronous enqueue (no
+    # await) that response teardown cannot cut short -- see dbwriter.py.
+    sid = headers.get("x-claude-code-session-id") or headers.get("x-session-id")
+    undecoded = _undecoded_encoding(upstream_resp.headers)
+    resp_json = None
+    if not undecoded:  # a body httpx left encoded is not JSON to this process
+        try:
+            resp_json = json.loads(resp_body)
+        except (json.JSONDecodeError, UnicodeDecodeError):
+            resp_json = None
+    if isinstance(resp_json, dict):
         usage = _extract_usage(resp_json)
         _warn_if_poor(usage, path)
-        # Writes go to the background DB writer: a synchronous enqueue (no
-        # await) that response teardown cannot cut short -- see dbwriter.py.
-        sid = headers.get("x-claude-code-session-id") or headers.get("x-session-id")
         # Extract ephemeral TTL tier tokens for non-streaming path
         resp_usage = resp_json.get("usage", {})
-        cc_detail = resp_usage.get("cache_creation", {})
+        cc_detail = resp_usage.get("cache_creation", {}) if isinstance(resp_usage, dict) else {}
         eph_1h = cc_detail.get("ephemeral_1h_input_tokens", 0) if isinstance(cc_detail, dict) else 0
         eph_5m = cc_detail.get("ephemeral_5m_input_tokens", 0) if isinstance(cc_detail, dict) else 0
         raw_usage = resp_json.get("usage")
@@ -870,13 +876,40 @@ async def _forward(request: Request, path: str, gate_token: BodyGateToken) -> Re
                 )
             except Exception:
                 logger.debug("history capture failed (non-stream)", exc_info=True)
-    except (json.JSONDecodeError, UnicodeDecodeError):
-        pass
+    else:
+        # Not a JSON object: a body still encoded (passed through, see
+        # _relay_headers), an edge's HTML error page, or some other shape. There
+        # is no usage to read, but the request happened and may have been
+        # billed, so record it by status alone. Until 2026-10-22 these rows were
+        # skipped, which hid every 529 met by Claude Code's non-streaming
+        # fallback and the 200s whose brotli body ended the turn.
+        raw_usage = {
+            "stream_end": "unparsed_body",
+            "content_type": upstream_resp.headers.get("content-type"),
+            "content_encoding": undecoded,
+            "response_bytes": len(resp_body),
+        }
+        if rewrite_skipped:
+            raw_usage["rewrite_skipped"] = True
+        if gate_token.waited_ms:
+            raw_usage["body_gate_wait_ms"] = gate_token.waited_ms
+        _db_writer.submit(
+            log_request,
+            session_id=sid,
+            model=None,
+            status_code=upstream_resp.status_code,
+            latency_ms=latency_ms,
+            endpoint=path,
+            is_stream=False,
+            raw_usage=raw_usage,
+            request_body_bytes=body_bytes,
+            ratelimit_headers=rl_headers,
+        )
 
     return Response(
         content=resp_body,
         status_code=upstream_resp.status_code,
-        headers=_relay_headers(upstream_resp.headers, _undecoded_encoding(upstream_resp.headers)),
+        headers=_relay_headers(upstream_resp.headers, undecoded),
     )
 
 

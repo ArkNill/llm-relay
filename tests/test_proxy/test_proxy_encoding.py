@@ -161,3 +161,44 @@ def test_gzip_body_is_decoded_and_the_header_dropped(relay):
     logged = relay.writer.kwargs("log_request")
     assert (logged["status_code"], logged["is_stream"], logged["model"]) == (200, False, MODEL)
     assert logged["raw_usage"] == JSON_REPLY["usage"]
+
+
+# ── d. a non-streaming reply whose body is not JSON is still recorded ──
+
+
+def test_non_stream_reply_without_a_json_body_is_recorded_by_status(relay):
+    relay.upstream.reply = httpx.Response(
+        529,
+        headers={
+            "content-type": "application/json",
+            "content-encoding": "x-test",
+            "anthropic-ratelimit-unified-status": "allowed",
+        },
+        content=UNKNOWN_BODY,
+    )
+    resp = _post(relay)
+
+    assert resp.status_code == 529
+    assert resp.content == UNKNOWN_BODY and resp.headers["content-encoding"] == "x-test"
+    assert relay.writer.names() == ["log_request"]  # used to be skipped: no row for the 529
+    logged = relay.writer.kwargs("log_request")
+    assert (logged["status_code"], logged["is_stream"], logged["model"]) == (529, False, None)
+    assert logged["raw_usage"] == {
+        "stream_end": "unparsed_body",
+        "content_type": "application/json",
+        "content_encoding": "x-test",
+        "response_bytes": len(UNKNOWN_BODY),
+    }
+    assert logged["ratelimit_headers"] == {"anthropic-ratelimit-unified-status": "allowed"}
+
+
+def test_non_stream_plain_error_body_that_is_not_json_is_recorded_too(relay):
+    relay.upstream.reply = httpx.Response(
+        502, headers={"content-type": "text/html"}, content=b"<html>bad gateway</html>",
+    )
+    resp = _post(relay)
+
+    assert resp.status_code == 502
+    assert resp.content == b"<html>bad gateway</html>" and "content-encoding" not in resp.headers
+    raw = relay.writer.kwargs("log_request")["raw_usage"]
+    assert (raw["stream_end"], raw["content_type"], raw["content_encoding"]) == ("unparsed_body", "text/html", None)
