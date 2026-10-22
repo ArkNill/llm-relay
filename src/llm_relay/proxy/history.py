@@ -7,18 +7,256 @@ detection, thinking extraction) lives here.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import sqlite3
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Set, Tuple
 
-from .db import log_compaction_event, log_conversation_turn
+from .db import get_last_turn_state, log_compaction_event, log_conversation_turn
 
 logger = logging.getLogger("llm-relay.history")
 
-# Per-session previous-turn message count cache (process lifetime).
-# Key: session_id, Value: (turn_number, message_count, input_tokens)
+# Per-session state (process lifetime, re-seeded from the DB after a restart).
+# Key: session_id, Value: (turn_number, message_count, input_tokens) of the last capture.
 _session_prev: Dict[str, Tuple[int, int, int]] = {}
+
+# Per-conversation delta baseline. Several conversations share one session_id
+# (CC subagents, WebSearch/WebFetch helper calls, title generation), so a delta
+# must be computed against the same conversation's previous request, not the
+# session's last capture -- otherwise every interleave looks like a compaction
+# (2026-09-29: 263 false compaction events and 295 full snapshots of up to
+# 24 MB in one session). Key: (session_id, fingerprint of the first message).
+_conv_prev: Dict[Tuple[str, str], Tuple[int, int]] = {}
+# Sessions that captured at least one turn in this process (restart fallback in _baseline).
+_session_seen: Set[str] = set()
+
+
+def reset_state() -> None:
+    """Forget all in-memory capture state (tests, restart simulation)."""
+    _session_prev.clear()
+    _conv_prev.clear()
+    _session_seen.clear()
+
+
+def _prev_state(conn: sqlite3.Connection, session_id: str) -> Optional[Tuple[int, int, int]]:
+    """Previous-turn state for a session, re-seeded from the DB after a process restart.
+
+    Without this every relay restart reset turn_number to 1 and stored a fresh
+    full snapshot, leaving duplicate turn numbers inside one session (2026-09-28).
+    input_tokens is unknown after a restart, so the token-drop compaction
+    heuristic is off for the first captured turn; the message-count check still runs.
+    """
+    prev = _session_prev.get(session_id)
+    if prev is not None:
+        return prev
+    try:
+        seeded = get_last_turn_state(conn, session_id)
+    except Exception:
+        logger.debug("turn-state seed lookup failed for %s", session_id, exc_info=True)
+        return None
+    if seeded is None:
+        return None
+    prev = (seeded[0], seeded[1], 0)
+    _session_prev[session_id] = prev
+    return prev
+
+
+# ── Inline binary payload stripping ──
+
+# Content blocks whose ``source`` carries an inline binary payload (images,
+# PDF documents). The payload is dropped from the stored copy and replaced by
+# its size: it is useless for replay/analysis, and keeping it turned turns
+# into 24 MB rows (2026-09-29: three image-reading subagents wrote 3.7 GB in
+# one day, and the dashboard's composition load of that session OOM-killed
+# the relay).
+_INLINE_SOURCE_TYPES = frozenset({"base64"})
+
+
+def _strip_binary_payloads(messages: List[Any]) -> List[Any]:
+    """Return ``messages`` with inline binary ``source.data`` replaced by a size marker.
+
+    ``source.data`` becomes ``""`` and ``source.omitted_bytes`` records the
+    length of the dropped base64 text; ``media_type`` and the block type are
+    kept. Copy-on-write: the input (still referenced by the proxy) is never
+    mutated, only the containers on the path to a replaced block are copied,
+    and when nothing needs stripping the input list itself is returned.
+    """
+    stripped: List[Any] = []
+    changed = False
+    for msg in messages:
+        new_msg = _strip_message(msg)
+        if new_msg is not msg:
+            changed = True
+        stripped.append(new_msg)
+    return stripped if changed else messages
+
+
+def _strip_message(msg: Any) -> Any:
+    if not isinstance(msg, dict):
+        return msg
+    content = msg.get("content")
+    if not isinstance(content, list):
+        return msg
+    new_content = _strip_blocks(content)
+    if new_content is content:
+        return msg
+    new_msg = dict(msg)
+    new_msg["content"] = new_content
+    return new_msg
+
+
+def _strip_blocks(blocks: List[Any]) -> List[Any]:
+    out: List[Any] = []
+    changed = False
+    for block in blocks:
+        new_block = block
+        if isinstance(block, dict):
+            source = block.get("source")
+            if (
+                isinstance(source, dict)
+                and source.get("type") in _INLINE_SOURCE_TYPES
+                and isinstance(source.get("data"), str)
+                and source["data"]
+            ):
+                new_source = dict(source)
+                new_source["data"] = ""
+                new_source["omitted_bytes"] = len(source["data"])
+                new_block = dict(block)
+                new_block["source"] = new_source
+            elif block.get("type") == "tool_result" and isinstance(block.get("content"), list):
+                inner = _strip_blocks(block["content"])
+                if inner is not block["content"]:
+                    new_block = dict(block)
+                    new_block["content"] = inner
+        if new_block is not block:
+            changed = True
+        out.append(new_block)
+    return out if changed else blocks
+
+
+def history_view(req_json: Dict[str, Any], request_size: int = 0) -> Tuple[Dict[str, Any], int]:
+    """Shallow copy of a parsed request whose ``messages`` carry size markers instead of inline base64.
+
+    The proxy builds this right after its single parse of the body and hands it
+    to the capture functions in place of the full parse, so a streamed
+    request's closure holds the stripped copy only (the full parse of a 25 MB
+    image request otherwise stayed alive for the whole upstream stream,
+    2026-09-29). Everything ``_do_capture`` reads (``messages``, ``model``,
+    ``temperature``, ``max_tokens``) is preserved; stripping again in
+    ``_do_capture`` is a no-op on an already stripped list.
+
+    Returns ``(view, held_bytes)``: ``held_bytes`` is ``request_size`` (the
+    body length the caller already knows) minus the inline base64 that was
+    stripped, i.e. roughly the text the copy keeps alive. The background
+    writer counts it against its queue byte cap. The stripped total is only
+    walked when something was stripped (copy-on-write returns the same list
+    otherwise).
+    """
+    view = dict(req_json)
+    held = max(0, int(request_size or 0))
+    messages = req_json.get("messages")
+    if isinstance(messages, list):
+        stripped = _strip_binary_payloads(messages)
+        view["messages"] = stripped
+        if stripped is not messages:
+            held = max(0, held - omitted_bytes(stripped))
+    return view, held
+
+
+def omitted_bytes(messages: List[Any]) -> int:
+    """Total base64 bytes that ``_strip_binary_payloads`` replaced by size markers in ``messages``."""
+    total = 0
+    for msg in messages:
+        content = msg.get("content") if isinstance(msg, dict) else None
+        if isinstance(content, list):
+            total += _omitted_in_blocks(content)
+    return total
+
+
+def _omitted_in_blocks(blocks: List[Any]) -> int:
+    total = 0
+    for block in blocks:
+        if not isinstance(block, dict):
+            continue
+        source = block.get("source")
+        if isinstance(source, dict):
+            omitted = source.get("omitted_bytes")
+            if isinstance(omitted, int):
+                total += omitted
+        elif block.get("type") == "tool_result" and isinstance(block.get("content"), list):
+            total += _omitted_in_blocks(block["content"])
+    return total
+
+
+def content_bytes(blocks: Any) -> int:
+    """UTF-8 size of the text, thinking and tool-input payloads in accumulated response blocks."""
+    if not isinstance(blocks, list):
+        return 0
+    total = 0
+    for block in blocks:
+        if not isinstance(block, dict):
+            total += len(str(block).encode("utf-8", "replace"))
+            continue
+        for key in ("text", "thinking"):
+            value = block.get(key)
+            if isinstance(value, str):
+                total += len(value.encode("utf-8", "replace"))
+        if "input" in block:
+            try:
+                total += len(json.dumps(block["input"], ensure_ascii=False).encode("utf-8", "replace"))
+            except (TypeError, ValueError):
+                total += len(str(block["input"]).encode("utf-8", "replace"))
+    return total
+
+
+# ── Conversation identity ──
+
+
+def _fingerprint_message(msg: Any) -> str:
+    """Stable fingerprint of a message; inline payloads and cache_control markers are ignored.
+
+    The first message of a conversation never changes while it runs (a compaction
+    replaces it with a summary, which correctly starts a new chain), so it
+    identifies the conversation inside a shared session_id.
+    """
+    if isinstance(msg, dict):
+        msg = _strip_binary_payloads([msg])[0]
+        msg = {k: v for k, v in msg.items() if k != "cache_control"}
+        content = msg.get("content")
+        if isinstance(content, list):
+            msg["content"] = [
+                {k: v for k, v in block.items() if k != "cache_control"} if isinstance(block, dict) else block
+                for block in content
+            ]
+    try:
+        payload = json.dumps(msg, sort_keys=True, ensure_ascii=False, default=str)
+    except (TypeError, ValueError):
+        payload = repr(msg)
+    return hashlib.sha1(payload.encode("utf-8", "replace")).hexdigest()[:16]
+
+
+def _conversation_key(session_id: str, messages: List[Any]) -> Tuple[str, str]:
+    return (session_id, _fingerprint_message(messages[0]) if messages else "")
+
+
+def _baseline(
+    session_id: str,
+    conv_key: Tuple[str, str],
+    prev: Optional[Tuple[int, int, int]],
+) -> Tuple[int, int]:
+    """(message_count, input_tokens) the delta / compaction check compares against."""
+    base = _conv_prev.get(conv_key)
+    if base is not None:
+        return base
+    if prev is not None and session_id not in _session_seen:
+        # First capture of this session since the process started: the DB-seeded
+        # session state is the best available baseline, so turn numbers and the
+        # delta continue across restarts (2026-09-28).
+        return (prev[1], prev[2])
+    # A new conversation inside a known session (subagent, helper call): full
+    # snapshot, and no compaction event -- nothing was dropped.
+    return (0, 0)
 
 
 # ── Delta computation ──
@@ -261,7 +499,7 @@ def capture_delegation_turn(
         )
 
         # Use a delegation-scoped turn counter
-        prev = _session_prev.get(session_id)
+        prev = _prev_state(conn, session_id)
         turn_number = (prev[0] + 1) if prev else 1
 
         log_conversation_turn(
@@ -280,6 +518,7 @@ def capture_delegation_turn(
         )
 
         _session_prev[session_id] = (turn_number, 1, 0)
+        _session_seen.add(session_id)
     except Exception:
         logger.debug("history capture failed (delegation)", exc_info=True)
 
@@ -302,10 +541,10 @@ def _do_capture(
 ) -> None:
     """Core capture logic shared by streaming and non-streaming paths."""
     current_count = len(messages)
-    prev = _session_prev.get(session_id)
-    previous_count = prev[1] if prev else 0
-    previous_tokens = prev[2] if prev else 0
+    prev = _prev_state(conn, session_id)
     turn_number = (prev[0] + 1) if prev else 1
+    conv_key = _conversation_key(session_id, messages)
+    previous_count, previous_tokens = _baseline(session_id, conv_key, prev)
 
     # Compute delta
     if raw_mode:
@@ -353,8 +592,8 @@ def _do_capture(
     if model_override:
         model = model_override
 
-    # Serialize request messages
-    request_msg_json = json.dumps(msgs_to_store, ensure_ascii=False)
+    # Serialize request messages (inline images/documents reduced to size markers)
+    request_msg_json = json.dumps(_strip_binary_payloads(msgs_to_store), ensure_ascii=False)
 
     log_conversation_turn(
         conn,
@@ -374,5 +613,7 @@ def _do_capture(
         provider=provider,
     )
 
-    # Update session state
+    # Update session + conversation state
     _session_prev[session_id] = (turn_number, current_count, input_tokens)
+    _conv_prev[conv_key] = (current_count, input_tokens)
+    _session_seen.add(session_id)

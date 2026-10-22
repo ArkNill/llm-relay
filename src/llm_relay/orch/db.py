@@ -5,12 +5,12 @@ Supports SQLite (default) and PostgreSQL (when LLM_RELAY_DB starts with postgres
 
 from __future__ import annotations
 
-import os
 import sqlite3
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from llm_relay.proxy.db import _USE_PG, _bool_val, _ts_ago, _ts_now
+from llm_relay.proxy.db import DEFAULT_DB as _PROXY_DEFAULT_DB
 
 _ORCH_SCHEMA = """
 CREATE TABLE IF NOT EXISTS delegations (
@@ -34,8 +34,10 @@ CREATE INDEX IF NOT EXISTS idx_deleg_ts ON delegations(ts);
 CREATE INDEX IF NOT EXISTS idx_deleg_cli ON delegations(cli_id);
 """
 
-_default = str(Path.home() / ".llm-relay" / "usage.db")
-DEFAULT_DB = Path.home() / ".llm-relay" / "usage.db" if _USE_PG else Path(os.getenv("LLM_RELAY_DB", _default))
+# Same resolution as proxy.db (single source of truth). Re-reading LLM_RELAY_DB here
+# used to turn a postgresql:// URL into a filesystem path when proxy.db had been
+# imported before the env was loaded (2026-09-28: stray SQLite file in the repo root).
+DEFAULT_DB = _PROXY_DEFAULT_DB
 
 
 def get_orch_conn(db_path: Optional[Path] = None) -> Any:

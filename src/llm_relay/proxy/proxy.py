@@ -13,14 +13,18 @@ from pathlib import Path
 from typing import Any
 
 
-def _load_env_files():
-    """Load .env.public and .env.local (2-tier env) for native (non-Docker) runs.
+def _load_env_files(base: Path | None = None) -> None:
+    """Load .env.local then .env.public (2-tier env) for native (non-Docker) runs.
 
     Only sets variables that are not already in the environment, so explicit
-    env vars and Docker env_file both take precedence.
+    env vars and Docker env_file both take precedence, and .env.local (loaded
+    first) overrides .env.public. Before 2026-09-29 the files were loaded in
+    the opposite order, so outside systemd (whose EnvironmentFile order was
+    already right) a key present in both files kept the public value.
     """
-    base = Path(__file__).resolve().parent.parent.parent.parent  # repo root
-    for name in (".env.public", ".env.local"):
+    if base is None:
+        base = Path(__file__).resolve().parent.parent.parent.parent  # repo root
+    for name in (".env.local", ".env.public"):
         env_path = base / name
         if not env_path.is_file():
             continue
@@ -41,11 +45,23 @@ _load_env_files()
 
 import httpx  # noqa: E402
 from starlette.applications import Starlette  # noqa: E402
+from starlette.middleware import Middleware  # noqa: E402
 from starlette.requests import Request  # noqa: E402
 from starlette.responses import Response, StreamingResponse  # noqa: E402
 from starlette.routing import Mount, Route  # noqa: E402
 
+from .bodygate import (  # noqa: E402
+    DEFAULT_MIN_BYTES,
+    DEFAULT_TIMEOUT_S,
+    BodyGate,
+    BodyGateTimeout,
+    BodyGateToken,
+    cgroup_memory_max,
+    default_max_bytes,
+    env_number,
+)
 from .db import get_conn, log_budget_event, log_microcompact, log_request  # noqa: E402
+from .dbwriter import get_writer  # noqa: E402
 
 # GrowthBook intercept (local-only, file excluded via .gitignore)
 try:
@@ -65,10 +81,62 @@ if os.getenv("LLM_RELAY_CACHE_FIX", "0") == "1":
     except ImportError:
         pass
 
+# CC effort fix (opt-out, LLM_RELAY_EFFORT_FIX=0)
+_effort_fix_available = False
+if os.getenv("LLM_RELAY_EFFORT_FIX", "1") == "1":
+    try:
+        from .cc_effort_fix import normalize_request as _normalize_effort
+        _effort_fix_available = True
+    except ImportError:
+        pass
+
 logger = logging.getLogger("llm-relay")
+# Request start lines (see _RequestLog); INFO regardless of the main logger's level.
+_access_log = logging.getLogger("llm-relay.access")
+
+
+def _setup_logging() -> None:
+    """Give the relay's loggers an output when nothing else has configured logging.
+
+    Under uvicorn only uvicorn's own loggers get handlers. The "llm-relay"
+    logger propagated to a bare root logger, so its INFO diagnostics (cache
+    fix, compaction, client gone before headers) never reached the journal
+    and its warnings came out through logging's last-resort handler
+    (2026-09-29: 0 INFO lines in two days of journal). A handler is installed
+    once, only when neither root nor "llm-relay" has one -- the CLI's
+    basicConfig is left alone. "llm-relay" keeps inheriting WARNING unless
+    LLM_RELAY_LOG_LEVEL names a level; "llm-relay.access" runs at INFO.
+    """
+    if not logging.getLogger().handlers and not logger.handlers:
+        handler = logging.StreamHandler()
+        handler.setFormatter(logging.Formatter("%(levelname)s:     %(message)s"))
+        logger.addHandler(handler)
+    level_name = os.getenv("LLM_RELAY_LOG_LEVEL", "").strip().upper()
+    if level_name:
+        level = logging.getLevelName(level_name)
+        logger.setLevel(level if isinstance(level, int) else logging.WARNING)
+    _access_log.setLevel(logging.INFO)
+    # A body gate wait means a session is being held back; the two INFO lines
+    # per wait are rare, so they stay visible at the default WARNING level.
+    logging.getLogger("llm-relay.bodygate").setLevel(logging.INFO)
+
+
+_setup_logging()
 
 UPSTREAM = os.getenv("LLM_RELAY_UPSTREAM", "https://api.anthropic.com")
 WARN_READ_RATIO = float(os.getenv("LLM_RELAY_WARN_RATIO", "50.0"))
+
+# Upstream connection pool (2026-09-28). The old cap of 20 was exceeded in
+# production (31 concurrent streams on 9/21 when one session fanned out
+# sub-agents); requests beyond the cap queued inside httpx for up to the pool
+# timeout while the client saw nothing. A short pool timeout turns a residual
+# exhaustion into a visible 503 that the client retries instead of a hang.
+_MAX_CONNECTIONS = int(os.getenv("LLM_RELAY_MAX_CONNECTIONS", "100"))
+_MAX_KEEPALIVE = int(os.getenv("LLM_RELAY_MAX_KEEPALIVE", "20"))
+_POOL_TIMEOUT_S = float(os.getenv("LLM_RELAY_POOL_TIMEOUT_S", "30"))
+# How often to check that the client is still connected while we wait for
+# upstream response headers (pool wait + first byte).
+_DISCONNECT_POLL_S = float(os.getenv("LLM_RELAY_DISCONNECT_POLL_S", "1.0"))
 
 # Performance toggles (default OFF for low-overhead proxying).
 # Set =1 to re-enable the corresponding diagnostic/compression path.
@@ -79,6 +147,35 @@ _SSE_PARSE_USAGE = os.getenv("LLM_RELAY_SSE_PARSE_USAGE", "1") == "1"
 # Session history (opt-in, LLM_RELAY_HISTORY=1)
 _HISTORY_ENABLED = os.getenv("LLM_RELAY_HISTORY", "0") == "1"
 _HISTORY_RAW = os.getenv("LLM_RELAY_HISTORY_RAW", "0") == "1"
+
+# Request bodies above this many bytes skip the cache-fix / effort-fix / tokpress
+# rewrite: the original bytes go upstream unchanged and the request is flagged
+# with rewrite_skipped in requests.raw_usage. 0 (default) = no limit. The
+# rewrite reorders tools on most production requests (92% on 2026-09-29), so
+# skipping it on one large request changes the prompt prefix and costs a cache
+# miss; this is a valve for image-heavy bursts (379 requests over 8 MB in one
+# day), not for normal traffic. History capture is never skipped.
+_MAX_REWRITE_BYTES = int(os.getenv("LLM_RELAY_MAX_REWRITE_BYTES", "0"))
+
+# Request body byte budget (2026-10-22, see bodygate.py). On 9/29 a burst of
+# about 40 image requests of 25 MB, each holding about 50 MB while it was read,
+# parsed and uploaded, took the relay past MemoryMax. A body of at least
+# LLM_RELAY_BODY_GATE_MIN_BYTES (by content-length) now waits before it is read
+# while the admitted bodies plus its own would exceed the budget, and gives its
+# bytes back as soon as upstream response headers arrive. Unset budget = a
+# quarter of the cgroup memory.max (256 MiB when there is none), 0 = gate off.
+# A request still waiting after LLM_RELAY_BODY_GATE_TIMEOUT_S gets a 503 the
+# client retries (0 = no waiting: over budget answers 503 at once).
+_MAX_INFLIGHT_BODY_BYTES = default_max_bytes(os.getenv("LLM_RELAY_MAX_INFLIGHT_BODY_BYTES"), cgroup_memory_max())
+_BODY_GATE_MIN_BYTES = env_number("LLM_RELAY_BODY_GATE_MIN_BYTES", DEFAULT_MIN_BYTES)
+_BODY_GATE_TIMEOUT_S = env_number("LLM_RELAY_BODY_GATE_TIMEOUT_S", DEFAULT_TIMEOUT_S, float)
+_body_gate = BodyGate(_MAX_INFLIGHT_BODY_BYTES, _BODY_GATE_MIN_BYTES, _BODY_GATE_TIMEOUT_S)
+
+# One "request start" line per request (see _RequestLog); /_health is never logged.
+_LOG_REQUEST_START = os.getenv("LLM_RELAY_LOG_REQUEST_START", "1") == "1"
+# Requests currently inside the app (event-loop thread only, no lock needed):
+# "total" = every HTTP request, "proxy" = /v1/ requests (a stream counts until it ends).
+_in_flight = {"total": 0, "proxy": 0}
 
 CLEARED_MARKER = "[Old tool result content cleared]"
 
@@ -167,8 +264,8 @@ def _scan_budget_enforcement(req_json: dict, session_id: str | None) -> None:
             marker = "suspiciously_small"
 
         if truncated:
-            log_budget_event(
-                _get_conn(),
+            _db_writer.submit(
+                log_budget_event,
                 session_id=session_id,
                 msg_index=idx,
                 tool_name=tool_name,
@@ -236,8 +333,8 @@ def _scan_microcompact(req_json: dict, session_id: str | None) -> None:
             cleared_indices[:10],
             session_id or "unknown",
         )
-        log_microcompact(
-            _get_conn(),
+        _db_writer.submit(
+            log_microcompact,
             session_id=session_id,
             cleared_count=len(cleared_indices),
             total_tool_results=total_tool_results,
@@ -245,8 +342,9 @@ def _scan_microcompact(req_json: dict, session_id: str | None) -> None:
             message_count=len(messages),
         )
 
-_conn = None
+_conn = None  # main-thread connection: read-only use (/_stats, /_recent, API routes)
 _client = None
+_db_writer = get_writer()  # every write goes through the background writer (dbwriter.py)
 
 
 def _get_conn():
@@ -261,8 +359,11 @@ def _get_client():
     if _client is None:
         _client = httpx.AsyncClient(
             base_url=UPSTREAM,
-            timeout=httpx.Timeout(300.0, connect=30.0),
-            limits=httpx.Limits(max_connections=20, max_keepalive_connections=10),
+            timeout=httpx.Timeout(300.0, connect=30.0, pool=_POOL_TIMEOUT_S),
+            limits=httpx.Limits(
+                max_connections=_MAX_CONNECTIONS,
+                max_keepalive_connections=_MAX_KEEPALIVE,
+            ),
         )
     return _client
 
@@ -277,6 +378,47 @@ def _extract_usage(data: dict) -> dict:
         "cache_read": usage.get("cache_read_input_tokens", 0),
         "model": data.get("model"),
     }
+
+
+def _apply_delta_usage(usage_acc: dict, delta_usage: dict) -> None:
+    """Merge a streaming ``message_delta`` usage block into the accumulator.
+
+    message_delta usage is cumulative for the whole response. output_tokens is
+    always present. When the response used server-side tools (web_search,
+    web_fetch), the input and cache counts grow with every tool iteration and
+    only the final message_delta carries the totals -- message_start shows the
+    first iteration only. Counts never decrease, so a present value replaces
+    the accumulator only when it is larger. The tool call counts go to
+    raw_usage (no schema change).
+    """
+    if not isinstance(delta_usage, dict):
+        return
+    out = delta_usage.get("output_tokens")
+    if isinstance(out, int):
+        usage_acc["output_tokens"] = out
+    for src, dst in (
+        ("input_tokens", "input_tokens"),
+        ("cache_creation_input_tokens", "cache_creation"),
+        ("cache_read_input_tokens", "cache_read"),
+    ):
+        val = delta_usage.get(src)
+        if isinstance(val, int) and val > usage_acc.get(dst, 0):
+            usage_acc[dst] = val
+    detail = delta_usage.get("cache_creation")
+    if isinstance(detail, dict):
+        for src, dst in (
+            ("ephemeral_1h_input_tokens", "ephemeral_1h_tokens"),
+            ("ephemeral_5m_input_tokens", "ephemeral_5m_tokens"),
+        ):
+            val = detail.get(src)
+            if isinstance(val, int) and val > usage_acc.get(dst, 0):
+                usage_acc[dst] = val
+    stu = delta_usage.get("server_tool_use")
+    if isinstance(stu, dict):
+        for key in ("web_search_requests", "web_fetch_requests"):
+            val = stu.get(key)
+            if isinstance(val, int):
+                usage_acc[key] = val
 
 
 def _extract_ratelimit_headers(headers) -> dict[str, str] | None:
@@ -299,6 +441,170 @@ def _warn_if_poor(usage: dict, endpoint: str) -> None:
             )
 
 
+class _ClientGone(Exception):
+    """The client closed its connection before upstream response headers arrived."""
+
+
+def _session_of(headers: dict) -> str | None:
+    return headers.get("x-claude-code-session-id") or headers.get("x-session-id")
+
+
+async def _read_body(request: Request) -> bytes:
+    """Read the request body without leaving a cached copy on the request.
+
+    ``request.body()`` stores the bytes in ``request._body`` for the lifetime
+    of the request, which for a streamed response is the whole upstream
+    stream. Once the cache/effort fix has rewritten the body that copy is dead
+    weight: with it, five concurrent 24 MB image requests peaked at 510 MB
+    (2026-09-29 isolated measurement). Reading the stream directly leaves the
+    proxy's local variable as the only reference, so the original is released
+    as soon as the rewritten body replaces it.
+
+    A large upload arrives as hundreds of 64 KB chunks. They are appended to
+    one growing buffer as they come instead of being collected in a list and
+    joined at the end: the list held a second copy of the body until the join,
+    and its freed pieces fragmented the heap. A body that arrives in a single
+    chunk is returned as is.
+    """
+    first = b""
+    buf = None
+    async for chunk in request.stream():
+        if not chunk:
+            continue
+        if buf is not None:
+            buf += chunk
+        elif first:
+            buf = bytearray(first)
+            buf += chunk
+        else:
+            first = chunk
+    if buf is None:
+        return first
+    return bytes(buf)
+
+
+async def _one_shot(data: bytes):
+    """Hand the request body to httpx as a generator that yields it once.
+
+    With ``content=bytes`` httpx keeps the body on the request (its stream and
+    ``_content``), and the upstream response keeps the request. The upload
+    stayed alive until a streamed response ended, and past that until the
+    garbage collector freed the response: httpx binds a response's stream
+    back to the response, a reference cycle (a 48 MB rewritten body in a
+    2026-10-22 loopback check). The generator's frame lets go of the bytes
+    once httpx has sent them. The caller sets content-length: without it
+    httpx sends generator content chunked.
+    """
+    yield data
+
+
+async def _send_watching_client(client: httpx.AsyncClient, req: httpx.Request, request: Request) -> httpx.Response:
+    """``client.send(stream=True)`` that is cancelled if the client disconnects first.
+
+    Before 2026-09-28 a request waiting in the httpx pool or for the upstream
+    first byte kept running after the client gave up and retried, so the
+    original and the retry both held pool slots and both reached upstream
+    (isolated test: client left at 2s, relay held the upstream connection until
+    the 12s response). Polling ``request.is_disconnected()`` costs nothing on
+    the happy path because ``asyncio.wait`` returns as soon as headers arrive.
+    """
+    send_task = asyncio.ensure_future(client.send(req, stream=True))
+    try:
+        while True:
+            done, _pending = await asyncio.wait({send_task}, timeout=_DISCONNECT_POLL_S)
+            if done:
+                return send_task.result()
+            if await request.is_disconnected():
+                send_task.cancel()
+                try:
+                    await send_task
+                except asyncio.CancelledError:
+                    pass
+                except Exception:
+                    pass
+                raise _ClientGone()
+    except asyncio.CancelledError:
+        send_task.cancel()
+        raise
+
+
+def _client_gone_response(headers: dict, path: str, t0: float, body_bytes: int, is_stream: bool) -> Response:
+    """Record a client disconnect that happened before upstream headers; answer 499."""
+    latency_ms = (time.time() - t0) * 1000
+    sid = _session_of(headers)
+    logger.info(
+        "client disconnected before upstream headers after %.0f ms -- %s session=%s",
+        latency_ms, path, sid or "unknown",
+    )
+    _db_writer.submit(
+        log_request,
+        session_id=sid,
+        model=None,
+        status_code=499,
+        latency_ms=latency_ms,
+        endpoint=path,
+        is_stream=is_stream,
+        raw_usage={"stream_end": "client_disconnect_before_headers"},
+        request_body_bytes=body_bytes,
+    )
+    return Response(status_code=499)
+
+
+def _upstream_error_response(
+    exc: Exception, headers: dict, path: str, t0: float, body_bytes: int, is_stream: bool,
+) -> Response:
+    """Turn an httpx transport failure into a structured API error the client retries.
+
+    These used to surface as an opaque 500 and were never recorded.
+    """
+    if isinstance(exc, httpx.PoolTimeout):
+        status = 503
+        msg = "connection pool exhausted (waited {:.0f}s for a free upstream slot)".format(_POOL_TIMEOUT_S)
+    elif isinstance(exc, (httpx.ConnectTimeout, httpx.ConnectError)):
+        status, msg = 502, "could not connect to upstream"
+    elif isinstance(exc, (httpx.ReadTimeout, httpx.WriteTimeout)):
+        status, msg = 504, "upstream did not respond in time"
+    else:
+        status, msg = 502, "upstream request failed ({})".format(type(exc).__name__)
+    latency_ms = (time.time() - t0) * 1000
+    sid = _session_of(headers)
+    logger.warning("upstream %s on %s after %.0f ms -- %s: %s", type(exc).__name__, path, latency_ms, msg, exc)
+    _db_writer.submit(
+        log_request,
+        session_id=sid,
+        model=None,
+        status_code=status,
+        latency_ms=latency_ms,
+        endpoint=path,
+        is_stream=is_stream,
+        raw_usage={"stream_end": "upstream_error", "error": type(exc).__name__},
+        request_body_bytes=body_bytes,
+    )
+    body = json.dumps({"type": "error", "error": {"type": "api_error", "message": "llm-relay: " + msg}})
+    return Response(body, status_code=status, media_type="application/json")
+
+
+def _body_gate_timeout_response(exc: BodyGateTimeout, headers, path: str, t0: float) -> Response:
+    """Record a request that gave up waiting at the body gate; answer 503 like a pool timeout."""
+    latency_ms = (time.time() - t0) * 1000
+    sid = _session_of(headers)
+    msg = "request body gate timeout (waited {:.0f}s for {} B, max {} B)".format(exc.waited_s, exc.n, exc.max_bytes)
+    logger.warning("%s -- %s session=%s", msg, path, (sid or "unknown")[:8])
+    _db_writer.submit(
+        log_request,
+        session_id=sid,
+        model=None,
+        status_code=503,
+        latency_ms=latency_ms,
+        endpoint=path,
+        is_stream=False,  # unknown: the body was never read
+        raw_usage={"stream_end": "body_gate_timeout"},
+        request_body_bytes=exc.n,
+    )
+    body = json.dumps({"type": "error", "error": {"type": "api_error", "message": "llm-relay: " + msg}})
+    return Response(body, status_code=503, media_type="application/json")
+
+
 async def _proxy(request: Request) -> Response:
     """Forward request to upstream, log usage, return response."""
     path = request.url.path
@@ -314,11 +620,34 @@ async def _proxy(request: Request) -> Response:
             media_type="application/json",
         )
 
+    # Body budget (see bodygate.py): a large body queues here, before it is
+    # read, so a waiting request holds no more than the server's read buffer.
+    # The upload paths release the token as soon as upstream headers arrive;
+    # the finally covers every other way out (release() is idempotent).
+    try:
+        gate_bytes = int(request.headers.get("content-length") or 0)
+    except ValueError:
+        gate_bytes = 0
+    gate_t0 = time.time()
+    try:
+        token = await _body_gate.acquire(
+            gate_bytes, label="{} session={}".format(path, (_session_of(request.headers) or "unknown")[:8]),
+        )
+    except BodyGateTimeout as exc:
+        return _body_gate_timeout_response(exc, request.headers, path, gate_t0)
+    try:
+        return await _forward(request, path, token)
+    finally:
+        token.release()
+
+
+async def _forward(request: Request, path: str, gate_token: BodyGateToken) -> Response:
+    """Read, rewrite and upload a /v1/ request the body gate has admitted; relay the response."""
     client = _get_client()
     query = str(request.url.query)
     url = f"{path}?{query}" if query else path
 
-    body = await request.body()
+    body = await _read_body(request)
     headers = dict(request.headers)
     # Strip hop-by-hop headers only. Preserve accept-encoding so the upstream
     # leg (internet) stays gzip-compressed -- httpx auto-decompresses locally and
@@ -327,46 +656,94 @@ async def _proxy(request: Request) -> Response:
     for h in ("host", "transfer-encoding", "connection", "content-length"):
         headers.pop(h, None)
 
+    # The body is parsed exactly once (2026-09-29). Stream detection, the
+    # cache/effort rewrite and history capture all work from this parse: history
+    # gets a copy with inline base64 replaced by size markers, and the full
+    # parse is dropped before the upstream request starts, so a streamed
+    # request's closure no longer holds a 25 MB image request for the whole
+    # stream (the stream path used to parse the body a second time for that).
     is_stream = False
     req_json = None
+    history_json = None
+    history_bytes = 0
+    rewrite_skipped = False
     body_bytes = len(body) if body else 0
     if body:
         try:
             req_json = json.loads(body)
-            is_stream = bool(req_json.get("stream", False))
-            if req_json.get("messages"):
-                sid = headers.get("x-claude-code-session-id") or headers.get("x-session-id")
-                if _SCAN_ENABLED:
-                    _scan_microcompact(req_json, sid)
-                    _scan_budget_enforcement(req_json, sid)
+        except (json.JSONDecodeError, UnicodeDecodeError):
+            req_json = None
+    if isinstance(req_json, dict):
+        is_stream = bool(req_json.get("stream", False))
+        if req_json.get("messages"):
+            sid = headers.get("x-claude-code-session-id") or headers.get("x-session-id")
+            if _SCAN_ENABLED:
+                _scan_microcompact(req_json, sid)
+                _scan_budget_enforcement(req_json, sid)
+            if _MAX_REWRITE_BYTES and body_bytes > _MAX_REWRITE_BYTES:
+                rewrite_skipped = True
+                logger.info(
+                    "rewrite skipped: %d B body over LLM_RELAY_MAX_REWRITE_BYTES=%d -- %s session=%s",
+                    body_bytes, _MAX_REWRITE_BYTES, path, (sid or "unknown")[:8],
+                )
+            else:
                 if _cache_fix_available and path.startswith("/v1/messages"):
                     cf_modified, cf_diag = _normalize_cache(req_json, headers)
                     if cf_modified:
                         body = json.dumps(req_json, ensure_ascii=False).encode("utf-8")
                     if cf_diag:
-                        log_cache_diagnostic(_get_conn(), session_id=sid, **cf_diag)
+                        _db_writer.submit(log_cache_diagnostic, session_id=sid, **cf_diag)
+                if _effort_fix_available and path.startswith("/v1/messages"):
+                    ef_modified, _ef_original = _normalize_effort(req_json)
+                    if ef_modified:
+                        body = json.dumps(req_json, ensure_ascii=False).encode("utf-8")
                 if _tokpress_available:
                     body = _try_compress(req_json, body)
-        except (json.JSONDecodeError, UnicodeDecodeError):
-            pass
+            if _HISTORY_ENABLED and path.startswith("/v1/messages"):
+                from .history import history_view
+                history_json, history_bytes = history_view(req_json, body_bytes)
+    req_json = None
+
+    # Upload through a one-shot generator (see _one_shot) with the final length
+    # in content-length -- the rewrite may have changed it. This frame drops its
+    # own reference before the upload starts, so once httpx has sent the bytes
+    # nothing keeps them alive.
+    upload = body
+    if body:
+        headers["content-length"] = str(len(body))
+        upload = _one_shot(body)
+    body = None
 
     t0 = time.time()
 
     if is_stream:
-        return await _proxy_stream(client, request.method, url, headers, body, path, t0, body_bytes)
+        return await _proxy_stream(
+            client, request, url, headers, upload, path, t0, body_bytes,
+            history_json=history_json, history_bytes=history_bytes, rewrite_skipped=rewrite_skipped,
+            gate_token=gate_token,
+        )
 
     # Non-streaming
-    upstream_resp = await client.request(
-        method=request.method,
-        url=url,
-        headers=headers,
-        content=body,
-    )
+    req = client.build_request(method=request.method, url=url, headers=headers, content=upload)
+    try:
+        upstream_resp = await _send_watching_client(client, req, request)
+    except _ClientGone:
+        return _client_gone_response(headers, path, t0, body_bytes, is_stream=False)
+    except httpx.HTTPError as exc:
+        return _upstream_error_response(exc, headers, path, t0, body_bytes, is_stream=False)
+    finally:
+        # Headers are in (or the request failed): httpx is done with the body.
+        gate_token.release()
+    try:
+        resp_body = await upstream_resp.aread()
+    except httpx.HTTPError as exc:
+        return _upstream_error_response(exc, headers, path, t0, body_bytes, is_stream=False)
+    finally:
+        await upstream_resp.aclose()
 
     latency_ms = (time.time() - t0) * 1000
 
     # Parse and log usage
-    resp_body = upstream_resp.content
     rl_headers = _extract_ratelimit_headers(upstream_resp.headers)
 
     # Feature flag routing (local-only extension -- no-op if module absent)
@@ -381,8 +758,8 @@ async def _proxy(request: Request) -> Response:
                     "\U0001f6e1 INTERCEPTED %s -- %d flags: %s",
                     path, len(touched), ", ".join(touched),
                 )
-                log_intercept_event(
-                    _get_conn(),
+                _db_writer.submit(
+                    log_intercept_event,
                     session_id=sid,
                     endpoint=path,
                     flags_overridden=touched,
@@ -394,17 +771,21 @@ async def _proxy(request: Request) -> Response:
         resp_json = json.loads(resp_body)
         usage = _extract_usage(resp_json)
         _warn_if_poor(usage, path)
-        # Synchronous log -- WAL mode keeps this ~0.6ms. Moving to a worker
-        # thread via asyncio.to_thread inside starlette response flow was
-        # dropping records when the response task was torn down mid-await.
+        # Writes go to the background DB writer: a synchronous enqueue (no
+        # await) that response teardown cannot cut short -- see dbwriter.py.
         sid = headers.get("x-claude-code-session-id") or headers.get("x-session-id")
         # Extract ephemeral TTL tier tokens for non-streaming path
         resp_usage = resp_json.get("usage", {})
         cc_detail = resp_usage.get("cache_creation", {})
         eph_1h = cc_detail.get("ephemeral_1h_input_tokens", 0) if isinstance(cc_detail, dict) else 0
         eph_5m = cc_detail.get("ephemeral_5m_input_tokens", 0) if isinstance(cc_detail, dict) else 0
-        log_request(
-            _get_conn(),
+        raw_usage = resp_json.get("usage")
+        if rewrite_skipped:
+            raw_usage = dict(raw_usage if isinstance(raw_usage, dict) else {}, rewrite_skipped=True)
+        if gate_token.waited_ms:
+            raw_usage = dict(raw_usage if isinstance(raw_usage, dict) else {}, body_gate_wait_ms=gate_token.waited_ms)
+        _db_writer.submit(
+            log_request,
             session_id=sid,
             model=usage["model"],
             input_tokens=usage["input_tokens"],
@@ -415,20 +796,22 @@ async def _proxy(request: Request) -> Response:
             latency_ms=latency_ms,
             endpoint=path,
             is_stream=False,
-            raw_usage=resp_json.get("usage"),
+            raw_usage=raw_usage,
             request_body_bytes=body_bytes,
             ratelimit_headers=rl_headers,
             ephemeral_1h_tokens=eph_1h,
             ephemeral_5m_tokens=eph_5m,
         )
-        # Session history capture (opt-in)
-        if _HISTORY_ENABLED and req_json and path.startswith("/v1/messages"):
+        # Session history capture (opt-in): history_json is the stripped view
+        # built after the single parse above, None when capture is off.
+        if history_json is not None:
             try:
                 from .history import capture_turn
-                capture_turn(
-                    _get_conn(),
+                _db_writer.submit(
+                    capture_turn,
+                    size_hint=history_bytes + len(resp_body),
                     session_id=sid,
-                    req_json=req_json,
+                    req_json=history_json,
                     resp_json=resp_json,
                     input_tokens=usage["input_tokens"],
                     request_size=body_bytes,
@@ -452,15 +835,37 @@ async def _proxy(request: Request) -> Response:
     )
 
 
-async def _proxy_stream(client, method, url, headers, body, path, t0, body_bytes=0):
+async def _proxy_stream(
+    client, request, url, headers, upload, path, t0, body_bytes=0,
+    history_json=None, history_bytes=0, rewrite_skipped=False, gate_token=None,
+):
     """Handle streaming responses -- true streaming proxy via client.stream().
 
     Uses an incremental UTF-8 decoder + line buffer so multibyte characters and
     SSE lines that span chunk boundaries are decoded correctly (C2 fix from
     audit-full-source-20260410.md -- mojibake root cause candidate).
+
+    ``upload`` is the request body as handed to httpx (see _one_shot).
+    ``history_json`` is the caller's single parse of the request with inline
+    binary payloads already stripped (None = no history capture for this
+    request) and ``history_bytes`` the size it keeps alive (the writer's queue
+    byte cap counts it); the body is not parsed again here. ``rewrite_skipped``
+    marks a body sent upstream unchanged because it exceeded
+    ``LLM_RELAY_MAX_REWRITE_BYTES``; it is recorded in ``raw_usage``.
+    ``gate_token`` is the request's body gate admission: released once
+    upstream headers arrive (or the request fails), not when the stream ends.
     """
-    req = client.build_request(method=method, url=url, headers=headers, content=body)
-    upstream_resp = await client.send(req, stream=True)
+    req = client.build_request(method=request.method, url=url, headers=headers, content=upload)
+    try:
+        upstream_resp = await _send_watching_client(client, req, request)
+    except _ClientGone:
+        return _client_gone_response(headers, path, t0, body_bytes, is_stream=True)
+    except httpx.HTTPError as exc:
+        return _upstream_error_response(exc, headers, path, t0, body_bytes, is_stream=True)
+    finally:
+        # Headers are in (or the request failed): httpx is done with the body.
+        if gate_token is not None:
+            gate_token.release()
 
     rl_headers = _extract_ratelimit_headers(upstream_resp.headers)
 
@@ -472,20 +877,26 @@ async def _proxy_stream(client, method, url, headers, body, path, t0, body_bytes
         "model": None,
         "ephemeral_1h_tokens": 0,
         "ephemeral_5m_tokens": 0,
+        # Stall-vs-long-generation diagnostics (2026-09-28). Persisted through
+        # raw_usage JSON, so no schema change is needed. output_tokens alone
+        # cannot tell an aborted stream from a stalled one (it is only updated
+        # on message_delta); these fields can.
+        "content_deltas": 0,
+        "first_delta_ms": None,
+        "last_delta_ms": None,
+        "message_stop": False,
+        "stream_end": "unknown",
     }
+    if rewrite_skipped:
+        usage_acc["rewrite_skipped"] = True
+    if gate_token is not None and gate_token.waited_ms:
+        usage_acc["body_gate_wait_ms"] = gate_token.waited_ms
 
-    # History: accumulate response content blocks from SSE events
+    # History: accumulate response content blocks from SSE events. The request
+    # side is history_json (stripped view from _proxy); nothing is re-parsed.
     _history_content = []  # list of completed content blocks
     _history_current_block = {}  # block being accumulated
-    _history_active = _HISTORY_ENABLED and path.startswith("/v1/messages")
-
-    # Parse request JSON for history (already parsed upstream, reuse ref)
-    _history_req_json = None
-    if _history_active and body:
-        try:
-            _history_req_json = json.loads(body)
-        except (json.JSONDecodeError, UnicodeDecodeError):
-            _history_active = False
+    _history_active = history_json is not None
 
     def _process_sse_line(line: str) -> None:
         nonlocal _history_current_block
@@ -499,6 +910,16 @@ async def _proxy_stream(client, method, url, headers, body, path, t0, body_bytes
         except (json.JSONDecodeError, KeyError):
             return
         etype = event.get("type", "")
+        # Diagnostics: count content deltas for every stream, independent of
+        # the history feature below.
+        if etype == "content_block_delta":
+            now_ms = round((time.time() - t0) * 1000, 1)
+            usage_acc["content_deltas"] += 1
+            if usage_acc["first_delta_ms"] is None:
+                usage_acc["first_delta_ms"] = now_ms
+            usage_acc["last_delta_ms"] = now_ms
+        elif etype == "message_stop":
+            usage_acc["message_stop"] = True
         if etype == "message_start":
             msg = event.get("message", {})
             u = _extract_usage(msg)
@@ -518,10 +939,7 @@ async def _proxy_stream(client, method, url, headers, body, path, t0, body_bytes
                     "ephemeral_5m_input_tokens", 0
                 )
         elif etype == "message_delta":
-            delta_usage = event.get("usage", {})
-            usage_acc["output_tokens"] = delta_usage.get(
-                "output_tokens", usage_acc["output_tokens"]
-            )
+            _apply_delta_usage(usage_acc, event.get("usage", {}))
         # History: accumulate content blocks
         elif _history_active and etype == "content_block_start":
             cb = event.get("content_block", {})
@@ -583,6 +1001,14 @@ async def _proxy_stream(client, method, url, headers, body, path, t0, body_bytes
                 line_buf = lines[-1]
                 for line in lines[:-1]:
                     _process_sse_line(line)
+            usage_acc["stream_end"] = "completed"
+        except (GeneratorExit, asyncio.CancelledError):
+            # Client went away (Starlette drops the generator at the yield site).
+            usage_acc["stream_end"] = "client_disconnect"
+            raise
+        except Exception:
+            usage_acc["stream_end"] = "upstream_error"
+            raise
         finally:
             # Step 1 -- flush the decoder (sync, safe under GeneratorExit).
             if _SSE_PARSE_USAGE:
@@ -596,49 +1022,49 @@ async def _proxy_stream(client, method, url, headers, body, path, t0, body_bytes
                 except Exception:
                     logger.debug("SSE decoder flush failed", exc_info=True)
 
-            # Step 2 -- LOG FIRST (sync, must run even if aclose/GC cancels the
+            # Step 2 -- ENQUEUE FIRST (sync, must run even if aclose/GC cancels the
             # generator). Starlette discards the async generator without calling
             # aclose(), so GeneratorExit fires at the yield site and any later
-            # `await` in the finally chain can be cut short. Putting log_request
-            # before the await guarantees the usage row lands in SQLite.
+            # `await` in the finally chain can be cut short. submit() never awaits,
+            # so the usage row reaches the background writer before that can
+            # happen; the writer retries and spills to disk rather than drop it.
             latency_ms = (time.time() - t0) * 1000
             _warn_if_poor(usage_acc, path)
             sid = headers.get("x-claude-code-session-id") or headers.get("x-session-id")
-            try:
-                log_request(
-                    _get_conn(),
-                    session_id=sid,
-                    model=usage_acc["model"],
-                    input_tokens=usage_acc["input_tokens"],
-                    output_tokens=usage_acc["output_tokens"],
-                    cache_creation=usage_acc["cache_creation"],
-                    cache_read=usage_acc["cache_read"],
-                    status_code=upstream_resp.status_code,
-                    latency_ms=latency_ms,
-                    endpoint=path,
-                    is_stream=True,
-                    raw_usage=dict(usage_acc),
-                    request_body_bytes=body_bytes,
-                    ratelimit_headers=rl_headers,
-                    ephemeral_1h_tokens=usage_acc.get("ephemeral_1h_tokens", 0),
-                    ephemeral_5m_tokens=usage_acc.get("ephemeral_5m_tokens", 0),
-                )
-            except Exception:
-                logger.warning("log_request failed (stream path)", exc_info=True)
+            _db_writer.submit(
+                log_request,
+                session_id=sid,
+                model=usage_acc["model"],
+                input_tokens=usage_acc["input_tokens"],
+                output_tokens=usage_acc["output_tokens"],
+                cache_creation=usage_acc["cache_creation"],
+                cache_read=usage_acc["cache_read"],
+                status_code=upstream_resp.status_code,
+                latency_ms=latency_ms,
+                endpoint=path,
+                is_stream=True,
+                raw_usage=dict(usage_acc),
+                request_body_bytes=body_bytes,
+                ratelimit_headers=rl_headers,
+                ephemeral_1h_tokens=usage_acc.get("ephemeral_1h_tokens", 0),
+                ephemeral_5m_tokens=usage_acc.get("ephemeral_5m_tokens", 0),
+            )
 
-            # Step 2b -- session history capture (sync, same safety as log_request)
-            if _history_active and _history_req_json:
+            # Step 2b -- session history capture (same sync enqueue as log_request)
+            if _history_active:
                 try:
-                    from .history import capture_turn_streamed
-                    capture_turn_streamed(
-                        _get_conn(),
+                    from .history import capture_turn_streamed, content_bytes
+                    response_bytes = content_bytes(_history_content)
+                    _db_writer.submit(
+                        capture_turn_streamed,
+                        size_hint=history_bytes + response_bytes,
                         session_id=sid,
-                        req_json=_history_req_json,
+                        req_json=history_json,
                         accumulated_content=_history_content,
                         model=usage_acc["model"],
                         input_tokens=usage_acc["input_tokens"],
                         request_size=body_bytes,
-                        response_size=0,
+                        response_size=response_bytes,
                         raw_mode=_HISTORY_RAW,
                     )
                 except Exception:
@@ -664,8 +1090,98 @@ async def _proxy_stream(client, method, url, headers, body, path, t0, body_bytes
     )
 
 
+class _RequestLog:
+    """Pure ASGI middleware: one line when a request *starts*, plus in-flight counters.
+
+    uvicorn's access log is written when a response completes, so a request
+    that takes the process down (the dashboard poll behind the 2026-09-29 OOM
+    loop) leaves no trace. The start line goes to the "llm-relay.access"
+    logger; /_health (polled) is skipped. The counters feed /_health:
+    ``in_flight`` is every HTTP request including the /_health call reporting
+    it, ``proxy_in_flight`` the /v1/ requests, where a stream counts until it
+    ends -- 0 means a restart cuts no client stream. Not BaseHTTPMiddleware:
+    that one buffers streaming responses through a background task.
+    """
+
+    def __init__(self, app):
+        self.app = app
+
+    async def __call__(self, scope, receive, send):
+        if scope["type"] != "http":
+            await self.app(scope, receive, send)
+            return
+        path = scope.get("path", "")
+        is_proxy = path.startswith("/v1/")
+        _in_flight["total"] += 1
+        if is_proxy:
+            _in_flight["proxy"] += 1
+        if _LOG_REQUEST_START and path != "/_health":
+            size = "-"
+            sid = "-"
+            for name, value in scope.get("headers") or ():
+                if name == b"content-length":
+                    size = value.decode("latin-1", "replace")
+                elif name == b"x-claude-code-session-id" or (name == b"x-session-id" and sid == "-"):
+                    sid = value.decode("latin-1", "replace")[:8]
+            client = scope.get("client")
+            _access_log.info(
+                "request start %s %s %sB client=%s session=%s",
+                scope.get("method", "-"), path, size, client[0] if client else "-", sid,
+            )
+        try:
+            await self.app(scope, receive, send)
+        finally:
+            _in_flight["total"] -= 1
+            if is_proxy:
+                _in_flight["proxy"] -= 1
+
+
+_PAGE_SIZE = os.sysconf("SC_PAGE_SIZE") if hasattr(os, "sysconf") else 4096
+
+
+def _rss_mb():
+    """Resident set size of this process in MiB (Linux /proc), None elsewhere."""
+    try:
+        with open("/proc/self/statm", encoding="ascii") as fh:
+            return int(fh.read().split()[1]) * _PAGE_SIZE // (1024 * 1024)
+    except (OSError, ValueError, IndexError):
+        return None
+
+
+def _cgroup_mb():
+    """memory.current of this process's cgroup in MiB (the systemd unit's figure), None if unreadable."""
+    try:
+        with open("/proc/self/cgroup", encoding="ascii") as fh:
+            for line in fh:
+                if line.startswith("0::"):
+                    path = "/sys/fs/cgroup" + line[3:].strip() + "/memory.current"
+                    with open(path, encoding="ascii") as current:
+                        return int(current.read().strip()) // (1024 * 1024)
+    except (OSError, ValueError):
+        pass
+    return None
+
+
 async def _health(request: Request) -> Response:
-    return Response(json.dumps({"status": "ok", "upstream": UPSTREAM}), media_type="application/json")
+    from .composition import cache_stats
+
+    payload = {
+        "status": "ok",
+        "upstream": UPSTREAM,
+        "in_flight": _in_flight["total"],
+        "proxy_in_flight": _in_flight["proxy"],
+        "memory_rss_mb": _rss_mb(),
+        "memory_cgroup_mb": _cgroup_mb(),
+        "pool": {
+            "max_connections": _MAX_CONNECTIONS,
+            "max_keepalive": _MAX_KEEPALIVE,
+            "pool_timeout_s": _POOL_TIMEOUT_S,
+        },
+        "body_gate": _body_gate.snapshot(),
+        "db_writer": _db_writer.snapshot(),
+        "composition_cache": cache_stats(),
+    }
+    return Response(json.dumps(payload), media_type="application/json")
 
 
 async def _stats(request: Request) -> Response:
@@ -702,8 +1218,12 @@ async def _watchdog_loop():
 
 @asynccontextmanager
 async def _lifespan(app):
+    _db_writer.start()
     asyncio.create_task(_watchdog_loop())
     yield
+    # Drain pending DB writes before the process exits (unit TimeoutStopSec=10;
+    # anything still unwritten after the drain timeout is spilled to disk).
+    await asyncio.to_thread(_db_writer.stop, 8.0)
 
 
 # Build unified route list -- API and dashboard before catch-all proxy
@@ -764,4 +1284,5 @@ _routes.append(Route("/{path:path}", _proxy, methods=["GET", "POST", "PUT", "DEL
 app = Starlette(
     routes=_routes,
     lifespan=_lifespan,
+    middleware=[Middleware(_RequestLog)],
 )

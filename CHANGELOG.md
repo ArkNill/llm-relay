@@ -4,6 +4,165 @@ All notable changes to llm-relay are documented here.
 
 ## [Unreleased]
 
+### Added
+- **Context growth rate and ETA on `/display/`** (2026-08-05): Claude Code session cards show
+  the median context growth per turn over the last 40 requests, the recent turn rate, and the
+  estimated time to the next zone threshold (`db.get_session_growth`; `/api/v1/display` fields
+  `growth_per_turn`, `turns_per_min`, `eta_next_s`). Idle sessions show no ETA.
+- **Stream stall diagnostics** (2026-09-28): streamed requests record `content_deltas`,
+  `first_delta_ms`, `last_delta_ms`, `message_stop` and `stream_end` (`completed` /
+  `client_disconnect` / `upstream_error`) in `requests.raw_usage`, so an aborted or stalled
+  stream can be told apart from a long generation. No schema change.
+- **`LLM_RELAY_MAX_REWRITE_BYTES`** (2026-09-29): request bodies above this many bytes skip
+  the cache-fix / effort-fix / tokpress rewrite and go upstream unchanged, flagged as
+  `rewrite_skipped` in `requests.raw_usage`; history capture is unaffected. Default 0 (off):
+  the rewrite reorders tools on most requests, so skipping it on one large request changes
+  the prompt prefix and costs a cache miss. A valve for image-heavy bursts, not for normal
+  traffic.
+- **`LLM_RELAY_DB_QUEUE_MAX_BYTES`** (2026-09-29): the background DB writer bounds the bytes its
+  queue keeps alive (default 256 MB; 0 disables). Every job carries a size estimate (a
+  conversation capture: request body minus the stripped inline base64, plus the response text),
+  and a job that would push the queued total over the cap is written to the spill file at once
+  (`reason: queue bytes`) instead of growing the process while the database is slow or down.
+  The count cap `LLM_RELAY_DB_QUEUE_MAX` stays. `GET /_health` reports `db_writer.queued_bytes`
+  and `queue_max_bytes`.
+- **Request start lines and in-flight counters** (2026-09-29): uvicorn's access log is written
+  when a response completes, so the request that took the relay down (the dashboard poll behind
+  the OOM loop) left no trace. An ASGI middleware now logs one line when a request starts
+  (`request start POST /v1/messages 818767B client=127.0.0.1 session=e285e2ec`, logger
+  `llm-relay.access`, `/_health` excluded; `LLM_RELAY_LOG_REQUEST_START=0` turns it off), and
+  `GET /_health` reports `in_flight`, `proxy_in_flight` (`/v1/` requests, a stream counts until
+  it ends: 0 means a restart cuts no client stream), `memory_rss_mb` and `memory_cgroup_mb`.
+- **Server-side tool counts in `raw_usage`** (2026-10-19): streamed requests record
+  `web_search_requests` and `web_fetch_requests` from the final `message_delta` usage
+  (`server_tool_use`) in `requests.raw_usage`, so search fees and search-heavy requests can be
+  accounted for. No schema change; non-streamed rows already store the whole `usage` object.
+- **Request body admission gate** (2026-10-22): a `/v1/` request whose `content-length` is at
+  least `LLM_RELAY_BODY_GATE_MIN_BYTES` (4 MiB) waits, before its body is read, while the bodies
+  already admitted plus its own would exceed `LLM_RELAY_MAX_INFLIGHT_BODY_BYTES` (unset = a
+  quarter of the cgroup `memory.max`, 256 MiB without one; 0 = off). Admission is in arrival
+  order, a body alone is always admitted, and the bytes are given back as soon as the upstream
+  response headers arrive. A request still waiting after `LLM_RELAY_BODY_GATE_TIMEOUT_S` (120;
+  0 = answer at once) gets a 503 API error (`stream_end: body_gate_timeout`) that the client
+  retries. Requests that waited carry `body_gate_wait_ms` in `requests.raw_usage`; `GET
+  /_health` reports `body_gate`. Isolated check, 25 MB bodies x 40 with 16 in flight under a
+  1 GiB limit: the relay was OOM-killed at 1005 MB before; with the gate it peaks at 372 MB
+  (10 waits, no timeouts, same wall time) and survives 24 in flight at 374 MB.
+
+### Fixed
+- **Request bodies kept alive until the stream ended, and beyond** (2026-10-22): httpx keeps
+  `content=bytes` on the request, the response keeps the request, and the response's stream
+  keeps the response (a reference cycle), so a 25 MB upload stayed in memory until the
+  streamed reply finished and the garbage collector ran. The body now goes up as a one-shot
+  generator with an explicit `content-length` (no chunked encoding), and the proxy drops its
+  own reference before the upload starts, so the bytes are freed once httpx has sent them.
+  Isolated check (16 x 25 MB in flight, 1 GiB limit, gate off): peak 1020 -> 518 MB, resident
+  after the burst 945 -> 42 MB.
+- **Composition analysis loading a whole session at once** (2026-10-22): the session and
+  per-turn composition folds now read turn rows in keyset batches of
+  `LLM_RELAY_COMPOSITION_BATCH_TURNS` (64; 0 = one query) ordered by `(turn_number, id)`, so an
+  analysis holds one batch of stored messages instead of the whole session (a 692-turn session
+  added 340 MB on 2026-09-29; the 10/14 session stores 195 MB). Results are unchanged, and rows
+  that share a `turn_number` (restart renumbering before 2026-09-28) are folded exactly once.
+  Isolated check, synthetic 1,200 turns x 160 KB: per-turn composition peak 221 -> 52 MB at
+  the same latency.
+- **Web tool calls failing with 400 at effort `xhigh` / `max`** (2026-07-27): Claude Code sends
+  WebSearch/WebFetch subrequests with thinking disabled but keeps the session's effort level,
+  which the API rejects (`output_config.effort 'xhigh' is not supported when thinking is
+  disabled`). Requests that disable thinking now have `output_config.effort` clamped to `high`
+  (`proxy/cc_effort_fix.py`); requests with thinking enabled are left untouched.
+  `LLM_RELAY_EFFORT_FIX=0` turns it off, `LLM_RELAY_EFFORT_FIX_TARGET` changes the target.
+- **Database writes on the event loop** (2026-09-28): usage, diagnostic and history rows are
+  now written by a background thread (`proxy/dbwriter.py`). `submit()` is a synchronous
+  enqueue that response teardown cannot cut short; rows are written in submission order,
+  retried on a fresh connection (`LLM_RELAY_DB_WRITE_RETRIES`, 3) and spilled to
+  `~/.llm-relay/spill-YYYYMMDD.jsonl` (`LLM_RELAY_SPILL_DIR`) instead of being dropped. The
+  queue drains on shutdown, and `GET /_health` reports the writer counters.
+- **Requests hanging when the upstream pool is exhausted** (2026-09-28): the upstream pool grows
+  from 20 to 100 connections (keep-alive 10 to 20; `LLM_RELAY_MAX_CONNECTIONS`,
+  `LLM_RELAY_MAX_KEEPALIVE`), and a pool wait longer than `LLM_RELAY_POOL_TIMEOUT_S` (30 s)
+  returns a 503 API error instead of hanging. Transport failures return 502/504 API errors
+  instead of an opaque 500, and a client that disconnects before the upstream response headers
+  arrive cancels the upstream request (checked every `LLM_RELAY_DISCONNECT_POLL_S`). Both cases
+  are recorded in `requests` (status 499 / `stream_end=upstream_error`).
+- **MCP server, CLI and test suite using a different database than the relay** (2026-09-28):
+  only the proxy loaded `.env.public` / `.env.local`, so entry points started with an empty
+  environment (`llm-relay-mcp` spawned by Claude Code, the CLI, pytest) fell back to the SQLite
+  file while the relay wrote to PostgreSQL. `proxy/db.py` now loads both files (explicit
+  variables still win) before choosing the backend, and `orch/db.py` reuses that decision.
+  `tests/conftest.py` forces the suite onto a temporary SQLite database (`LLM_RELAY_TEST_DB`
+  to override).
+- **Duplicate turn numbers after a relay restart** (2026-09-28): the first capture of a session
+  after a restart seeds its turn counter and delta baseline from the newest stored turn
+  (`db.get_last_turn_state`) instead of starting again at turn 1 with a full snapshot.
+- **Relay OOM crash loop on dashboard polls** (2026-09-29): with `LLM_RELAY_HISTORY=1`,
+  the composition analysis behind `/api/v1/display` and `/api/v1/turns` loaded every
+  stored turn of a session on a cold cache (one image-heavy session held 3.67 GB), so
+  the first dashboard poll after each restart pushed the process past `MemoryMax` and
+  systemd's start limit left the port closed. Cold loads now start at the newest `full`
+  snapshot, which yields the same result (`composition._cold_start_turn`).
+- **Session history stored inline base64 payloads** (images / PDF documents returned by
+  tools) verbatim — 24 MB rows, 3.7 GB in a single day. `request_messages` now keeps the
+  block shape with `data: ""` plus `source.omitted_bytes`; `request_size_bytes` still
+  records the real request body size (`history._strip_binary_payloads`).
+- **False compaction events and repeated full snapshots when several conversations share
+  one session_id** (Claude Code subagents, WebSearch/WebFetch helper calls, title
+  generation): the delta baseline is now kept per conversation (`session_id` + fingerprint
+  of the first message). Only a message-count drop inside the same conversation is
+  recorded as a compaction; a new conversation starts with a full snapshot and no event.
+- `/display/` no longer starts a new poll while the previous one is still in flight.
+- **Composition caches growing for the lifetime of the relay** (2026-09-29): nothing evicted an
+  entry (`clear_cache()` has no production caller), and every cached session kept its whole
+  message list although only the aggregates are read (49 sessions: 45 MB with it, 0.2 MB
+  without). The session state now keeps aggregates only; the per-turn analysis keeps running
+  totals instead of re-classifying the whole context at every turn (3.75 s to 1.59 s on the
+  event loop for a 692-turn session); and the session, per-turn and session-file caches are
+  bounded by entry count and idle time (`LLM_RELAY_COMPOSITION_CACHE_MAX`, default 64;
+  `LLM_RELAY_COMPOSITION_CACHE_TTL_S`, default 28800; 0 disables a bound). `GET /_health`
+  reports `composition_cache`.
+- **Request bodies held several times over per in-flight request** (2026-09-29): a
+  `/v1/messages` body was parsed twice (once for the cache/effort rewrite, once more in the
+  stream path for history capture), the Starlette-cached original stayed next to the
+  rewritten copy, the streaming closure held the full parse (inline base64 included) until
+  the upstream stream ended, and a large upload was collected as a list of 64 KB chunks
+  before being joined. The body is now read into one growing buffer without the
+  request-level cache, parsed once, and history capture receives a copy with inline base64
+  replaced by size markers (`history.history_view`) before the upstream request starts, at
+  which point the full parse is dropped. Five concurrent 24 MB image requests: peak 510 MB
+  to 248 MB, resident after the burst 463 MB to 202 MB (isolated relay, fake upstream).
+  Stored history rows are unchanged.
+- **`.env.local` not overriding `.env.public` outside systemd** (2026-09-29): the native env
+  loaders in `proxy/proxy.py` and `proxy/db.py` applied `.env.public` first with
+  `setdefault`, so a key present in both files kept the public value when the process was
+  started by hand, by pytest or as the MCP server (`LLM_RELAY_CACHE_FIX` was the only
+  affected key; the systemd unit's `EnvironmentFile` order was already right). `.env.local`
+  is now loaded first; explicit environment variables still win over both files.
+- **Streamed turns stored `response_size_bytes = 0`** (2026-09-29): the streaming capture never
+  measured its response, so the history page's per-session response total was 0 for every
+  Claude Code session. It now records the UTF-8 size of the accumulated text, thinking and
+  tool-input blocks (`history.content_bytes`).
+- **Relay INFO diagnostics never reached the journal** (2026-09-29): under uvicorn the
+  `llm-relay` logger had no handler and propagated to a bare root logger, so its INFO lines
+  (cache fix, compaction, client gone before headers) were dropped and its warnings only
+  surfaced through logging's last-resort handler. The proxy now installs a stderr handler for
+  its own loggers when nothing else has configured logging (the CLI's `basicConfig` is left
+  alone). The main logger still runs at WARNING; `LLM_RELAY_LOG_LEVEL=INFO` turns the
+  diagnostics on.
+- **Streamed requests with server-side tools stored only the first iteration's input**
+  (2026-10-19): with server-side web search or web fetch, one request runs several model
+  iterations; `message_start` reports the first one, and the cumulative totals arrive in the
+  final `message_delta` usage, which the stream path read only for `output_tokens`. Over 36
+  Claude Code runs the stored rows, priced at list rates, came to 51.3% of the cost the CLI
+  reported (that figure also includes the per-search fee, which the relay does not price); runs
+  without server-side searches matched. `message_delta` usage now raises the input, cache-write,
+  cache-read and 1h/5m cache-tier counts to its final values. Earlier rows cannot be corrected.
+
+### Notes
+- Rows stored before this change can be rewritten in place with the same transform. The
+  leftover check is `jsonb_path_exists(request_messages,
+  'strict $.**.source ? (@.type == "base64" && @.data != "")')` — testing only
+  `source.type` also matches already-stripped rows.
+
 ## [0.9.6] - 2026-05-21
 
 > Single-command Windows install + atomic `llm-relay init`. Surfaced by

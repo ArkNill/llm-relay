@@ -1138,3 +1138,160 @@ class TestTurnsAllComposition:
         sess = data["sessions"][0]
         assert "composition" in sess
         assert sess["composition"] is None
+
+
+# ── get_session_growth (DB) + display growth/ETA fields ──
+
+
+class TestGetSessionGrowth:
+    def _make_db(self):
+        conn = sqlite3.connect(":memory:")
+        conn.row_factory = sqlite3.Row
+        conn.execute("""CREATE TABLE requests (
+            id INTEGER PRIMARY KEY,
+            ts REAL NOT NULL,
+            session_id TEXT,
+            endpoint TEXT,
+            model TEXT,
+            input_tokens INTEGER DEFAULT 0,
+            output_tokens INTEGER DEFAULT 0,
+            cache_creation INTEGER DEFAULT 0,
+            cache_read INTEGER DEFAULT 0,
+            read_ratio REAL DEFAULT 0.0,
+            status_code INTEGER,
+            latency_ms REAL,
+            is_stream INTEGER DEFAULT 0,
+            raw_usage TEXT,
+            request_body_bytes INTEGER DEFAULT 0
+        )""")
+        return conn
+
+    def _seed(self, conn, sid, points):
+        """points: list of (ts, ctx) — ctx stored entirely in cache_read."""
+        for ts, ctx in points:
+            conn.execute(
+                "INSERT INTO requests (ts, session_id, endpoint, cache_read) "
+                "VALUES (?, ?, '/v1/messages', ?)",
+                (ts, sid, ctx),
+            )
+        conn.commit()
+
+    def test_median_growth_and_rate(self):
+        from llm_relay.proxy.db import get_session_growth
+
+        conn = self._make_db()
+        now = time.time()
+        # 4 turns 60s apart, +2000 ctx each — active session
+        pts = [(now - 180 + i * 60, 100_000 + i * 2_000) for i in range(4)]
+        self._seed(conn, "g-1", pts)
+        g = get_session_growth(conn, "g-1")
+        assert g["growth_per_turn"] == 2_000
+        assert abs(g["turns_per_min"] - 1.0) < 0.2
+        assert g["last_ts_epoch"] is not None
+
+    def test_compaction_drop_skipped(self):
+        from llm_relay.proxy.db import get_session_growth
+
+        conn = self._make_db()
+        now = time.time()
+        # growth +2K, +2K, then compact drop to 50K, then +2K
+        ctxs = [100_000, 102_000, 104_000, 50_000, 52_000]
+        pts = [(now - 240 + i * 60, c) for i, c in enumerate(ctxs)]
+        self._seed(conn, "g-2", pts)
+        g = get_session_growth(conn, "g-2")
+        # negative delta (compact) excluded — median of [2K, 2K, 2K]
+        assert g["growth_per_turn"] == 2_000
+
+    def test_idle_session_reports_zero_rate(self):
+        from llm_relay.proxy.db import get_session_growth
+
+        conn = self._make_db()
+        now = time.time()
+        pts = [(now - 3_600 - 180 + i * 60, 100_000 + i * 2_000) for i in range(4)]
+        self._seed(conn, "g-3", pts)
+        g = get_session_growth(conn, "g-3")
+        assert g["growth_per_turn"] == 2_000
+        assert g["turns_per_min"] == 0.0
+
+    def test_empty_session(self):
+        from llm_relay.proxy.db import get_session_growth
+
+        conn = self._make_db()
+        g = get_session_growth(conn, "missing")
+        assert g == {"growth_per_turn": 0, "turns_per_min": 0.0, "last_ts_epoch": None}
+
+    def test_flat_context_no_growth(self):
+        from llm_relay.proxy.db import get_session_growth
+
+        conn = self._make_db()
+        now = time.time()
+        pts = [(now - 120 + i * 60, 100_000) for i in range(3)]
+        self._seed(conn, "g-4", pts)
+        g = get_session_growth(conn, "g-4")
+        assert g["growth_per_turn"] == 0
+
+
+class TestDisplayGrowthFields:
+    @patch("llm_relay.proxy.db.get_session_growth")
+    @patch("llm_relay.proxy.db.get_ttl_tier", return_value=_TTL_UNKNOWN)
+    @patch("llm_relay.proxy.db.get_session_cache_stats", return_value=_CACHE_ZERO)
+    @patch("llm_relay.api.display.discover_external_cli_sessions", return_value=[])
+    @patch("llm_relay.proxy.db.get_conn")
+    @patch("llm_relay.proxy.db.get_all_turn_counts")
+    @patch("llm_relay.proxy.db.get_all_session_terminals")
+    @patch("llm_relay.api.display.get_last_user_prompt")
+    @patch("llm_relay.api.display.is_cc_process_alive", return_value=True)
+    def test_display_includes_growth_and_eta(
+        self, _alive, mock_prompt, mock_terms, mock_counts, mock_conn, _ext, _mc, _mt, mock_growth,
+    ):
+        import time as _time
+        mock_conn.return_value = MagicMock()
+        now = _time.time()
+        mock_counts.return_value = [
+            _empty_metrics(turns=10, first_ts=now - 600, last_ts=now - 30)
+            | {"session_id": "grow-sid", "current_ctx": 100_000, "peak_ctx": 100_000},
+        ]
+        mock_terms.return_value = {"grow-sid": {"cc_pid": 1234, "tty": "/dev/pts/9"}}
+        mock_prompt.return_value = {"text": "", "timestamp": None}
+        mock_growth.return_value = {
+            "growth_per_turn": 2_000, "turns_per_min": 1.0, "last_ts_epoch": now - 30,
+        }
+
+        client = TestClient(_make_app())
+        resp = client.get("/api/v1/display?window=4")
+        sess = resp.json()["sessions"][0]
+        assert sess["growth_per_turn"] == 2_000
+        assert sess["turns_per_min"] == 1.0
+        # zone fixture: next threshold 500K → (500K-100K)/2K = 200 turns @1/min = 12000s
+        assert sess["eta_next_s"] == 12_000
+
+    @patch("llm_relay.proxy.db.get_session_growth")
+    @patch("llm_relay.proxy.db.get_ttl_tier", return_value=_TTL_UNKNOWN)
+    @patch("llm_relay.proxy.db.get_session_cache_stats", return_value=_CACHE_ZERO)
+    @patch("llm_relay.api.display.discover_external_cli_sessions", return_value=[])
+    @patch("llm_relay.proxy.db.get_conn")
+    @patch("llm_relay.proxy.db.get_all_turn_counts")
+    @patch("llm_relay.proxy.db.get_all_session_terminals")
+    @patch("llm_relay.api.display.get_last_user_prompt")
+    @patch("llm_relay.api.display.is_cc_process_alive", return_value=True)
+    def test_idle_session_has_null_eta(
+        self, _alive, mock_prompt, mock_terms, mock_counts, mock_conn, _ext, _mc, _mt, mock_growth,
+    ):
+        import time as _time
+        mock_conn.return_value = MagicMock()
+        now = _time.time()
+        mock_counts.return_value = [
+            _empty_metrics(turns=10, first_ts=now - 600, last_ts=now - 30)
+            | {"session_id": "idle-sid", "current_ctx": 100_000, "peak_ctx": 100_000},
+        ]
+        mock_terms.return_value = {"idle-sid": {"cc_pid": 1234, "tty": "/dev/pts/9"}}
+        mock_prompt.return_value = {"text": "", "timestamp": None}
+        mock_growth.return_value = {
+            "growth_per_turn": 2_000, "turns_per_min": 0.0, "last_ts_epoch": now - 3_600,
+        }
+
+        client = TestClient(_make_app())
+        resp = client.get("/api/v1/display?window=4")
+        sess = resp.json()["sessions"][0]
+        assert sess["growth_per_turn"] == 2_000
+        assert sess["eta_next_s"] is None

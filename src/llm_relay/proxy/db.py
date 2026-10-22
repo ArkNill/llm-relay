@@ -8,9 +8,47 @@ from __future__ import annotations
 import json
 import os
 import sqlite3
+import statistics
 import time
 from pathlib import Path
 from typing import Any, Optional
+
+
+def _load_env_files(base: Optional[Path] = None) -> None:
+    """Load ``.env.local`` then ``.env.public`` from the repo root (setdefault only).
+
+    2026-09-28: only proxy/proxy.py used to load these, so every other entry point
+    (``llm-relay-mcp`` spawned by Claude Code with an empty env, the CLI, pytest)
+    silently fell back to the SQLite file while the relay itself wrote to PG --
+    delegation rows since 2026-05-14 landed only in ``~/.llm-relay/usage.db``.
+    Loading here makes the backend decision identical for every process that
+    imports this module. Explicit environment variables still win. Outside an
+    editable checkout the files do not exist and this is a no-op.
+
+    2026-09-29: ``.env.local`` is loaded first so that, with setdefault, it
+    overrides ``.env.public`` the way the systemd unit's EnvironmentFile order
+    already did; the previous public-first order let a key present in both
+    files keep the public value in every non-systemd process.
+    """
+    if base is None:
+        base = Path(__file__).resolve().parent.parent.parent.parent  # repo root
+    for name in (".env.local", ".env.public"):
+        env_path = base / name
+        if not env_path.is_file():
+            continue
+        try:
+            with open(env_path, encoding="utf-8") as f:
+                for line in f:
+                    line = line.strip()
+                    if not line or line.startswith("#") or "=" not in line:
+                        continue
+                    key, _, value = line.partition("=")
+                    os.environ.setdefault(key.strip(), value.strip())
+        except OSError:
+            continue
+
+
+_load_env_files()
 
 _DB_URL = os.getenv("LLM_RELAY_DB", str(Path.home() / ".llm-relay" / "usage.db"))
 _USE_PG = _DB_URL.startswith("postgresql://") or _DB_URL.startswith("postgres://")
@@ -663,6 +701,56 @@ def get_all_turn_counts(
     return [dict(r) for r in rows]
 
 
+def get_session_growth(
+    conn: sqlite3.Connection,
+    session_id: str,
+    last_n: int = 40,
+    rate_window_s: float = 1800.0,
+    idle_cutoff_s: float = 600.0,
+) -> dict[str, Any]:
+    """Context growth stats for one session, from its most recent requests.
+
+    growth_per_turn is the median of positive ctx deltas over the last
+    `last_n` requests -- negative deltas are compaction/branch resets and
+    are skipped so they don't drag the median below the true growth rate.
+    turns_per_min is measured over the trailing `rate_window_s` ending at
+    the session's last request; a session idle longer than `idle_cutoff_s`
+    reports 0.0 so callers suppress ETA display instead of extrapolating
+    from stale activity.
+    """
+    rows = conn.execute(
+        """SELECT ts,
+                  cache_read + cache_creation + input_tokens AS ctx
+           FROM requests
+           WHERE session_id = ?
+             AND endpoint = '/v1/messages'
+           ORDER BY ts DESC
+           LIMIT ?""",
+        (session_id, last_n),
+    ).fetchall()
+    if not rows:
+        return {"growth_per_turn": 0, "turns_per_min": 0.0, "last_ts_epoch": None}
+
+    seq = [(_ts_to_epoch(r["ts"]), int(r["ctx"] or 0)) for r in reversed(rows)]
+    deltas = [b[1] - a[1] for a, b in zip(seq, seq[1:]) if b[1] > a[1]]
+    growth = int(statistics.median(deltas)) if deltas else 0
+
+    last_ts = seq[-1][0]
+    turns_per_min = 0.0
+    if last_ts is not None and (time.time() - last_ts) <= idle_cutoff_s:
+        window_start = max(seq[0][0], last_ts - rate_window_s)
+        recent = [t for t, _ in seq if t is not None and t >= window_start]
+        span = last_ts - window_start
+        if len(recent) >= 2 and span > 0:
+            turns_per_min = (len(recent) - 1) / (span / 60.0)
+
+    return {
+        "growth_per_turn": growth,
+        "turns_per_min": round(turns_per_min, 2),
+        "last_ts_epoch": last_ts,
+    }
+
+
 def get_recent(
     conn: sqlite3.Connection, limit: int = 20
 ) -> list[dict[str, Any]]:
@@ -914,6 +1002,23 @@ def log_conversation_turn(
     )
     conn.commit()
     return cursor.lastrowid or 0
+
+
+def get_last_turn_state(conn: sqlite3.Connection, session_id: str) -> Optional[tuple]:
+    """(turn_number, total_message_count) of the newest stored turn for a session, or None.
+
+    Re-seeds history's in-memory per-session state after a process restart so turn
+    numbers stay unique per session and the delta is computed against the last
+    stored snapshot (2026-09-28: every relay restart produced a second 1..N run).
+    """
+    row = conn.execute(
+        """SELECT turn_number, total_message_count FROM conversation_turns
+           WHERE session_id = ? ORDER BY turn_number DESC, id DESC LIMIT 1""",
+        (session_id,),
+    ).fetchone()
+    if not row:
+        return None
+    return int(row["turn_number"]), int(row["total_message_count"] or 0)
 
 
 def log_compaction_event(
