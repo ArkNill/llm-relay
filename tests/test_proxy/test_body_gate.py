@@ -477,6 +477,43 @@ def test_the_gate_is_released_when_reading_the_body_fails(relay, monkeypatch):
     assert _idle(relay.gate)
 
 
+@pytest.mark.parametrize("rewrite", [True, False])
+@pytest.mark.parametrize("stream", [True, False])
+def test_the_upload_is_byte_exact_with_content_length_and_not_chunked(relay, monkeypatch, stream, rewrite):
+    handed = []
+    one_shot = proxy._one_shot
+
+    def spy(data):
+        handed.append(data)
+        return one_shot(data)
+
+    monkeypatch.setattr(proxy, "_one_shot", spy)
+    monkeypatch.setattr(proxy, "_MAX_REWRITE_BYTES", 0 if rewrite else 1024)
+    body, resp = _post(relay, _request(stream=stream))
+
+    assert resp.status_code == 200
+    assert len(handed) == 1 and len(relay.sent) == 1
+    sent = relay.sent[0]
+    assert sent.content == handed[0]
+    assert sent.headers["content-length"] == str(len(sent.content))
+    assert "transfer-encoding" not in sent.headers
+    if rewrite:
+        assert sent.content != body
+        assert json.loads(sent.content)["output_config"]["effort"] == "high"  # the rewritten body went up
+    else:
+        assert sent.content == body
+    assert relay.writer.kwargs("log_request")["request_body_bytes"] == len(body)  # the client's size
+
+
+def test_a_bodyless_request_is_sent_as_before(relay):
+    resp = relay.client.get("/v1/models")
+
+    assert resp.status_code == 200
+    sent = relay.sent[0]
+    assert sent.content == b""
+    assert "content-length" not in sent.headers and "transfer-encoding" not in sent.headers
+
+
 def test_a_gate_timeout_answers_503_and_is_recorded(relay, monkeypatch, caplog):
     gate = BodyGate(max_bytes=1000, min_bytes=1, timeout_s=0.05)
     monkeypatch.setattr(proxy, "_body_gate", gate)

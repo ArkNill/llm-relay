@@ -50,6 +50,14 @@ All notable changes to llm-relay are documented here.
   (10 waits, no timeouts, same wall time) and survives 24 in flight at 374 MB.
 
 ### Fixed
+- **Request bodies kept alive until the stream ended, and beyond** (2026-10-22): httpx keeps
+  `content=bytes` on the request, the response keeps the request, and the response's stream
+  keeps the response (a reference cycle), so a 25 MB upload stayed in memory until the
+  streamed reply finished and the garbage collector ran. The body now goes up as a one-shot
+  generator with an explicit `content-length` (no chunked encoding), and the proxy drops its
+  own reference before the upload starts, so the bytes are freed once httpx has sent them.
+  Isolated check (16 x 25 MB in flight, 1 GiB limit, gate off): peak 1020 -> 518 MB, resident
+  after the burst 945 -> 42 MB.
 - **Web tool calls failing with 400 at effort `xhigh` / `max`** (2026-07-27): Claude Code sends
   WebSearch/WebFetch subrequests with thinking disabled but keeps the session's effort level,
   which the API rejects (`output_config.effort 'xhigh' is not supported when thinking is

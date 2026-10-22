@@ -474,6 +474,21 @@ async def _read_body(request: Request) -> bytes:
     return bytes(buf)
 
 
+async def _one_shot(data: bytes):
+    """Hand the request body to httpx as a generator that yields it once.
+
+    With ``content=bytes`` httpx keeps the body on the request (its stream and
+    ``_content``), and the upstream response keeps the request. The upload
+    stayed alive until a streamed response ended, and past that until the
+    garbage collector freed the response: httpx binds a response's stream
+    back to the response, a reference cycle (a 48 MB rewritten body in a
+    2026-10-22 loopback check). The generator's frame lets go of the bytes
+    once httpx has sent them. The caller sets content-length: without it
+    httpx sends generator content chunked.
+    """
+    yield data
+
+
 async def _send_watching_client(client: httpx.AsyncClient, req: httpx.Request, request: Request) -> httpx.Response:
     """``client.send(stream=True)`` that is cancelled if the client disconnects first.
 
@@ -680,17 +695,27 @@ async def _forward(request: Request, path: str, gate_token: BodyGateToken) -> Re
                 history_json, history_bytes = history_view(req_json, body_bytes)
     req_json = None
 
+    # Upload through a one-shot generator (see _one_shot) with the final length
+    # in content-length -- the rewrite may have changed it. This frame drops its
+    # own reference before the upload starts, so once httpx has sent the bytes
+    # nothing keeps them alive.
+    upload = body
+    if body:
+        headers["content-length"] = str(len(body))
+        upload = _one_shot(body)
+    body = None
+
     t0 = time.time()
 
     if is_stream:
         return await _proxy_stream(
-            client, request, url, headers, body, path, t0, body_bytes,
+            client, request, url, headers, upload, path, t0, body_bytes,
             history_json=history_json, history_bytes=history_bytes, rewrite_skipped=rewrite_skipped,
             gate_token=gate_token,
         )
 
     # Non-streaming
-    req = client.build_request(method=request.method, url=url, headers=headers, content=body)
+    req = client.build_request(method=request.method, url=url, headers=headers, content=upload)
     try:
         upstream_resp = await _send_watching_client(client, req, request)
     except _ClientGone:
@@ -802,7 +827,7 @@ async def _forward(request: Request, path: str, gate_token: BodyGateToken) -> Re
 
 
 async def _proxy_stream(
-    client, request, url, headers, body, path, t0, body_bytes=0,
+    client, request, url, headers, upload, path, t0, body_bytes=0,
     history_json=None, history_bytes=0, rewrite_skipped=False, gate_token=None,
 ):
     """Handle streaming responses -- true streaming proxy via client.stream().
@@ -811,6 +836,7 @@ async def _proxy_stream(
     SSE lines that span chunk boundaries are decoded correctly (C2 fix from
     audit-full-source-20260410.md -- mojibake root cause candidate).
 
+    ``upload`` is the request body as handed to httpx (see _one_shot).
     ``history_json`` is the caller's single parse of the request with inline
     binary payloads already stripped (None = no history capture for this
     request) and ``history_bytes`` the size it keeps alive (the writer's queue
@@ -820,7 +846,7 @@ async def _proxy_stream(
     ``gate_token`` is the request's body gate admission: released once
     upstream headers arrive (or the request fails), not when the stream ends.
     """
-    req = client.build_request(method=request.method, url=url, headers=headers, content=body)
+    req = client.build_request(method=request.method, url=url, headers=headers, content=upload)
     try:
         upstream_resp = await _send_watching_client(client, req, request)
     except _ClientGone:
