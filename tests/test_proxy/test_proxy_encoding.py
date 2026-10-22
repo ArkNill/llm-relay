@@ -12,6 +12,7 @@ recorder, so nothing touches a database.
 
 from __future__ import annotations
 
+import gzip
 import json
 from types import SimpleNamespace
 
@@ -109,3 +110,54 @@ def test_upstream_sees_only_the_encodings_httpx_can_decode(relay):
     assert "br" not in tokens and "zstd" not in tokens
     assert "gzip" in tokens  # httpx's own default, not the client's list
     assert resp.json()["content"] == JSON_REPLY["content"]
+
+
+# ── b. an encoding httpx cannot decode is passed through: header and bytes ──
+
+# "x-test" is unknown to every httpx, so the test does not depend on whether the
+# optional brotli/zstandard packages happen to be installed.
+UNKNOWN_BODY = bytes(range(256)) * 2  # neither UTF-8 nor JSON: stands in for brotli bytes
+
+
+def test_non_stream_body_httpx_did_not_decode_keeps_its_encoding(relay):
+    relay.upstream.reply = httpx.Response(
+        200, headers={"content-type": "application/json", "content-encoding": "x-test"}, content=UNKNOWN_BODY,
+    )
+    resp = _post(relay)
+
+    assert resp.status_code == 200
+    assert resp.headers["content-encoding"] == "x-test"
+    assert resp.content == UNKNOWN_BODY  # byte for byte, the client decodes it
+
+
+def test_stream_body_httpx_did_not_decode_keeps_its_encoding(relay):
+    relay.upstream.reply = httpx.Response(
+        200, headers={"content-type": "text/event-stream", "content-encoding": "x-test"}, content=UNKNOWN_BODY,
+    )
+    resp = _post(relay, stream=True)
+
+    assert resp.status_code == 200
+    assert resp.headers["content-encoding"] == "x-test"
+    assert resp.content == UNKNOWN_BODY
+    logged = relay.writer.kwargs("log_request")
+    assert (logged["status_code"], logged["is_stream"], logged["model"]) == (200, True, None)
+    assert logged["raw_usage"]["stream_end"] == "completed"
+    assert logged["raw_usage"]["content_encoding"] == "x-test"  # why the row has no model
+
+
+# ── c. the decoding path is unchanged: gzip is decoded and its header dropped ──
+
+
+def test_gzip_body_is_decoded_and_the_header_dropped(relay):
+    relay.upstream.reply = httpx.Response(
+        200, headers={"content-type": "application/json", "content-encoding": "gzip"},
+        content=gzip.compress(json.dumps(JSON_REPLY).encode("utf-8")),
+    )
+    resp = _post(relay)
+
+    assert resp.status_code == 200
+    assert "content-encoding" not in resp.headers
+    assert resp.json() == JSON_REPLY
+    logged = relay.writer.kwargs("log_request")
+    assert (logged["status_code"], logged["is_stream"], logged["model"]) == (200, False, MODEL)
+    assert logged["raw_usage"] == JSON_REPLY["usage"]

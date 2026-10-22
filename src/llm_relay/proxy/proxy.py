@@ -44,6 +44,17 @@ def _load_env_files(base: Path | None = None) -> None:
 _load_env_files()
 
 import httpx  # noqa: E402
+
+try:
+    # Private httpx API: the content-encodings this process can decode. gzip and
+    # deflate always; br and zstd only when the optional brotli / zstandard
+    # packages are installed. Anything else httpx passes through as the
+    # original bytes without raising (see _undecoded_encoding).
+    from httpx._decoders import SUPPORTED_DECODERS as _httpx_decoders  # noqa: E402
+    _HTTPX_DECODERS = frozenset(name.lower() for name in _httpx_decoders)
+except ImportError:  # pragma: no cover - httpx moved the module: assume the built-in three
+    _HTTPX_DECODERS = frozenset({"identity", "gzip", "deflate"})
+
 from starlette.applications import Starlette  # noqa: E402
 from starlette.middleware import Middleware  # noqa: E402
 from starlette.requests import Request  # noqa: E402
@@ -425,6 +436,40 @@ def _extract_ratelimit_headers(headers) -> dict[str, str] | None:
     """Extract rate limit related headers from API response."""
     rl = {k: v for k, v in headers.items() if k.lower().startswith(_RATELIMIT_PREFIXES)}
     return rl or None
+
+
+def _undecoded_encoding(upstream_headers) -> str | None:
+    """The upstream ``content-encoding`` when httpx left the body encoded, else None.
+
+    httpx decodes the encodings it has a decoder for and silently hands over the
+    original bytes for any other value (an unknown token selects its identity
+    decoder). The relay forwards the bytes httpx returns, so the body is plain
+    only when every listed encoding is one httpx decodes.
+    """
+    value = upstream_headers.get("content-encoding")
+    if not value:
+        return None
+    tokens = [t.strip().lower() for t in value.split(",") if t.strip()]
+    if all(t in _HTTPX_DECODERS for t in tokens):
+        return None
+    return value
+
+
+def _relay_headers(upstream_headers, undecoded: str | None) -> dict:
+    """Response headers to pass on with the body httpx returned.
+
+    ``content-length`` and ``transfer-encoding`` always go: Starlette frames the
+    body again. ``content-encoding`` goes when httpx decoded the body (the relay
+    forwards plain bytes) and stays when it did not (``undecoded``, from
+    _undecoded_encoding), so the client decodes what it actually receives.
+    Until 2026-10-22 the header was always dropped, and a brotli body httpx
+    could not decode reached Claude Code labelled as plain text.
+    """
+    if undecoded:
+        drop = ("content-length", "transfer-encoding")
+    else:
+        drop = ("content-encoding", "content-length", "transfer-encoding")
+    return {k: v for k, v in upstream_headers.items() if k.lower() not in drop}
 
 
 def _warn_if_poor(usage: dict, endpoint: str) -> None:
@@ -828,15 +873,10 @@ async def _forward(request: Request, path: str, gate_token: BodyGateToken) -> Re
     except (json.JSONDecodeError, UnicodeDecodeError):
         pass
 
-    # Strip encoding headers (httpx auto-decompresses, so lengths/encoding change)
-    resp_headers = {
-        k: v for k, v in upstream_resp.headers.items()
-        if k.lower() not in ("content-encoding", "content-length", "transfer-encoding")
-    }
     return Response(
         content=resp_body,
         status_code=upstream_resp.status_code,
-        headers=resp_headers,
+        headers=_relay_headers(upstream_resp.headers, _undecoded_encoding(upstream_resp.headers)),
     )
 
 
@@ -873,6 +913,11 @@ async def _proxy_stream(
             gate_token.release()
 
     rl_headers = _extract_ratelimit_headers(upstream_resp.headers)
+    # A body httpx could not decode is forwarded as-is with its content-encoding
+    # (see _relay_headers); the SSE copy below would be compressed bytes, so
+    # usage parsing is skipped and the row says why its model is null.
+    undecoded = _undecoded_encoding(upstream_resp.headers)
+    parse_usage = _SSE_PARSE_USAGE and not undecoded
 
     usage_acc = {
         "input_tokens": 0,
@@ -896,6 +941,8 @@ async def _proxy_stream(
         usage_acc["rewrite_skipped"] = True
     if gate_token is not None and gate_token.waited_ms:
         usage_acc["body_gate_wait_ms"] = gate_token.waited_ms
+    if undecoded:
+        usage_acc["content_encoding"] = undecoded
 
     # History: accumulate response content blocks from SSE events. The request
     # side is history_json (stripped view from _proxy); nothing is re-parsed.
@@ -989,7 +1036,7 @@ async def _proxy_stream(
                 # piggybacked on the decoded copy, not on the forwarded bytes.
                 yield chunk
 
-                if not _SSE_PARSE_USAGE:
+                if not parse_usage:
                     continue
 
                 # Incremental UTF-8 decode -- handles multibyte chars that span
@@ -1016,7 +1063,7 @@ async def _proxy_stream(
             raise
         finally:
             # Step 1 -- flush the decoder (sync, safe under GeneratorExit).
-            if _SSE_PARSE_USAGE:
+            if parse_usage:
                 try:
                     tail = decoder.decode(b"", final=True)
                     if tail:
@@ -1084,14 +1131,10 @@ async def _proxy_stream(
             except Exception:
                 logger.debug("upstream aclose() failed", exc_info=True)
 
-    stream_headers = {
-        k: v for k, v in upstream_resp.headers.items()
-        if k.lower() not in ("content-encoding", "content-length", "transfer-encoding")
-    }
     return StreamingResponse(
         _stream_and_log(),
         status_code=upstream_resp.status_code,
-        headers=stream_headers,
+        headers=_relay_headers(upstream_resp.headers, undecoded),
     )
 
 
