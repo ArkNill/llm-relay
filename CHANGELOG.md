@@ -53,6 +53,22 @@ All notable changes to llm-relay are documented here.
   (10 waits, no timeouts, same wall time) and survives 24 in flight at 374 MB.
 
 ### Fixed
+- **Brotli responses reached Claude Code as plain text, and non-streaming replies without a
+  JSON body were never recorded** (2026-10-22): the relay forwarded the client's
+  `accept-encoding: gzip, deflate, br, zstd` and dropped `content-encoding` from every reply,
+  trusting httpx to decode. httpx without the optional brotli/zstandard packages passes a `br`
+  body through untouched, so when the edge compressed a JSON reply (a 529 during an upstream
+  overload, or the 200 of Claude Code's non-streaming fallback) the client got brotli bytes
+  labelled as plain text: the 529 displayed as garbage and the 200 ended the turn with
+  `API Error: JSON Parse error`. The non-streaming path then skipped `log_request` because the
+  body did not parse (11 x 529 and 2 x 200 missing from `requests` on 10/22). Three changes:
+  the client's `accept-encoding` is stripped so httpx advertises only what it decodes
+  (`gzip, deflate`; `br`/`zstd` too once those packages are installed); `content-encoding` is
+  dropped only when httpx decoded every listed encoding, otherwise header and bytes pass
+  through unchanged (the stream path then skips the SSE usage parse and records
+  `content_encoding`); and a non-streaming reply whose body is not a JSON object is recorded by
+  status alone (`raw_usage.stream_end = "unparsed_body"` with `content_type`,
+  `content_encoding`, `response_bytes`). No new dependency.
 - **MCP server failed to import with mcp SDK 2.x** (2026-10-22): `mcp` 2.0 (released 2026-07-28)
   renamed `FastMCP` to `mcp.server.mcpserver.MCPServer` and turned `mcp.server.fastmcp` into a stub
   that raises on import, so every fresh `llm-relay[mcp]` install since then crashed at import and
