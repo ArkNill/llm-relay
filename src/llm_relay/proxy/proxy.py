@@ -50,6 +50,7 @@ from starlette.requests import Request  # noqa: E402
 from starlette.responses import Response, StreamingResponse  # noqa: E402
 from starlette.routing import Mount, Route  # noqa: E402
 
+from .bodygate import BodyGate, BodyGateTimeout, BodyGateToken, cgroup_memory_max, default_max_bytes  # noqa: E402
 from .db import get_conn, log_budget_event, log_microcompact, log_request  # noqa: E402
 from .dbwriter import get_writer  # noqa: E402
 
@@ -106,6 +107,9 @@ def _setup_logging() -> None:
         level = logging.getLevelName(level_name)
         logger.setLevel(level if isinstance(level, int) else logging.WARNING)
     _access_log.setLevel(logging.INFO)
+    # A body gate wait means a session is being held back; the two INFO lines
+    # per wait are rare, so they stay visible at the default WARNING level.
+    logging.getLogger("llm-relay.bodygate").setLevel(logging.INFO)
 
 
 _setup_logging()
@@ -143,6 +147,20 @@ _HISTORY_RAW = os.getenv("LLM_RELAY_HISTORY_RAW", "0") == "1"
 # miss; this is a valve for image-heavy bursts (379 requests over 8 MB in one
 # day), not for normal traffic. History capture is never skipped.
 _MAX_REWRITE_BYTES = int(os.getenv("LLM_RELAY_MAX_REWRITE_BYTES", "0"))
+
+# Request body byte budget (2026-10-22, see bodygate.py). On 9/29 a burst of
+# about 40 image requests of 25 MB, each holding about 50 MB while it was read,
+# parsed and uploaded, took the relay past MemoryMax. A body of at least
+# LLM_RELAY_BODY_GATE_MIN_BYTES (by content-length) now waits before it is read
+# while the admitted bodies plus its own would exceed the budget, and gives its
+# bytes back as soon as upstream response headers arrive. Unset budget = a
+# quarter of the cgroup memory.max (256 MiB when there is none), 0 = gate off.
+# A request still waiting after LLM_RELAY_BODY_GATE_TIMEOUT_S gets a 503 the
+# client retries (0 = no waiting: over budget answers 503 at once).
+_MAX_INFLIGHT_BODY_BYTES = default_max_bytes(os.getenv("LLM_RELAY_MAX_INFLIGHT_BODY_BYTES"), cgroup_memory_max())
+_BODY_GATE_MIN_BYTES = int(os.getenv("LLM_RELAY_BODY_GATE_MIN_BYTES", str(4 * 1024 * 1024)))
+_BODY_GATE_TIMEOUT_S = float(os.getenv("LLM_RELAY_BODY_GATE_TIMEOUT_S", "120"))
+_body_gate = BodyGate(_MAX_INFLIGHT_BODY_BYTES, _BODY_GATE_MIN_BYTES, _BODY_GATE_TIMEOUT_S)
 
 # One "request start" line per request (see _RequestLog); /_health is never logged.
 _LOG_REQUEST_START = os.getenv("LLM_RELAY_LOG_REQUEST_START", "1") == "1"
@@ -542,6 +560,27 @@ def _upstream_error_response(
     return Response(body, status_code=status, media_type="application/json")
 
 
+def _body_gate_timeout_response(exc: BodyGateTimeout, headers, path: str, t0: float) -> Response:
+    """Record a request that gave up waiting at the body gate; answer 503 like a pool timeout."""
+    latency_ms = (time.time() - t0) * 1000
+    sid = _session_of(headers)
+    msg = "request body gate timeout (waited {:.0f}s for {} B, max {} B)".format(exc.waited_s, exc.n, exc.max_bytes)
+    logger.warning("%s -- %s session=%s", msg, path, (sid or "unknown")[:8])
+    _db_writer.submit(
+        log_request,
+        session_id=sid,
+        model=None,
+        status_code=503,
+        latency_ms=latency_ms,
+        endpoint=path,
+        is_stream=False,  # unknown: the body was never read
+        raw_usage={"stream_end": "body_gate_timeout"},
+        request_body_bytes=exc.n,
+    )
+    body = json.dumps({"type": "error", "error": {"type": "api_error", "message": "llm-relay: " + msg}})
+    return Response(body, status_code=503, media_type="application/json")
+
+
 async def _proxy(request: Request) -> Response:
     """Forward request to upstream, log usage, return response."""
     path = request.url.path
@@ -557,6 +596,29 @@ async def _proxy(request: Request) -> Response:
             media_type="application/json",
         )
 
+    # Body budget (see bodygate.py): a large body queues here, before it is
+    # read, so a waiting request holds no more than the server's read buffer.
+    # The upload paths release the token as soon as upstream headers arrive;
+    # the finally covers every other way out (release() is idempotent).
+    try:
+        gate_bytes = int(request.headers.get("content-length") or 0)
+    except ValueError:
+        gate_bytes = 0
+    gate_t0 = time.time()
+    try:
+        token = await _body_gate.acquire(
+            gate_bytes, label="{} session={}".format(path, (_session_of(request.headers) or "unknown")[:8]),
+        )
+    except BodyGateTimeout as exc:
+        return _body_gate_timeout_response(exc, request.headers, path, gate_t0)
+    try:
+        return await _forward(request, path, token)
+    finally:
+        token.release()
+
+
+async def _forward(request: Request, path: str, gate_token: BodyGateToken) -> Response:
+    """Read, rewrite and upload a /v1/ request the body gate has admitted; relay the response."""
     client = _get_client()
     query = str(request.url.query)
     url = f"{path}?{query}" if query else path
@@ -624,6 +686,7 @@ async def _proxy(request: Request) -> Response:
         return await _proxy_stream(
             client, request, url, headers, body, path, t0, body_bytes,
             history_json=history_json, history_bytes=history_bytes, rewrite_skipped=rewrite_skipped,
+            gate_token=gate_token,
         )
 
     # Non-streaming
@@ -634,6 +697,9 @@ async def _proxy(request: Request) -> Response:
         return _client_gone_response(headers, path, t0, body_bytes, is_stream=False)
     except httpx.HTTPError as exc:
         return _upstream_error_response(exc, headers, path, t0, body_bytes, is_stream=False)
+    finally:
+        # Headers are in (or the request failed): httpx is done with the body.
+        gate_token.release()
     try:
         resp_body = await upstream_resp.aread()
     except httpx.HTTPError as exc:
@@ -682,6 +748,8 @@ async def _proxy(request: Request) -> Response:
         raw_usage = resp_json.get("usage")
         if rewrite_skipped:
             raw_usage = dict(raw_usage if isinstance(raw_usage, dict) else {}, rewrite_skipped=True)
+        if gate_token.waited_ms:
+            raw_usage = dict(raw_usage if isinstance(raw_usage, dict) else {}, body_gate_wait_ms=gate_token.waited_ms)
         _db_writer.submit(
             log_request,
             session_id=sid,
@@ -735,7 +803,7 @@ async def _proxy(request: Request) -> Response:
 
 async def _proxy_stream(
     client, request, url, headers, body, path, t0, body_bytes=0,
-    history_json=None, history_bytes=0, rewrite_skipped=False,
+    history_json=None, history_bytes=0, rewrite_skipped=False, gate_token=None,
 ):
     """Handle streaming responses -- true streaming proxy via client.stream().
 
@@ -749,6 +817,8 @@ async def _proxy_stream(
     byte cap counts it); the body is not parsed again here. ``rewrite_skipped``
     marks a body sent upstream unchanged because it exceeded
     ``LLM_RELAY_MAX_REWRITE_BYTES``; it is recorded in ``raw_usage``.
+    ``gate_token`` is the request's body gate admission: released once
+    upstream headers arrive (or the request fails), not when the stream ends.
     """
     req = client.build_request(method=request.method, url=url, headers=headers, content=body)
     try:
@@ -757,6 +827,10 @@ async def _proxy_stream(
         return _client_gone_response(headers, path, t0, body_bytes, is_stream=True)
     except httpx.HTTPError as exc:
         return _upstream_error_response(exc, headers, path, t0, body_bytes, is_stream=True)
+    finally:
+        # Headers are in (or the request failed): httpx is done with the body.
+        if gate_token is not None:
+            gate_token.release()
 
     rl_headers = _extract_ratelimit_headers(upstream_resp.headers)
 
@@ -780,6 +854,8 @@ async def _proxy_stream(
     }
     if rewrite_skipped:
         usage_acc["rewrite_skipped"] = True
+    if gate_token is not None and gate_token.waited_ms:
+        usage_acc["body_gate_wait_ms"] = gate_token.waited_ms
 
     # History: accumulate response content blocks from SSE events. The request
     # side is history_json (stripped view from _proxy); nothing is re-parsed.
@@ -1066,6 +1142,7 @@ async def _health(request: Request) -> Response:
             "max_keepalive": _MAX_KEEPALIVE,
             "pool_timeout_s": _POOL_TIMEOUT_S,
         },
+        "body_gate": _body_gate.snapshot(),
         "db_writer": _db_writer.snapshot(),
         "composition_cache": cache_stats(),
     }

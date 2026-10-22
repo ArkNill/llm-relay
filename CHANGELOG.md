@@ -37,6 +37,17 @@ All notable changes to llm-relay are documented here.
   `web_search_requests` and `web_fetch_requests` from the final `message_delta` usage
   (`server_tool_use`) in `requests.raw_usage`, so search fees and search-heavy requests can be
   accounted for. No schema change; non-streamed rows already store the whole `usage` object.
+- **Request body admission gate** (2026-10-22): a `/v1/` request whose `content-length` is at
+  least `LLM_RELAY_BODY_GATE_MIN_BYTES` (4 MiB) waits, before its body is read, while the bodies
+  already admitted plus its own would exceed `LLM_RELAY_MAX_INFLIGHT_BODY_BYTES` (unset = a
+  quarter of the cgroup `memory.max`, 256 MiB without one; 0 = off). Admission is in arrival
+  order, a body alone is always admitted, and the bytes are given back as soon as the upstream
+  response headers arrive. A request still waiting after `LLM_RELAY_BODY_GATE_TIMEOUT_S` (120;
+  0 = answer at once) gets a 503 API error (`stream_end: body_gate_timeout`) that the client
+  retries. Requests that waited carry `body_gate_wait_ms` in `requests.raw_usage`; `GET
+  /_health` reports `body_gate`. Isolated check, 25 MB bodies x 40 with 16 in flight under a
+  1 GiB limit: the relay was OOM-killed at 1005 MB before; with the gate it peaks at 372 MB
+  (10 waits, no timeouts, same wall time) and survives 24 in flight at 374 MB.
 
 ### Fixed
 - **Web tool calls failing with 400 at effort `xhigh` / `max`** (2026-07-27): Claude Code sends
