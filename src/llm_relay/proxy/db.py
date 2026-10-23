@@ -1064,11 +1064,15 @@ def get_session_history(
     turn_start: int = 0,
     turn_end: int = -1,
     include_thinking: bool = False,
+    limit: Optional[int] = None,
 ) -> list[dict[str, Any]]:
     """Return conversation turns for a session, optionally filtering by turn range.
 
     When include_thinking is False, the thinking_blocks field is excluded.
     Turn range is inclusive on both ends. turn_end=-1 means no upper limit.
+    ``limit`` (2026-10-23, R9-10c) keeps only the newest ``limit`` turns of the
+    range, still returned oldest first: the history API and MCP tool used to
+    load every row of a long session (thousands of turns, hundreds of MB).
     """
     params: list[Any] = [session_id, turn_start]
     sql = """SELECT id, ts, session_id, request_id, turn_number, storage_mode,
@@ -1081,9 +1085,13 @@ def get_session_history(
     if turn_end >= 0:
         sql += " AND turn_number <= ?"
         params.append(turn_end)
-    sql += " ORDER BY turn_number ASC"
-
-    rows = conn.execute(sql, params).fetchall()
+    if limit is not None and limit > 0:
+        sql += " ORDER BY turn_number DESC, id DESC LIMIT ?"
+        params.append(limit)
+        rows = list(reversed(conn.execute(sql, params).fetchall()))
+    else:
+        sql += " ORDER BY turn_number ASC"
+        rows = conn.execute(sql, params).fetchall()
     result = []
     for r in rows:
         d = dict(r)
@@ -1091,6 +1099,46 @@ def get_session_history(
             d.pop("thinking_blocks", None)
         result.append(d)
     return result
+
+
+def history_default_turns() -> int:
+    """Turns the history detail API and MCP tool return when no range is asked for (R9-10c).
+
+    ``LLM_RELAY_HISTORY_DEFAULT_TURNS`` (default 200); 0 or less returns every
+    turn, as before 2026-10-23. Read per call, so a change needs no restart.
+    """
+    try:
+        return int(os.getenv("LLM_RELAY_HISTORY_DEFAULT_TURNS", "200"))
+    except ValueError:
+        return 200
+
+
+def count_session_turns(conn: sqlite3.Connection, session_id: str) -> int:
+    """Number of stored turns of a session (``total_turns_available`` of a capped history reply)."""
+    row = conn.execute(
+        "SELECT count(*) AS n FROM conversation_turns WHERE session_id = ?", (session_id,),
+    ).fetchone()
+    if not row:
+        return 0
+    try:
+        return int(row["n"])
+    except (IndexError, KeyError, TypeError):  # plain tuple rows
+        return int(row[0])
+
+
+def history_cap_fields(
+    conn: sqlite3.Connection, session_id: str, returned: int, limit: Optional[int],
+) -> dict[str, Any]:
+    """``truncated`` / ``total_turns_available`` for a reply capped at ``limit`` turns; {} when uncapped.
+
+    The count query only runs when the cap was reached.
+    """
+    if limit is None:
+        return {}
+    available = returned
+    if returned >= limit:
+        available = max(returned, count_session_turns(conn, session_id))
+    return {"truncated": available > returned, "total_turns_available": available}
 
 
 def get_session_compactions(

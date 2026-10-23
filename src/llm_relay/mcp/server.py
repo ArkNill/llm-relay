@@ -354,33 +354,50 @@ def session_history(
     turn_start: int = 0,
     turn_end: int = -1,
     include_thinking: bool = False,
+    all_turns: bool = False,
 ) -> str:
     """Retrieve conversation history for a session.
 
-    Returns the full conversation replay with messages, tool calls,
+    Returns the conversation replay with messages, tool calls,
     and model responses. Supports turn range filtering.
     Requires LLM_RELAY_HISTORY=1 to be enabled for recording.
+    Without a range only the newest LLM_RELAY_HISTORY_DEFAULT_TURNS turns
+    (default 200) are returned, with truncated / total_turns_available.
 
     Args:
         session_id: Session ID to query
         turn_start: Start turn number (0-indexed, default: first)
         turn_end: End turn number (-1 = last, default: all)
         include_thinking: Include extended thinking blocks (default: false)
+        all_turns: Return every turn even without a range (default: false)
     """
-    from llm_relay.proxy.db import get_conn, get_session_compactions, get_session_history
+    from llm_relay.proxy.db import (
+        get_conn,
+        get_session_compactions,
+        get_session_history,
+        history_cap_fields,
+        history_default_turns,
+    )
 
     try:
+        # Same default cap as GET /api/v1/history/{session_id} (2026-10-23, R9-10c).
+        limit = None
+        if turn_start == 0 and turn_end == -1 and not all_turns:
+            cap = history_default_turns()
+            limit = cap if cap > 0 else None
         conn = get_conn()
         turns = get_session_history(
             conn, session_id,
             turn_start=turn_start,
             turn_end=turn_end,
             include_thinking=include_thinking,
+            limit=limit,
         )
         compactions = get_session_compactions(conn, session_id)
         return _json({
             "session_id": session_id,
             "total_turns": len(turns),
+            **history_cap_fields(conn, session_id, len(turns), limit),
             "compaction_count": len(compactions),
             "turns": turns,
             "compactions": compactions,

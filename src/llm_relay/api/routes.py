@@ -674,14 +674,23 @@ async def _api_history_detail(request: Request) -> Response:
       turn_end (int): End turn number (-1 = all, default -1)
       include_thinking (0|1): Include thinking blocks (default 0)
       raw (0|1): Return raw stored data without diff reconstruction (default 0)
+      all (0|1): Without a turn range, return every turn instead of the newest
+        LLM_RELAY_HISTORY_DEFAULT_TURNS (default 200; 2026-10-23, R9-10c). A capped
+        reply adds ``truncated`` and ``total_turns_available``.
     """
     try:
-        from llm_relay.proxy.db import get_session_history
+        from llm_relay.proxy.db import get_session_history, history_cap_fields, history_default_turns
 
         session_id = request.path_params["session_id"]
         turn_start = _parse_int(request, "turn_start", "0")
         turn_end = _parse_int(request, "turn_end", "-1")
         include_thinking = request.query_params.get("include_thinking", "0") == "1"
+        # A long session's every row used to be loaded and serialised (thousands of
+        # turns): with no range asked for, only the newest turns are returned.
+        limit = None
+        if turn_start == 0 and turn_end == -1 and request.query_params.get("all", "0") != "1":
+            cap = history_default_turns()
+            limit = cap if cap > 0 else None
 
         conn = _get_db_conn()
         turns = get_session_history(
@@ -689,6 +698,7 @@ async def _api_history_detail(request: Request) -> Response:
             turn_start=turn_start,
             turn_end=turn_end,
             include_thinking=include_thinking,
+            limit=limit,
         )
 
         # Codex/Gemini history-list entries come from session files, not proxy DB.
@@ -714,6 +724,7 @@ async def _api_history_detail(request: Request) -> Response:
             "session_id": session_id,
             "total_turns": len(turns),
             "turns": turns,
+            **history_cap_fields(conn, session_id, len(turns), limit),
         })
     except ImportError:
         return _json_response({"error": "Proxy module not available"}, status=501)

@@ -298,3 +298,71 @@ class TestSessionHistoryMCP:
         from llm_relay.mcp.server import session_history
         result = json.loads(session_history("sid-1"))
         assert "error" in result
+
+
+# ── default cap on history detail (2026-10-23, R9-10c) ──
+
+
+@pytest.fixture
+def seeded_300(tmp_path):
+    """A real SQLite store with 300 turns in session sid-300 (and one turn elsewhere)."""
+    from llm_relay.proxy.db import get_conn, log_conversation_turn
+
+    conn = get_conn(tmp_path / "history.db")
+    for n in range(1, 301):
+        log_conversation_turn(
+            conn, session_id="sid-300", turn_number=n, storage_mode="delta",
+            request_messages=json.dumps([{"role": "user", "content": "m{}".format(n)}]),
+        )
+    log_conversation_turn(conn, session_id="other", turn_number=1, storage_mode="full")
+    yield conn
+    conn.close()
+
+
+def _get_detail(conn, query=""):
+    with patch("llm_relay.api.routes._get_db_conn", return_value=conn):
+        resp = TestClient(_make_app()).get("/api/v1/history/sid-300" + query)
+    assert resp.status_code == 200
+    return resp.json()
+
+
+class TestHistoryDetailCap:
+    def test_default_returns_the_newest_200_turns(self, seeded_300):
+        data = _get_detail(seeded_300)
+        assert data["total_turns"] == 200 and len(data["turns"]) == 200
+        assert [t["turn_number"] for t in data["turns"]] == list(range(101, 301))  # oldest first, as before
+        assert data["truncated"] is True and data["total_turns_available"] == 300
+
+    def test_all_returns_every_turn(self, seeded_300):
+        data = _get_detail(seeded_300, "?all=1")
+        assert data["total_turns"] == 300 and [t["turn_number"] for t in data["turns"]] == list(range(1, 301))
+        assert "truncated" not in data
+
+    def test_a_range_is_not_capped(self, seeded_300):
+        data = _get_detail(seeded_300, "?turn_start=1&turn_end=250")
+        assert data["total_turns"] == 250 and "truncated" not in data
+
+    def test_short_session_is_not_truncated(self, seeded_300):
+        with patch("llm_relay.api.routes._get_db_conn", return_value=seeded_300):
+            data = TestClient(_make_app()).get("/api/v1/history/other").json()
+        assert (data["total_turns"], data["truncated"], data["total_turns_available"]) == (1, False, 1)
+
+    def test_env_sets_the_cap_and_zero_disables_it(self, seeded_300, monkeypatch):
+        monkeypatch.setenv("LLM_RELAY_HISTORY_DEFAULT_TURNS", "50")
+        data = _get_detail(seeded_300)
+        assert (data["total_turns"], data["truncated"], data["total_turns_available"]) == (50, True, 300)
+        monkeypatch.setenv("LLM_RELAY_HISTORY_DEFAULT_TURNS", "0")
+        assert _get_detail(seeded_300)["total_turns"] == 300
+
+
+@pytest.mark.skipif(sys.version_info < (3, 10), reason="mcp requires Python 3.10+")
+class TestSessionHistoryMCPCap:
+    def test_default_cap_and_all_turns(self, seeded_300):
+        from llm_relay.mcp.server import session_history
+
+        with patch("llm_relay.proxy.db.get_conn", return_value=seeded_300):
+            capped = json.loads(session_history("sid-300"))
+            full = json.loads(session_history("sid-300", all_turns=True))
+        assert (capped["total_turns"], capped["truncated"], capped["total_turns_available"]) == (200, True, 300)
+        assert capped["turns"][0]["turn_number"] == 101
+        assert full["total_turns"] == 300 and "truncated" not in full

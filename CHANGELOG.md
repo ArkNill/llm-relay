@@ -23,6 +23,12 @@ All notable changes to llm-relay are documented here.
   restarts with a full snapshot and an evicted session is re-seeded from the DB as after a restart,
   so no turn is lost. `/_health` reports `history_state` (`sessions`, `conversations`, `evicted`,
   `max`).
+- **History detail is capped to the newest turns by default** (2026-10-23, R9-10c):
+  `GET /api/v1/history/{session_id}` and the MCP `session_history` tool used to return every turn
+  of a session. Without a turn range they now return the newest `LLM_RELAY_HISTORY_DEFAULT_TURNS`
+  turns (default 200, oldest first as before; 0 = no cap) and add `truncated` and
+  `total_turns_available`. `?all=1` (MCP: `all_turns=true`) or an explicit range returns the turns
+  as before. `db.get_session_history` takes an optional `limit`.
 
 ### Fixed
 - **History turns carrying a NUL character were lost** (2026-10-23, R9-12): PostgreSQL jsonb rejects
