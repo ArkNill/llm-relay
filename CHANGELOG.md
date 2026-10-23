@@ -4,6 +4,13 @@ All notable changes to llm-relay are documented here.
 
 ## [Unreleased]
 
+### Added
+- **Non-200 upstream streams are labelled** (2026-10-23, R9-6): a streamed request the upstream
+  answered with an error status (429, 529, ...) was recorded as `stream_end=completed`; its
+  `requests.raw_usage` now says `stream_end=upstream_status` with `upstream_status`, and
+  `error_type` (the API's `error.type`, e.g. `overloaded_error`) is kept from an SSE `error` event,
+  a plain JSON error body, or a non-streaming error reply. No schema change.
+
 ### Fixed
 - **History turns carrying a NUL character were lost** (2026-10-23, R9-12): PostgreSQL jsonb rejects
   the `\u0000` escape, so a turn whose messages held a NUL (a binary `tool_result`, for one) failed to

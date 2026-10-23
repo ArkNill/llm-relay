@@ -472,6 +472,19 @@ def _relay_headers(upstream_headers, undecoded: str | None) -> dict:
     return {k: v for k, v in upstream_headers.items() if k.lower() not in drop}
 
 
+def _error_type_of(payload: Any) -> str | None:
+    """``error.type`` of an Anthropic error object (``{"type": "error", "error": {"type": ...}}``), else None.
+
+    Recorded as ``raw_usage.error_type`` (2026-10-23, R9-6) so a 429/529 row says
+    which error it was (``rate_limit_error``, ``overloaded_error``, ...).
+    """
+    if isinstance(payload, dict):
+        error = payload.get("error")
+        if isinstance(error, dict) and isinstance(error.get("type"), str):
+            return error["type"]
+    return None
+
+
 def _warn_if_poor(usage: dict, endpoint: str) -> None:
     total = usage["cache_creation"] + usage["cache_read"]
     if total > 0:
@@ -840,6 +853,9 @@ async def _forward(request: Request, path: str, gate_token: BodyGateToken) -> Re
             raw_usage = dict(raw_usage if isinstance(raw_usage, dict) else {}, rewrite_skipped=True)
         if gate_token.waited_ms:
             raw_usage = dict(raw_usage if isinstance(raw_usage, dict) else {}, body_gate_wait_ms=gate_token.waited_ms)
+        error_type = _error_type_of(resp_json) if upstream_resp.status_code != 200 else None
+        if error_type and not (isinstance(raw_usage, dict) and "error_type" in raw_usage):
+            raw_usage = dict(raw_usage if isinstance(raw_usage, dict) else {}, error_type=error_type)
         _db_writer.submit(
             log_request,
             session_id=sid,
@@ -986,6 +1002,15 @@ async def _proxy_stream(
     def _process_sse_line(line: str) -> None:
         nonlocal _history_current_block
         if not line.startswith("data: "):
+            # An error status before the stream starts comes with a plain JSON
+            # error body, not SSE: keep its error type too (R9-6).
+            if upstream_resp.status_code != 200 and line.startswith("{") and "error_type" not in usage_acc:
+                try:
+                    error_type = _error_type_of(json.loads(line))
+                except ValueError:
+                    error_type = None
+                if error_type:
+                    usage_acc["error_type"] = error_type
             return
         payload = line[6:]
         if payload.strip() == "[DONE]":
@@ -995,6 +1020,12 @@ async def _proxy_stream(
         except (json.JSONDecodeError, KeyError):
             return
         etype = event.get("type", "")
+        # SSE "error" event (an overloaded_error in the middle of a 200 stream,
+        # or the body of a non-200 one): the first one names the failure.
+        if etype == "error" and "error_type" not in usage_acc:
+            error_type = _error_type_of(event)
+            if error_type:
+                usage_acc["error_type"] = error_type
         # Diagnostics: count content deltas for every stream, independent of
         # the history feature below.
         if etype == "content_block_delta":
@@ -1086,7 +1117,13 @@ async def _proxy_stream(
                 line_buf = lines[-1]
                 for line in lines[:-1]:
                     _process_sse_line(line)
-            usage_acc["stream_end"] = "completed"
+            if upstream_resp.status_code == 200:
+                usage_acc["stream_end"] = "completed"
+            else:
+                # The upstream answered with an error status (429, 529, ...): the
+                # body was relayed in full, but no generation completed (R9-6).
+                usage_acc["stream_end"] = "upstream_status"
+                usage_acc["upstream_status"] = upstream_resp.status_code
         except (GeneratorExit, asyncio.CancelledError):
             # Client went away (Starlette drops the generator at the yield site).
             usage_acc["stream_end"] = "client_disconnect"
