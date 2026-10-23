@@ -10,6 +10,11 @@ All notable changes to llm-relay are documented here.
   `requests.raw_usage` now says `stream_end=upstream_status` with `upstream_status`, and
   `error_type` (the API's `error.type`, e.g. `overloaded_error`) is kept from an SSE `error` event,
   a plain JSON error body, or a non-streaming error reply. No schema change.
+- **`/_health` in-flight detail** (2026-10-23, R9-15): `proxy_in_flight_detail` lists the /v1/
+  requests behind `proxy_in_flight` (oldest first, up to 20: `id`, `age_s`, `phase` `open`/`ended`,
+  `path`, `session`, `ended_s`) and `proxy_in_flight_ended` counts the ones whose response the relay
+  has finished while the ASGI call has not returned yet. A request still counted more than 2 s after
+  it ended is logged once at WARNING (`proxy_in_flight lag: ...`). The counter is unchanged.
 
 ### Fixed
 - **History turns carrying a NUL character were lost** (2026-10-23, R9-12): PostgreSQL jsonb rejects

@@ -4,13 +4,14 @@ from __future__ import annotations
 
 import asyncio
 import codecs
+import itertools
 import json
 import logging
 import os
 import time
 from contextlib import asynccontextmanager
 from pathlib import Path
-from typing import Any
+from typing import Any, Dict, List, Optional, Tuple
 
 
 def _load_env_files(base: Path | None = None) -> None:
@@ -187,6 +188,17 @@ _LOG_REQUEST_START = os.getenv("LLM_RELAY_LOG_REQUEST_START", "1") == "1"
 # Requests currently inside the app (event-loop thread only, no lock needed):
 # "total" = every HTTP request, "proxy" = /v1/ requests (a stream counts until it ends).
 _in_flight = {"total": 0, "proxy": 0}
+# The /v1/ requests behind _in_flight["proxy"], by id (2026-10-23, R9-15). On
+# 10/22 the counter read 2 for 6 s while the journal showed one unfinished
+# request, and the restart gate (proxy_in_flight == 0) kept missing its window.
+# The counter is unchanged; /_health lists these entries so the next occurrence
+# shows where a request lingers: "open" (still being served) or "ended" (the
+# relay finished the response, only the ASGI call has yet to return).
+# Same thread rule as _in_flight: event loop only.
+_in_flight_detail: Dict[int, Dict[str, Any]] = {}
+_in_flight_ids = itertools.count(1)
+_IN_FLIGHT_DETAIL_MAX = 20  # entries listed in /_health (oldest first)
+_IN_FLIGHT_LAG_WARN_S = 2.0  # "ended" longer than this -> one WARNING per request
 
 CLEARED_MARKER = "[Old tool result content cleared]"
 
@@ -922,6 +934,7 @@ async def _forward(request: Request, path: str, gate_token: BodyGateToken) -> Re
             ratelimit_headers=rl_headers,
         )
 
+    _mark_in_flight_ended(request.scope)  # body in hand: only sending it is left (R9-15)
     return Response(
         content=resp_body,
         status_code=upstream_resp.status_code,
@@ -1171,6 +1184,9 @@ async def _proxy_stream(
                 ephemeral_1h_tokens=usage_acc.get("ephemeral_1h_tokens", 0),
                 ephemeral_5m_tokens=usage_acc.get("ephemeral_5m_tokens", 0),
             )
+            # The stream body is over and its usage row queued; from here only the
+            # ASGI call has to return (R9-15, /_health proxy_in_flight_detail).
+            _mark_in_flight_ended(request.scope)
 
             # Step 2b -- session history capture (same sync enqueue as log_request)
             if _history_active:
@@ -1233,14 +1249,25 @@ class _RequestLog:
         _in_flight["total"] += 1
         if is_proxy:
             _in_flight["proxy"] += 1
-        if _LOG_REQUEST_START and path != "/_health":
-            size = "-"
-            sid = "-"
+        log_start = _LOG_REQUEST_START and path != "/_health"
+        size = "-"
+        sid = "-"
+        if log_start or is_proxy:
             for name, value in scope.get("headers") or ():
                 if name == b"content-length":
                     size = value.decode("latin-1", "replace")
                 elif name == b"x-claude-code-session-id" or (name == b"x-session-id" and sid == "-"):
                     sid = value.decode("latin-1", "replace")[:8]
+        inflight_id = None
+        if is_proxy:
+            inflight_id = next(_in_flight_ids)
+            _in_flight_detail[inflight_id] = {
+                "id": inflight_id, "started": time.monotonic(), "path": path, "session": sid, "phase": "open",
+            }
+            # scope["state"] is the dict behind Starlette's request.state: the
+            # proxy finds its entry through it (_mark_in_flight_ended).
+            scope.setdefault("state", {})["relay_inflight_id"] = inflight_id
+        if log_start:
             client = scope.get("client")
             _access_log.info(
                 "request start %s %s %sB client=%s session=%s",
@@ -1252,6 +1279,53 @@ class _RequestLog:
             _in_flight["total"] -= 1
             if is_proxy:
                 _in_flight["proxy"] -= 1
+                _in_flight_detail.pop(inflight_id, None)
+
+
+def _mark_in_flight_ended(scope: Any) -> None:
+    """Mark this request's in-flight entry "ended": the relay is done with the response (R9-15).
+
+    What is left is the ASGI call returning through Starlette and the
+    middleware; an entry that stays "ended" for seconds is the lag /_health
+    warns about. Missing state (a request outside the middleware) is ignored.
+    """
+    state = scope.get("state") if isinstance(scope, dict) else None
+    inflight_id = state.get("relay_inflight_id") if isinstance(state, dict) else None
+    entry = _in_flight_detail.get(inflight_id) if inflight_id is not None else None
+    if entry is not None and entry.get("phase") != "ended":
+        entry["phase"] = "ended"
+        entry["ended"] = time.monotonic()
+
+
+def _in_flight_snapshot(now: Optional[float] = None) -> Tuple[List[Dict[str, Any]], int]:
+    """(oldest-first detail, number "ended") of the requests behind proxy_in_flight, for /_health.
+
+    Logs one WARNING per request that has been "ended" for more than
+    _IN_FLIGHT_LAG_WARN_S, the first time /_health sees it.
+    """
+    now = time.monotonic() if now is None else now
+    detail: List[Dict[str, Any]] = []
+    ended = 0
+    for entry in sorted(_in_flight_detail.values(), key=lambda e: e["started"]):
+        ended_at = entry.get("ended")
+        if entry.get("phase") == "ended":
+            ended += 1
+        if ended_at is not None and now - ended_at > _IN_FLIGHT_LAG_WARN_S and not entry.get("warned"):
+            entry["warned"] = True
+            logger.warning(
+                "proxy_in_flight lag: id=%d path=%s session=%s ended %.1fs ago",
+                entry["id"], entry["path"], entry["session"], now - ended_at,
+            )
+        if len(detail) < _IN_FLIGHT_DETAIL_MAX:
+            detail.append({
+                "id": entry["id"],
+                "age_s": round(now - entry["started"], 1),
+                "phase": entry.get("phase"),
+                "path": entry["path"],
+                "session": entry["session"],
+                "ended_s": round(now - ended_at, 1) if ended_at is not None else None,
+            })
+    return detail, ended
 
 
 _PAGE_SIZE = os.sysconf("SC_PAGE_SIZE") if hasattr(os, "sysconf") else 4096
@@ -1283,11 +1357,14 @@ def _cgroup_mb():
 async def _health(request: Request) -> Response:
     from .composition import cache_stats
 
+    in_flight_detail, in_flight_ended = _in_flight_snapshot()
     payload = {
         "status": "ok",
         "upstream": UPSTREAM,
         "in_flight": _in_flight["total"],
         "proxy_in_flight": _in_flight["proxy"],
+        "proxy_in_flight_detail": in_flight_detail,
+        "proxy_in_flight_ended": in_flight_ended,
         "memory_rss_mb": _rss_mb(),
         "memory_cgroup_mb": _cgroup_mb(),
         "pool": {
