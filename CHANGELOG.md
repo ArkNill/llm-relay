@@ -4,6 +4,15 @@ All notable changes to llm-relay are documented here.
 
 ## [Unreleased]
 
+### Fixed
+- **History turns carrying a NUL character were lost** (2026-10-23, R9-12): PostgreSQL jsonb rejects
+  the `\u0000` escape, so a turn whose messages held a NUL (a binary `tool_result`, for one) failed to
+  insert; the error was swallowed at debug level and the conversation's state never advanced, so every
+  later turn of that conversation failed the same way (about 660 turns in 10 days). The capture now
+  writes `\ufffd` instead (one INFO line with the count), and a capture failure propagates to the
+  background writer, which retries it and spills it to disk with a WARNING. Delegation capture
+  failures are logged at WARNING.
+
 ## [0.9.7] - 2026-10-22
 
 > Relay hardening after the 2026-09-29 out-of-memory incident, plus the 2026-10-22 brotli
