@@ -32,6 +32,11 @@ All notable changes to llm-relay are documented here.
   writes `\ufffd` instead (one INFO line with the count), and a capture failure propagates to the
   background writer, which retries it and spills it to disk with a WARNING. Delegation capture
   failures are logged at WARNING.
+- **The DB writer no longer drops the job in progress at shutdown** (2026-10-23, R9-10b): a job the
+  writer thread had taken off the queue but not finished when `stop()`'s drain timeout ran out was in
+  neither the database nor the spill file. It is now spilled with the reason `shutdown timeout (in
+  progress; may also have been written)`, and a job that fails while the writer is stopping is
+  spilled at once (`shutdown`) instead of backing off into the timeout.
 
 ## [0.9.7] - 2026-10-22
 

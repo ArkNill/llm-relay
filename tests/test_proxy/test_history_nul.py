@@ -128,6 +128,7 @@ def test_failed_capture_is_retried_by_the_writer_then_spilled(tmp_path, monkeypa
         req_json=_nul_request(),
         accumulated_content=[{"type": "text", "text": "ok"}],
     )
+    writer._q.join()  # every retry runs before stop() (a stopping writer spills without backing off)
     writer.stop(timeout=5)
 
     assert (writer.stats["written"], writer.stats["retried"], writer.stats["spilled"]) == (0, 3, 1)
