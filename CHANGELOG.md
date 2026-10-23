@@ -16,6 +16,14 @@ All notable changes to llm-relay are documented here.
   has finished while the ASGI call has not returned yet. A request still counted more than 2 s after
   it ended is logged once at WARNING (`proxy_in_flight lag: ...`). The counter is unchanged.
 
+### Changed
+- **History capture state is bounded** (2026-10-23, R9-10a): the per-session and per-conversation
+  delta baselines (one key per helper call, kept for the life of the process) are LRU dicts capped
+  by `LLM_RELAY_HISTORY_STATE_MAX` (default 4096 each, 0 = unbounded). An evicted conversation
+  restarts with a full snapshot and an evicted session is re-seeded from the DB as after a restart,
+  so no turn is lost. `/_health` reports `history_state` (`sessions`, `conversations`, `evicted`,
+  `max`).
+
 ### Fixed
 - **History turns carrying a NUL character were lost** (2026-10-23, R9-12): PostgreSQL jsonb rejects
   the `\u0000` escape, so a turn whose messages held a NUL (a binary `tool_result`, for one) failed to

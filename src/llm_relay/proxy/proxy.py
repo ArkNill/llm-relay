@@ -1356,6 +1356,7 @@ def _cgroup_mb():
 
 async def _health(request: Request) -> Response:
     from .composition import cache_stats
+    from .history import state_stats as history_state_stats
 
     in_flight_detail, in_flight_ended = _in_flight_snapshot()
     payload = {
@@ -1375,6 +1376,7 @@ async def _health(request: Request) -> Response:
         "body_gate": _body_gate.snapshot(),
         "db_writer": _db_writer.snapshot(),
         "composition_cache": cache_stats(),
+        "history_state": history_state_stats(),
     }
     return Response(json.dumps(payload), media_type="application/json")
 

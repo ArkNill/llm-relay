@@ -10,17 +10,31 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+import os
 import re
 import sqlite3
-from typing import Any, Dict, List, Optional, Set, Tuple
+import threading
+from collections import OrderedDict
+from typing import Any, Dict, List, Optional, Tuple
 
 from .db import get_last_turn_state, log_compaction_event, log_conversation_turn
 
 logger = logging.getLogger("llm-relay.history")
 
-# Per-session state (process lifetime, re-seeded from the DB after a restart).
-# Key: session_id, Value: (turn_number, message_count, input_tokens) of the last capture.
-_session_prev: Dict[str, Tuple[int, int, int]] = {}
+# Upper bound on each state dict below (2026-10-23, R9-10a). They used to live for
+# the whole process, one key per helper call (WebSearch/WebFetch, title generation),
+# so they only grew. Beyond the cap the least recently used key is evicted, which
+# never loses a turn: an evicted conversation whose session is still known restarts
+# with a full snapshot, and an evicted session is re-seeded from the DB exactly as
+# after a relay restart. 0 = unbounded.
+_STATE_MAX = int(os.getenv("LLM_RELAY_HISTORY_STATE_MAX", "4096"))
+
+# Per-session state of the sessions captured by this process (re-seeded from the DB
+# after a restart or an eviction). Key: session_id, Value: (turn_number,
+# message_count, input_tokens) of the last capture. Holding a key also means "this
+# session already captured a turn in this process" (restart fallback in _baseline),
+# which is why _prev_state does not store the DB-seeded value here.
+_session_prev: OrderedDict[str, Tuple[int, int, int]] = OrderedDict()
 
 # Per-conversation delta baseline. Several conversations share one session_id
 # (CC subagents, WebSearch/WebFetch helper calls, title generation), so a delta
@@ -28,16 +42,49 @@ _session_prev: Dict[str, Tuple[int, int, int]] = {}
 # session's last capture -- otherwise every interleave looks like a compaction
 # (2026-09-29: 263 false compaction events and 295 full snapshots of up to
 # 24 MB in one session). Key: (session_id, fingerprint of the first message).
-_conv_prev: Dict[Tuple[str, str], Tuple[int, int]] = {}
-# Sessions that captured at least one turn in this process (restart fallback in _baseline).
-_session_seen: Set[str] = set()
+_conv_prev: OrderedDict[Tuple[str, str], Tuple[int, int]] = OrderedDict()
+
+# Captures normally run on the background writer's single thread; the lock keeps
+# the LRU bookkeeping consistent if a delegation capture runs elsewhere.
+_state_lock = threading.Lock()
+_state_evicted = [0]
+
+
+def _state_get(state: OrderedDict[Any, Any], key: Any) -> Any:
+    """``state[key]`` or None; a hit becomes the most recently used key."""
+    with _state_lock:
+        value = state.get(key)
+        if value is not None:
+            state.move_to_end(key)
+        return value
+
+
+def _state_put(state: OrderedDict[Any, Any], key: Any, value: Any) -> None:
+    """Store ``value`` as the most recently used key, evicting the oldest keys beyond _STATE_MAX."""
+    with _state_lock:
+        state[key] = value
+        state.move_to_end(key)
+        while _STATE_MAX > 0 and len(state) > _STATE_MAX:
+            state.popitem(last=False)
+            _state_evicted[0] += 1
+
+
+def state_stats() -> Dict[str, int]:
+    """Sizes of the capture state and evictions since start (/_health ``history_state``)."""
+    return {
+        "sessions": len(_session_prev),
+        "conversations": len(_conv_prev),
+        "evicted": _state_evicted[0],
+        "max": _STATE_MAX,
+    }
 
 
 def reset_state() -> None:
     """Forget all in-memory capture state (tests, restart simulation)."""
-    _session_prev.clear()
-    _conv_prev.clear()
-    _session_seen.clear()
+    with _state_lock:
+        _session_prev.clear()
+        _conv_prev.clear()
+        _state_evicted[0] = 0
 
 
 def _prev_state(conn: sqlite3.Connection, session_id: str) -> Optional[Tuple[int, int, int]]:
@@ -47,8 +94,10 @@ def _prev_state(conn: sqlite3.Connection, session_id: str) -> Optional[Tuple[int
     full snapshot, leaving duplicate turn numbers inside one session (2026-09-28).
     input_tokens is unknown after a restart, so the token-drop compaction
     heuristic is off for the first captured turn; the message-count check still runs.
+    The seeded value is not cached: a key in _session_prev means the session
+    captured a turn in this process, and the capture stores the real state.
     """
-    prev = _session_prev.get(session_id)
+    prev = _state_get(_session_prev, session_id)
     if prev is not None:
         return prev
     try:
@@ -58,9 +107,7 @@ def _prev_state(conn: sqlite3.Connection, session_id: str) -> Optional[Tuple[int
         return None
     if seeded is None:
         return None
-    prev = (seeded[0], seeded[1], 0)
-    _session_prev[session_id] = prev
-    return prev
+    return (seeded[0], seeded[1], 0)
 
 
 # ── NUL escapes ──
@@ -279,16 +326,17 @@ def _baseline(
     prev: Optional[Tuple[int, int, int]],
 ) -> Tuple[int, int]:
     """(message_count, input_tokens) the delta / compaction check compares against."""
-    base = _conv_prev.get(conv_key)
+    base = _state_get(_conv_prev, conv_key)
     if base is not None:
         return base
-    if prev is not None and session_id not in _session_seen:
-        # First capture of this session since the process started: the DB-seeded
-        # session state is the best available baseline, so turn numbers and the
-        # delta continue across restarts (2026-09-28).
+    if prev is not None and session_id not in _session_prev:
+        # First capture of this session since the process started (or since its
+        # state was evicted): the DB-seeded session state is the best available
+        # baseline, so turn numbers and the delta continue across restarts (2026-09-28).
         return (prev[1], prev[2])
-    # A new conversation inside a known session (subagent, helper call): full
-    # snapshot, and no compaction event -- nothing was dropped.
+    # A new conversation inside a known session (subagent, helper call), or one
+    # whose baseline was evicted: full snapshot, and no compaction event --
+    # nothing was dropped.
     return (0, 0)
 
 
@@ -556,8 +604,7 @@ def capture_delegation_turn(
             provider=cli_id,
         )
 
-        _session_prev[session_id] = (turn_number, 1, 0)
-        _session_seen.add(session_id)
+        _state_put(_session_prev, session_id, (turn_number, 1, 0))
     except Exception as exc:
         logger.warning("history capture failed (delegation) session=%s: %r", (session_id or "")[:8], exc)
 
@@ -666,6 +713,5 @@ def _do_capture(
     )
 
     # Update session + conversation state
-    _session_prev[session_id] = (turn_number, current_count, input_tokens)
-    _conv_prev[conv_key] = (current_count, input_tokens)
-    _session_seen.add(session_id)
+    _state_put(_session_prev, session_id, (turn_number, current_count, input_tokens))
+    _state_put(_conv_prev, conv_key, (current_count, input_tokens))
