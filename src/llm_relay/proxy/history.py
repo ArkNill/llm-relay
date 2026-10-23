@@ -710,6 +710,9 @@ def _do_capture(
         request_size_bytes=request_size,
         response_size_bytes=response_size,
         provider=provider,
+        # Which conversation of the session this turn belongs to (R9-7): the same
+        # first-message fingerprint the delta baseline is keyed by.
+        conversation_key=conv_key[1] or None,
     )
 
     # Update session + conversation state

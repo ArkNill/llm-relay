@@ -15,6 +15,14 @@ All notable changes to llm-relay are documented here.
   `path`, `session`, `ended_s`) and `proxy_in_flight_ended` counts the ones whose response the relay
   has finished while the ASGI call has not returned yet. A request still counted more than 2 s after
   it ended is logged once at WARNING (`proxy_in_flight lag: ...`). The counter is unchanged.
+- **`conversation_turns.conversation_key`** (2026-10-23, R9-7): every captured turn records which
+  conversation of its session it belongs to (the fingerprint of the first message that history's
+  delta baseline is already keyed by; NULL for older rows and delegation turns), with an index on
+  `(session_id, conversation_key, turn_number)`, and `db.get_session_history` returns it. SQLite
+  stores are migrated on connect. PostgreSQL stores get the column and index from
+  `docs/migrate-conversation-key.py` (report only unless `--apply`; `ADD COLUMN IF NOT EXISTS` under
+  a lock timeout, `CREATE INDEX CONCURRENTLY`); until then the relay keeps writing rows without the
+  key and logs one WARNING. Composition and display do not use the key yet.
 
 ### Changed
 - **History capture state is bounded** (2026-10-23, R9-10a): the per-session and per-conversation
