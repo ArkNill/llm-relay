@@ -32,18 +32,40 @@ def _make_statuses():
 class TestCliStatus:
     @patch("llm_relay.orch.discovery.discover_all", return_value=_make_statuses())
     def test_returns_all_clis(self, mock_discover):
+        # cli_status surfaces both CLI providers (from discover_all) and
+        # API providers (from api_executor.list_api_providers). Patch the
+        # API surface to "no providers" so this test stays focused on CLI.
         from llm_relay.mcp.server import cli_status
-        result = json.loads(cli_status())
+        with patch("llm_relay.orch.api_executor.list_api_providers", return_value=[]):
+            result = json.loads(cli_status())
         assert len(result) == 3
         assert result[0]["cli_id"] == "claude-code"
+        assert result[0]["kind"] == "cli-binary"
         assert result[0]["usable"] is True
         assert result[0]["version"] == "2.1.91"
 
     @patch("llm_relay.orch.discovery.discover_all", return_value=[])
     def test_empty_when_no_clis(self, mock_discover):
+        # As above: scope to "no CLI providers AND no API providers" so
+        # the empty case stays empty.
         from llm_relay.mcp.server import cli_status
-        result = json.loads(cli_status())
+        with patch("llm_relay.orch.api_executor.list_api_providers", return_value=[]):
+            result = json.loads(cli_status())
         assert result == []
+
+    @patch("llm_relay.orch.discovery.discover_all", return_value=_make_statuses())
+    def test_includes_api_providers(self, mock_discover, tmp_path, monkeypatch):
+        # When an API provider has a usable key, cli_status appends it.
+        from llm_relay.mcp.server import cli_status
+        key_path = tmp_path / "grok.key"
+        key_path.write_text("xai-test", encoding="utf-8")
+        monkeypatch.setenv("XAI_API_KEY_PATH", str(key_path))
+        result = json.loads(cli_status())
+        kinds = [r["kind"] for r in result]
+        assert "cli-binary" in kinds
+        assert "http-api" in kinds
+        api_rows = [r for r in result if r["kind"] == "http-api"]
+        assert any(r["cli_id"] == "xai-grok" for r in api_rows)
 
 
 class TestCliProbe:
