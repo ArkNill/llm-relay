@@ -15,6 +15,10 @@ All notable changes to llm-relay are documented here.
   `conversation_turns` tables are never written. PostgreSQL: create the tables with
   `docs/migrate-provider-tables.py --pg ... --apply`; until they exist the relay forwards without
   recording. `LLM_RELAY_AGY_CAPTURE=0` forwards only. Header values and bodies are never logged.
+- **Delegated `agy` calls use the `agyGt` wrapper when it is on PATH** (2026-11-20): discovery
+  looks for `agyGt` before `agy` for `antigravity-cli`, so `cli_delegate` / `orch_delegate` calls go
+  through the Antigravity relay and are recorded like interactive sessions. `binary_name` stays
+  `agy`. `LLM_RELAY_AGY_DIRECT=1` skips the wrapper.
 - **Antigravity CLI (`agy`) as an orchestration target** (2026-11-20): `cli_delegate` (`cli="agy"` or
   `"antigravity"`), `cli_probe` and `orch_delegate` reach registry id `antigravity-cli`; `"gemini"`
   still means Gemini CLI. Routing puts it after Codex for `strongest`/`auto` and first for `fastest`

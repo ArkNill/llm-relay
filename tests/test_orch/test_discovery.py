@@ -226,3 +226,66 @@ class TestGetAvailable:
         assert len(result) == 1  # Only installed ones
         assert result[0].cli_id == "a"
 
+
+class TestAntigravityLauncher:
+    """Delegated agy calls go through the agyGt wrapper (Antigravity relay) when it is installed."""
+
+    @staticmethod
+    def _which_factory(available):
+        def fake_which(name):
+            return available.get(name)
+        return fake_which
+
+    def test_prefers_wrapper_when_present(self, monkeypatch):
+        from llm_relay.orch import discovery
+
+        monkeypatch.delenv("LLM_RELAY_AGY_DIRECT", raising=False)
+        monkeypatch.setattr(discovery.shutil, "which", self._which_factory(
+            {"agyGt": "/home/u/bin/agyGt", "agy": "/home/u/.local/bin/agy"}))
+        assert discovery._which("antigravity-cli", "agy") == "/home/u/bin/agyGt"
+
+    def test_falls_back_to_plain_binary(self, monkeypatch):
+        from llm_relay.orch import discovery
+
+        monkeypatch.delenv("LLM_RELAY_AGY_DIRECT", raising=False)
+        monkeypatch.setattr(discovery.shutil, "which", self._which_factory({"agy": "/home/u/.local/bin/agy"}))
+        assert discovery._which("antigravity-cli", "agy") == "/home/u/.local/bin/agy"
+
+    def test_direct_env_skips_wrapper(self, monkeypatch):
+        from llm_relay.orch import discovery
+
+        monkeypatch.setenv("LLM_RELAY_AGY_DIRECT", "1")
+        monkeypatch.setattr(discovery.shutil, "which", self._which_factory(
+            {"agyGt": "/home/u/bin/agyGt", "agy": "/home/u/.local/bin/agy"}))
+        assert discovery._which("antigravity-cli", "agy") == "/home/u/.local/bin/agy"
+
+    def test_missing_everywhere(self, monkeypatch):
+        from llm_relay.orch import discovery
+
+        monkeypatch.setattr(discovery.shutil, "which", self._which_factory({}))
+        assert discovery._which("antigravity-cli", "agy") is None
+
+    def test_other_clis_only_look_for_their_binary(self, monkeypatch):
+        from llm_relay.orch import discovery
+
+        asked = []
+
+        def fake_which(name):
+            asked.append(name)
+            return "/usr/bin/" + name
+
+        monkeypatch.setattr(discovery.shutil, "which", fake_which)
+        assert discovery._which("claude-code", "claude") == "/usr/bin/claude"
+        assert asked == ["claude"]
+
+    def test_status_keeps_binary_name_agy(self, monkeypatch):
+        from llm_relay.orch import discovery
+
+        monkeypatch.delenv("LLM_RELAY_AGY_DIRECT", raising=False)
+        monkeypatch.setattr(discovery.shutil, "which", self._which_factory({"agyGt": "/home/u/bin/agyGt"}))
+        monkeypatch.setattr(discovery, "_get_version", lambda path, name: "1.5.13")
+        monkeypatch.setattr(discovery, "_probe_antigravity", lambda path: True)
+        status = discovery._discover_one("antigravity-cli", "agy", "")
+        assert status.binary_name == "agy"  # cli="agy" still resolves by binary name
+        assert status.binary_path == "/home/u/bin/agyGt"
+        assert status.is_usable()

@@ -6,7 +6,7 @@ import logging
 import os
 import shutil
 import subprocess
-from typing import List, Optional, Tuple
+from typing import Dict, List, Optional, Tuple
 
 from llm_relay.orch.models import AuthMethod, CLIStatus
 
@@ -25,6 +25,14 @@ _CLI_REGISTRY: List[Tuple[str, str, str]] = [
 # without it blocks on an interactive login instead of failing, so the file is the
 # only cheap signal we have.
 _AGY_OAUTH_TOKEN_PATH = "~/.gemini/antigravity-cli/antigravity-oauth-token"
+
+# Launchers tried before the plain binary name. ``agyGt`` is the local wrapper that sends
+# agy through the Antigravity relay (CLOUD_CODE_URL) and pins its version, so delegated
+# calls are recorded like interactive ones. Without it on PATH the plain binary is used.
+# LLM_RELAY_AGY_DIRECT=1 skips the wrapper (read on every discovery).
+_PREFERRED_LAUNCHERS: Dict[str, Tuple[str, ...]] = {
+    "antigravity-cli": ("agyGt",),
+}
 
 _PROBE_TIMEOUT = int(os.environ.get("LLM_RELAY_ORCH_PROBE_TIMEOUT", "10"))
 
@@ -56,9 +64,21 @@ def get_available(require_auth: bool = True) -> List[CLIStatus]:
     return [s for s in results if s.installed]
 
 
+def _which(cli_id: str, binary_name: str) -> Optional[str]:
+    """Path of the launcher to run for a CLI: a preferred wrapper if present, else the binary."""
+    launchers: Tuple[str, ...] = _PREFERRED_LAUNCHERS.get(cli_id, ())
+    if cli_id == "antigravity-cli" and os.environ.get("LLM_RELAY_AGY_DIRECT", "") == "1":
+        launchers = ()
+    for name in launchers + (binary_name,):
+        path = shutil.which(name)
+        if path:
+            return path
+    return None
+
+
 def _discover_one(cli_id: str, binary_name: str, api_key_env: str) -> CLIStatus:
     """Probe a single CLI for installation and auth status."""
-    binary_path = shutil.which(binary_name)
+    binary_path = _which(cli_id, binary_name)
     installed = binary_path is not None
     # Empty api_key_env = no API-key auth for this CLI; never report another CLI's key.
     api_key_available = bool(api_key_env) and bool(os.environ.get(api_key_env, ""))
