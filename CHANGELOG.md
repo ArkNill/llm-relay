@@ -15,6 +15,9 @@ All notable changes to llm-relay are documented here.
   `conversation_turns` tables are never written. PostgreSQL: create the tables with
   `docs/migrate-provider-tables.py --pg ... --apply`; until they exist the relay forwards without
   recording. `LLM_RELAY_AGY_CAPTURE=0` forwards only. Header values and bodies are never logged.
+- **Delegated `agy` calls pin a default model** (2026-11-20): without an explicit `model` the call
+  passes `--model` from `LLM_RELAY_AGY_DEFAULT_MODEL` (default `gemini-4-neon-xhigh`) instead of
+  inheriting the interactive session's saved `/model` choice; an empty value leaves it to agy.
 - **Delegated `agy` calls use the `agyGt` wrapper when it is on PATH** (2026-11-20): discovery
   looks for `agyGt` before `agy` for `antigravity-cli`, so `cli_delegate` / `orch_delegate` calls go
   through the Antigravity relay and are recorded like interactive sessions. `binary_name` stays

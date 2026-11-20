@@ -41,6 +41,8 @@ _codex_gh_token_cache: Optional[tuple] = None  # (token, expiry_monotonic)
 # --print-timeout is set this many seconds below the subprocess timeout so agy
 # can emit its own JSON envelope (with a real error) before we kill it.
 _AGY_PRINT_TIMEOUT_MARGIN_S = 10
+# Model used when a delegation does not name one (override: LLM_RELAY_AGY_DEFAULT_MODEL).
+_AGY_DEFAULT_MODEL = "gemini-4-neon-xhigh"
 # Default permission rules passed via --settings. Without explicit rules, a tool
 # call that needs approval is auto-denied in headless mode and the whole answer
 # is lost (rc=0, status SUCCESS, empty response). With explicit deny rules the
@@ -322,6 +324,10 @@ def _build_antigravity_cmd(
         shell commands, file writes, URL execution and MCP tools denied
       - "full": --dangerously-skip-permissions (every tool call auto-approved)
 
+    Without an explicit model the call uses LLM_RELAY_AGY_DEFAULT_MODEL (default
+    "gemini-4-neon-xhigh"), read on every invocation; set it to an empty string to
+    let agy use its own configured default.
+
     Read-only rules are the default because headless agy without explicit rules
     auto-denies any tool call that needs approval and then returns an empty
     response with status SUCCESS and exit code 0, losing the whole answer. With
@@ -337,6 +343,10 @@ def _build_antigravity_cmd(
         cmd.append("--dangerously-skip-permissions")
     else:
         cmd.extend(["--settings", json.dumps(_AGY_READ_ONLY_SETTINGS, separators=(",", ":"))])
+    # No model given: pin one instead of inheriting whatever the interactive agy session last
+    # selected (its /model choice is saved to settings.json and would silently change
+    # delegated calls). An empty LLM_RELAY_AGY_DEFAULT_MODEL leaves the choice to agy.
+    model = model or os.environ.get("LLM_RELAY_AGY_DEFAULT_MODEL", _AGY_DEFAULT_MODEL)
     if model:
         cmd.extend(["--model", model])
     return cmd

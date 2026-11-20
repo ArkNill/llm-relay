@@ -150,7 +150,32 @@ class TestBuildAntigravityCmd:
         assert cmd == [
             "/usr/bin/agy", "-p", "ping", "--output-format", "json",
             "--settings", json.dumps(_AGY_READ_ONLY_SETTINGS, separators=(",", ":")),
+            "--model", "gemini-4-neon-xhigh",
         ]
+
+    def test_default_model_is_pinned(self):
+        with patch.dict(os.environ, _env_without_agy_permissions(), clear=True):
+            cmd = _build_antigravity_cmd(_agy_cli(), "ping")
+        assert cmd[cmd.index("--model") + 1] == "gemini-4-neon-xhigh"
+
+    def test_explicit_model_wins_over_default(self):
+        env = dict(_env_without_agy_permissions(), LLM_RELAY_AGY_DEFAULT_MODEL="gemini-4-neon-high")
+        with patch.dict(os.environ, env, clear=True):
+            cmd = _build_antigravity_cmd(_agy_cli(), "ping", model="gemini-4-hydrogen-low")
+        assert cmd.count("--model") == 1
+        assert cmd[cmd.index("--model") + 1] == "gemini-4-hydrogen-low"
+
+    def test_default_model_env_override(self):
+        env = dict(_env_without_agy_permissions(), LLM_RELAY_AGY_DEFAULT_MODEL="gemini-4-neon-medium")
+        with patch.dict(os.environ, env, clear=True):
+            cmd = _build_antigravity_cmd(_agy_cli(), "ping")
+        assert cmd[cmd.index("--model") + 1] == "gemini-4-neon-medium"
+
+    def test_empty_default_model_env_leaves_choice_to_agy(self):
+        env = dict(_env_without_agy_permissions(), LLM_RELAY_AGY_DEFAULT_MODEL="")
+        with patch.dict(os.environ, env, clear=True):
+            cmd = _build_antigravity_cmd(_agy_cli(), "ping")
+        assert "--model" not in cmd
         assert "--dangerously-skip-permissions" not in cmd
         assert "--print-timeout" not in cmd
         assert "--model" not in cmd
