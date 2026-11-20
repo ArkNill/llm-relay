@@ -15,6 +15,12 @@ All notable changes to llm-relay are documented here.
   `conversation_turns` tables are never written. PostgreSQL: create the tables with
   `docs/migrate-provider-tables.py --pg ... --apply`; until they exist the relay forwards without
   recording. `LLM_RELAY_AGY_CAPTURE=0` forwards only. Header values and bodies are never logged.
+- **`python -m llm_relay.orch delegate` -- delegation from the shell** (2026-11-20): same discovery,
+  command building and success rules as the `cli_delegate` MCP tool, but as a process a caller can
+  run in the background or several at once (`--prompt` / `--prompt-file`, `--model`,
+  `--working-dir`, `--timeout`, `--out result.json`). Prints one JSON result, exits 0 / 1 / 2
+  (success / failed delegation / usage error) and records the delegation with strategy `cli`.
+  `python -m llm_relay.orch status` lists the registered CLIs.
 - **Delegated `agy` calls pin a default model** (2026-11-20): without an explicit `model` the call
   passes `--model` from `LLM_RELAY_AGY_DEFAULT_MODEL` (default `gemini-4-neon-xhigh`) instead of
   inheriting the interactive session's saved `/model` choice; an empty value leaves it to agy.
