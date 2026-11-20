@@ -19,9 +19,9 @@ from llm_relay.orch.models import (
 logger = logging.getLogger(__name__)
 
 # Strategy-based preference order
-_STRENGTH_ORDER = ["claude-code", "openai-codex", "gemini-cli"]
-_SPEED_ORDER = ["gemini-cli", "openai-codex", "claude-code"]
-_COST_ORDER = ["gemini-cli", "openai-codex", "claude-code"]  # subscription CLIs are "free"
+_STRENGTH_ORDER = ["claude-code", "openai-codex", "antigravity-cli", "gemini-cli"]
+_SPEED_ORDER = ["antigravity-cli", "gemini-cli", "openai-codex", "claude-code"]
+_COST_ORDER = ["antigravity-cli", "gemini-cli", "openai-codex", "claude-code"]  # subscription CLIs are "free"
 
 # Round-robin state (process-level)
 _rr_index = 0
@@ -44,7 +44,7 @@ def route(request: DelegationRequest) -> DelegationResult:
             success=False,
             output="",
             error="No authenticated CLI tools available. "
-                  "Install and authenticate at least one of: claude, codex, gemini",
+                  "Install and authenticate at least one of: claude, codex, agy, gemini",
         )
 
     # Select CLI

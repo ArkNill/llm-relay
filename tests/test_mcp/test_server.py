@@ -29,6 +29,15 @@ def _make_statuses():
     ]
 
 
+def _make_statuses_with_agy():
+    return _make_statuses() + [
+        CLIStatus(
+            "antigravity-cli", "agy", "/usr/bin/agy", True, True,
+            None, False, AuthMethod.CLI_OAUTH, "1.5.13",
+        ),
+    ]
+
+
 class TestCliStatus:
     @patch("llm_relay.orch.discovery.discover_all", return_value=_make_statuses())
     def test_returns_all_clis(self, mock_discover):
@@ -128,6 +137,82 @@ class TestOrchDelegate:
         result = json.loads(orch_delegate("test"))
         assert result["success"] is False
         assert "No authenticated" in result["error"]
+
+
+class TestAntigravityAliases:
+    def test_alias_table(self):
+        from llm_relay.mcp.server import _CLI_ALIASES
+        assert _CLI_ALIASES["agy"] == "antigravity-cli"
+        assert _CLI_ALIASES["antigravity"] == "antigravity-cli"
+        assert _CLI_ALIASES["gemini"] == "gemini-cli"
+        assert _CLI_ALIASES["claude"] == "claude-code"
+        assert _CLI_ALIASES["codex"] == "openai-codex"
+
+    @patch("llm_relay.orch.discovery.discover_all", return_value=_make_statuses_with_agy())
+    @patch("llm_relay.orch.executor.execute_cli")
+    def test_cli_delegate_agy(self, mock_exec, mock_discover):
+        mock_exec.return_value = DelegationResult(
+            cli_id="antigravity-cli", auth_method=AuthMethod.CLI_OAUTH,
+            success=True, output="pong\n", duration_ms=8000.0, exit_code=0,
+        )
+        from llm_relay.mcp.server import cli_delegate
+        result = json.loads(cli_delegate("agy", "ping", model="gemini-4-neon-medium"))
+        assert result["success"] is True
+        assert result["cli_id"] == "antigravity-cli"
+        target = mock_exec.call_args.args[0]
+        assert target.cli_id == "antigravity-cli"
+        assert mock_exec.call_args.kwargs["model"] == "gemini-4-neon-medium"
+
+    @patch("llm_relay.orch.discovery.discover_all", return_value=_make_statuses_with_agy())
+    @patch("llm_relay.orch.executor.execute_cli")
+    def test_cli_delegate_gemini_still_means_gemini_cli(self, mock_exec, mock_discover):
+        mock_exec.return_value = DelegationResult(
+            cli_id="gemini-cli", auth_method=AuthMethod.CLI_OAUTH,
+            success=True, output="done", duration_ms=80.0, exit_code=0,
+        )
+        from llm_relay.mcp.server import cli_delegate
+        cli_delegate("gemini", "analyze")
+        assert mock_exec.call_args.args[0].cli_id == "gemini-cli"
+
+    @patch("llm_relay.orch.discovery.discover_all", return_value=_make_statuses_with_agy())
+    def test_cli_probe_antigravity(self, mock_discover):
+        from llm_relay.mcp.server import cli_probe
+        result = json.loads(cli_probe("antigravity"))
+        assert result["cli_id"] == "antigravity-cli"
+        assert result["binary_name"] == "agy"
+        assert result["api_key_name"] is None
+
+    @patch("llm_relay.orch.discovery.discover_all", return_value=_make_statuses_with_agy())
+    def test_cli_probe_agy(self, mock_discover):
+        from llm_relay.mcp.server import cli_probe
+        assert json.loads(cli_probe("agy"))["cli_id"] == "antigravity-cli"
+
+    @patch("llm_relay.orch.router.get_available", return_value=_make_statuses_with_agy())
+    @patch("llm_relay.orch.router.execute_cli")
+    @patch("llm_relay.orch.router.get_orch_conn")
+    def test_orch_delegate_preferred_agy(self, mock_conn, mock_exec, mock_avail):
+        mock_exec.return_value = DelegationResult(
+            cli_id="antigravity-cli", auth_method=AuthMethod.CLI_OAUTH,
+            success=True, output="ok", duration_ms=10.0, exit_code=0,
+        )
+        mock_conn.return_value = MagicMock()
+        from llm_relay.mcp.server import orch_delegate
+        result = json.loads(orch_delegate("task", preferred_cli="agy"))
+        assert result["cli_id"] == "antigravity-cli"
+        assert mock_exec.call_args.args[0].cli_id == "antigravity-cli"
+
+    @patch("llm_relay.orch.router.get_available", return_value=_make_statuses_with_agy())
+    @patch("llm_relay.orch.router.execute_cli")
+    @patch("llm_relay.orch.router.get_orch_conn")
+    def test_orch_delegate_fastest_picks_agy(self, mock_conn, mock_exec, mock_avail):
+        mock_exec.return_value = DelegationResult(
+            cli_id="antigravity-cli", auth_method=AuthMethod.CLI_OAUTH,
+            success=True, output="ok", duration_ms=10.0, exit_code=0,
+        )
+        mock_conn.return_value = MagicMock()
+        from llm_relay.mcp.server import orch_delegate
+        orch_delegate("task", strategy="fastest")
+        assert mock_exec.call_args.args[0].cli_id == "antigravity-cli"
 
 
 class TestOrchHistory:

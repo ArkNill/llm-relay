@@ -29,8 +29,8 @@ class DelegationStrategy(enum.Enum):
 class CLIStatus:
     """Installation and authentication status of a single CLI tool."""
 
-    cli_id: str  # "claude-code" | "openai-codex" | "gemini-cli"
-    binary_name: str  # "claude" | "codex" | "gemini"
+    cli_id: str  # "claude-code" | "openai-codex" | "gemini-cli" | "antigravity-cli"
+    binary_name: str  # "claude" | "codex" | "gemini" | "agy"
     binary_path: Optional[str]  # Absolute path from shutil.which()
     installed: bool
     cli_authenticated: bool  # Headless probe succeeded
