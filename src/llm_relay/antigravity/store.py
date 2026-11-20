@@ -181,7 +181,9 @@ def _insert(conn: Any, table: str, values: Dict[str, Any]) -> int:
     """INSERT one row and return its id (``RETURNING id`` on PostgreSQL, ``lastrowid`` on SQLite)."""
     columns = list(values)
     sql = "INSERT INTO {} ({}) VALUES ({})".format(table, ", ".join(columns), ", ".join(["?"] * len(columns)))
-    params = tuple(values[col] for col in columns)
+    # Every plain string goes through strip_nul, not only the JSON columns: PostgreSQL
+    # rejects NUL in TEXT as well, and one bad id must not cost the whole row.
+    params = tuple(strip_nul(values[col]) if isinstance(values[col], str) else values[col] for col in columns)
     if _is_sqlite(conn):
         cursor = conn.execute(sql, params)
         conn.commit()

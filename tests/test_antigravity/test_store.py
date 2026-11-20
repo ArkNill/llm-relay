@@ -243,6 +243,15 @@ def test_strip_nul_leaves_other_values_unchanged():
 # ── log_request ──
 
 
+def test_plain_text_columns_are_stripped_of_nul_too(conn):
+    """PostgreSQL rejects NUL in TEXT as well as in jsonb, so every string parameter is cleaned."""
+    rid = store.log_request(
+        conn, provider=PROVIDER, endpoint="streamGenerateContent", session_id="s" + NUL + "1", model="m" + NUL,
+    )
+    row = dict(conn.execute("SELECT session_id, model FROM provider_requests WHERE id = ?", (rid,)).fetchone())
+    assert row == {"session_id": "s\ufffd1", "model": "m\ufffd"}
+
+
 def test_log_request_round_trip_with_raw_usage_and_returned_id(conn):
     usage = {"promptTokenCount": 120, "candidatesTokenCount": 30, "thoughtsTokenCount": 7,
              "promptTokensDetails": [{"modality": "TEXT", "tokenCount": 120}]}

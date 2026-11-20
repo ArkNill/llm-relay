@@ -677,6 +677,9 @@ class _Relay:
             and resp is not None
             and resp.error is None
             and not flight.body_too_large
+            # A response cut short (client left, upstream failed) is not a turn: agy resends
+            # the same history afterwards and the partial answer would be stored as its own turn.
+            and flight.stream_end == "completed"
         )
 
     def _write_turn(self, conn: Any, flight: _Flight) -> None:

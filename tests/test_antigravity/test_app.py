@@ -749,5 +749,6 @@ def test_client_disconnect_mid_stream_is_recorded(conn):
     (row,) = rows(conn, "provider_requests")
     assert row["stream_end"] == "client_disconnect"
     assert row["response_bytes"] == 300
+    assert rows(conn, "provider_turns") == []  # a response cut short is not stored as a turn
     assert stream.closed  # the upstream response was closed
     assert relay_state._in_flight == 0
