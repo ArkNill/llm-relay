@@ -5,6 +5,16 @@ All notable changes to llm-relay are documented here.
 ## [Unreleased]
 
 ### Added
+- **Antigravity relay: a separate process that records `agy` traffic** (2026-11-20):
+  `python -m llm_relay.antigravity` (default `127.0.0.1:8086`) is the address `agy` uses when
+  `CLOUD_CODE_URL` points at it. Every Code Assist call (`/v1internal:*`) is forwarded unchanged to
+  `LLM_RELAY_AGY_UPSTREAM` and streamed back as received; on the side, requests (tokens, model,
+  latency), conversation turns (full or delta, tool calls and results as blocks) and quota changes
+  are written to dedicated `provider_requests` / `provider_turns` / `provider_quota` tables, each row
+  tagged `provider='antigravity-cli'`. The Claude Code proxy is not imported and its `requests` /
+  `conversation_turns` tables are never written. PostgreSQL: create the tables with
+  `docs/migrate-provider-tables.py --pg ... --apply`; until they exist the relay forwards without
+  recording. `LLM_RELAY_AGY_CAPTURE=0` forwards only. Header values and bodies are never logged.
 - **Antigravity CLI (`agy`) as an orchestration target** (2026-11-20): `cli_delegate` (`cli="agy"` or
   `"antigravity"`), `cli_probe` and `orch_delegate` reach registry id `antigravity-cli`; `"gemini"`
   still means Gemini CLI. Routing puts it after Codex for `strongest`/`auto` and first for `fastest`
