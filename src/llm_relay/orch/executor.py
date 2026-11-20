@@ -8,7 +8,7 @@ import logging
 import os
 import subprocess
 import time
-from typing import List, Optional
+from typing import List, Optional, Tuple
 
 from llm_relay.orch.models import CLIStatus, DelegationResult
 
@@ -36,6 +36,21 @@ _CODEX_GH_TOKEN_SCRIPT = os.environ.get(
 _CODEX_GH_TOKEN_AGENT = os.environ.get("LLM_RELAY_CODEX_GH_AGENT", "codex-reviewer")
 _CODEX_GH_TOKEN_TTL_S = 3000  # 50 min cache; tokens themselves expire at 60
 _codex_gh_token_cache: Optional[tuple] = None  # (token, expiry_monotonic)
+
+# Antigravity CLI (agy) headless settings.
+# --print-timeout is set this many seconds below the subprocess timeout so agy
+# can emit its own JSON envelope (with a real error) before we kill it.
+_AGY_PRINT_TIMEOUT_MARGIN_S = 10
+# Default permission rules passed via --settings. Without explicit rules, a tool
+# call that needs approval is auto-denied in headless mode and the whole answer
+# is lost (rc=0, status SUCCESS, empty response). With explicit deny rules the
+# denied tool returns an error to the model and the answer still comes back.
+_AGY_READ_ONLY_SETTINGS = {
+    "permissions": {
+        "allow": ["read_file(*)", "read_url(*)"],
+        "deny": ["command(*)", "write_file(*)", "execute_url(*)", "mcp(*)"],
+    },
+}
 
 
 def _get_codex_gh_token() -> Optional[str]:
@@ -94,6 +109,12 @@ def execute_cli(
       claude:  claude -p "{prompt}" --output-format=json [--model X]
       codex:   codex exec "{prompt}" --json --full-auto [--model X]
       gemini:  gemini -p "{prompt}" --output-format=json -y [--model X]
+      agy:     agy -p "{prompt}" --output-format json [--print-timeout Ns]
+               (--settings {read-only rules} | --dangerously-skip-permissions) [--model X]
+
+    For antigravity-cli the JSON envelope decides success: agy can exit 0 with
+    status SUCCESS and an empty response (tool approval auto-denied), so the
+    return code alone is not trusted.
     """
     if not cli.binary_path:
         return DelegationResult(
@@ -109,6 +130,7 @@ def execute_cli(
         "claude-code": _build_claude_cmd,
         "openai-codex": _build_codex_cmd,
         "gemini-cli": _build_gemini_cmd,
+        "antigravity-cli": _build_antigravity_cmd,
     }
 
     builder = builders.get(cli.cli_id)
@@ -122,7 +144,9 @@ def execute_cli(
             exit_code=-1,
         )
 
-    cmd = builder(cli, prompt, model=model, working_dir=working_dir, max_budget_usd=max_budget_usd)
+    cmd = builder(
+        cli, prompt, model=model, working_dir=working_dir, max_budget_usd=max_budget_usd, timeout=timeout,
+    )
     logger.info("Executing %s: %s", cli.cli_id, " ".join(cmd[:4]) + " ...")
 
     # Inject Codex bot-account GitHub App token when invoking Codex. None
@@ -153,8 +177,16 @@ def execute_cli(
         success = proc.returncode == 0
 
         # Parse output based on CLI type
-        output = _extract_output(cli.cli_id, stdout, stderr)
+        failure_reason: Optional[str] = None
+        if cli.cli_id == "antigravity-cli":
+            output, failure_reason = _parse_antigravity_output(stdout)
+        else:
+            output = _extract_output(cli.cli_id, stdout, stderr)
         error = stderr.strip() if not success and stderr.strip() else None
+        if failure_reason is not None:
+            # The envelope overrides the return code (rc=0 can still mean no answer).
+            success = False
+            error = failure_reason
 
         result = DelegationResult(
             cli_id=cli.cli_id,
@@ -204,6 +236,7 @@ def _build_claude_cmd(
     model: Optional[str] = None,
     working_dir: Optional[str] = None,
     max_budget_usd: Optional[float] = None,
+    timeout: Optional[int] = None,
 ) -> List[str]:
     """Build Claude Code headless command."""
     cmd = [cli.binary_path, "-p", prompt, "--output-format", "json"]
@@ -221,6 +254,7 @@ def _build_codex_cmd(
     model: Optional[str] = None,
     working_dir: Optional[str] = None,
     max_budget_usd: Optional[float] = None,
+    timeout: Optional[int] = None,
 ) -> List[str]:
     """Build Codex CLI headless command.
 
@@ -255,11 +289,56 @@ def _build_gemini_cmd(
     model: Optional[str] = None,
     working_dir: Optional[str] = None,
     max_budget_usd: Optional[float] = None,
+    timeout: Optional[int] = None,
 ) -> List[str]:
     """Build Gemini CLI headless command."""
     cmd = [cli.binary_path, "-p", prompt, "--output-format", "json", "-y"]
     if model:
         cmd.extend(["-m", model])
+    return cmd
+
+
+def _build_antigravity_cmd(
+    cli: CLIStatus,
+    prompt: str,
+    *,
+    model: Optional[str] = None,
+    working_dir: Optional[str] = None,
+    max_budget_usd: Optional[float] = None,
+    timeout: Optional[int] = None,
+) -> List[str]:
+    """Build Antigravity CLI (agy) headless command.
+
+    When a positive timeout is given, --print-timeout is set to
+    timeout - _AGY_PRINT_TIMEOUT_MARGIN_S (at least 1s) so agy returns its own
+    error envelope before the subprocess is killed. agy start-up time is not
+    counted by --print-timeout, which the margin also absorbs.
+
+    Permission mode is controlled by LLM_RELAY_AGY_PERMISSIONS env var, read on
+    every invocation so operators can change the setting without restarting
+    the orchestrator process:
+      - "read-only" (default, and any value other than "full"): pass
+        _AGY_READ_ONLY_SETTINGS via --settings -- file/URL reads allowed,
+        shell commands, file writes, URL execution and MCP tools denied
+      - "full": --dangerously-skip-permissions (every tool call auto-approved)
+
+    Read-only rules are the default because headless agy without explicit rules
+    auto-denies any tool call that needs approval and then returns an empty
+    response with status SUCCESS and exit code 0, losing the whole answer. With
+    explicit deny rules the denied tool only returns an error to the model and
+    the answer still comes back.
+    """
+    cmd = [cli.binary_path, "-p", prompt, "--output-format", "json"]
+    if isinstance(timeout, int) and not isinstance(timeout, bool) and timeout > 0:
+        print_timeout = max(timeout - _AGY_PRINT_TIMEOUT_MARGIN_S, 1)
+        cmd.extend(["--print-timeout", "{}s".format(print_timeout)])
+    permissions = os.environ.get("LLM_RELAY_AGY_PERMISSIONS", "read-only")
+    if permissions == "full":
+        cmd.append("--dangerously-skip-permissions")
+    else:
+        cmd.extend(["--settings", json.dumps(_AGY_READ_ONLY_SETTINGS, separators=(",", ":"))])
+    if model:
+        cmd.extend(["--model", model])
     return cmd
 
 
@@ -288,6 +367,49 @@ def _parse_json_output(stdout: str) -> str:
         return stdout.strip()
     except (json.JSONDecodeError, ValueError):
         return stdout.strip()
+
+
+def _parse_antigravity_output(stdout: str) -> Tuple[str, Optional[str]]:
+    """Parse the agy JSON envelope into (output, failure_reason).
+
+    failure_reason is None when the envelope is acceptable. A non-None reason
+    marks the delegation as failed even when agy exited 0: a tool approval that
+    is auto-denied in headless mode yields status SUCCESS with an empty
+    response and a denied_actions list.
+    """
+    if not stdout.strip():
+        return "", "empty output"
+    try:
+        data = json.loads(stdout)
+    except (json.JSONDecodeError, ValueError):
+        return stdout.strip(), None
+    if not isinstance(data, dict):
+        return stdout.strip(), None
+
+    response = data.get("response")
+    response = "" if response is None else str(response)
+
+    status = data.get("status")
+    if status is not None and status != "SUCCESS":
+        return response, str(data.get("error") or "status {}".format(status))
+
+    if not response.strip():
+        denied = data.get("denied_actions")
+        if isinstance(denied, list) and denied:
+            names = []
+            for entry in denied:
+                if isinstance(entry, dict):
+                    name = entry.get("display_name") or entry.get("action")
+                    if name:
+                        names.append(str(name))
+            reason = "tool permission auto-denied in headless mode ({}); no output produced".format(
+                ", ".join(names),
+            )
+            return "", reason
+        return "", "empty response"
+
+    # A non-empty response is a success even if some tool calls were denied.
+    return response, None
 
 
 def _parse_codex_jsonl(stdout: str) -> str:

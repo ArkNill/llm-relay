@@ -6,9 +6,12 @@ import subprocess
 from unittest.mock import MagicMock, patch
 
 from llm_relay.orch.executor import (
+    _AGY_READ_ONLY_SETTINGS,
+    _build_antigravity_cmd,
     _build_claude_cmd,
     _build_codex_cmd,
     _build_gemini_cmd,
+    _parse_antigravity_output,
     _parse_codex_jsonl,
     _parse_json_output,
     execute_cli,
@@ -100,6 +103,216 @@ class TestBuildCommands:
         cmd = _build_gemini_cmd(cli, "test", model="gemini-2.5-pro")
         assert "-m" in cmd
         assert "gemini-2.5-pro" in cmd
+
+
+# Envelopes measured from agy 1.5.13 (see spec 2026-11-20).
+_AGY_SUCCESS = (
+    '{"conversation_id":"55728780-8beb-4b28-914c-50ef1383a106","status":"SUCCESS","response":"pong\\n",'
+    '"duration_seconds":2.663791273,"num_turns":1,"usage":{"input_tokens":9667,"output_tokens":19,'
+    '"thinking_tokens":14,"cache_read_tokens":0,"total_tokens":9686}}'
+)
+_AGY_DENIED = (
+    '{"conversation_id":"aa7ec76b-9bd4-47e9-98e4-0d87f2d08ad1","status":"SUCCESS","response":"",'
+    '"duration_seconds":4.596510701,"num_turns":1,"usage":{"input_tokens":9707,"output_tokens":227,'
+    '"thinking_tokens":98,"cache_read_tokens":0,"total_tokens":9934},'
+    '"denied_actions":[{"action":"command","display_name":"Bash"}]}'
+)
+_AGY_INVALID_MODEL = (
+    '{"conversation_id":"","status":"ERROR","response":"","error":"invalid model selection '
+    '(--model \\"no-such-model\\" --effort \\"\\"): model no-such-model is not recognized as a known '
+    'model or custom model in settings","duration_seconds":0,"num_turns":0,"usage":{"input_tokens":0,'
+    '"output_tokens":0,"thinking_tokens":0,"cache_read_tokens":0,"total_tokens":0}}'
+)
+_AGY_PRINT_TIMEOUT = (
+    '{"conversation_id":"f07ecce6-bcd9-489a-9f12-ee4b69b11e23","status":"ERROR","response":"",'
+    '"error":"print timeout after 2s with the turn still in progress; the response is partial",'
+    '"duration_seconds":0,"num_turns":1,"usage":{"input_tokens":0,"output_tokens":0,"thinking_tokens":0,'
+    '"cache_read_tokens":0,"total_tokens":0},"finished_reason":"print_timeout"}'
+)
+_AGY_INVALID_MODEL_ERROR = (
+    'invalid model selection (--model "no-such-model" --effort ""): model no-such-model is not '
+    "recognized as a known model or custom model in settings"
+)
+
+
+def _agy_cli() -> CLIStatus:
+    return _make_cli("antigravity-cli", "agy", "/usr/bin/agy")
+
+
+def _env_without_agy_permissions():
+    return {k: v for k, v in os.environ.items() if k != "LLM_RELAY_AGY_PERMISSIONS"}
+
+
+class TestBuildAntigravityCmd:
+    def test_default_is_read_only(self):
+        with patch.dict(os.environ, _env_without_agy_permissions(), clear=True):
+            cmd = _build_antigravity_cmd(_agy_cli(), "ping")
+        assert cmd == [
+            "/usr/bin/agy", "-p", "ping", "--output-format", "json",
+            "--settings", json.dumps(_AGY_READ_ONLY_SETTINGS, separators=(",", ":")),
+        ]
+        assert "--dangerously-skip-permissions" not in cmd
+        assert "--print-timeout" not in cmd
+        assert "--model" not in cmd
+
+    def test_settings_parse_back_to_read_only_rules(self):
+        with patch.dict(os.environ, _env_without_agy_permissions(), clear=True):
+            cmd = _build_antigravity_cmd(_agy_cli(), "ping")
+        settings = cmd[cmd.index("--settings") + 1]
+        assert json.loads(settings) == _AGY_READ_ONLY_SETTINGS
+        assert " " not in settings  # compact JSON
+
+    def test_with_model(self):
+        with patch.dict(os.environ, _env_without_agy_permissions(), clear=True):
+            cmd = _build_antigravity_cmd(_agy_cli(), "ping", model="gemini-4-neon-medium")
+        assert cmd[-2:] == ["--model", "gemini-4-neon-medium"]
+
+    def test_full_permissions(self):
+        with patch.dict(os.environ, {"LLM_RELAY_AGY_PERMISSIONS": "full"}):
+            cmd = _build_antigravity_cmd(_agy_cli(), "ping")
+        assert "--dangerously-skip-permissions" in cmd
+        assert "--settings" not in cmd
+
+    def test_unknown_permissions_value_falls_back_to_read_only(self):
+        with patch.dict(os.environ, {"LLM_RELAY_AGY_PERMISSIONS": "FULL"}):
+            cmd = _build_antigravity_cmd(_agy_cli(), "ping")
+        assert "--dangerously-skip-permissions" not in cmd
+        assert "--settings" in cmd
+
+    def test_permissions_read_per_invocation(self):
+        with patch.dict(os.environ, {"LLM_RELAY_AGY_PERMISSIONS": "read-only"}):
+            cmd1 = _build_antigravity_cmd(_agy_cli(), "first")
+        with patch.dict(os.environ, {"LLM_RELAY_AGY_PERMISSIONS": "full"}):
+            cmd2 = _build_antigravity_cmd(_agy_cli(), "second")
+        assert "--settings" in cmd1
+        assert "--dangerously-skip-permissions" in cmd2
+
+    def test_print_timeout_margin(self):
+        cmd = _build_antigravity_cmd(_agy_cli(), "ping", timeout=120)
+        assert cmd[cmd.index("--print-timeout") + 1] == "110s"
+
+    def test_print_timeout_floor(self):
+        cmd = _build_antigravity_cmd(_agy_cli(), "ping", timeout=5)
+        assert cmd[cmd.index("--print-timeout") + 1] == "1s"
+
+    def test_print_timeout_absent_without_timeout(self):
+        assert "--print-timeout" not in _build_antigravity_cmd(_agy_cli(), "ping", timeout=None)
+        assert "--print-timeout" not in _build_antigravity_cmd(_agy_cli(), "ping", timeout=0)
+
+    def test_other_builders_ignore_timeout(self):
+        claude = _make_cli()
+        codex = _make_cli("openai-codex", "codex", "/usr/bin/codex")
+        gemini = _make_cli("gemini-cli", "gemini", "/usr/bin/gemini")
+        assert _build_claude_cmd(claude, "x", timeout=120) == _build_claude_cmd(claude, "x")
+        assert _build_codex_cmd(codex, "x", timeout=120) == _build_codex_cmd(codex, "x")
+        assert _build_gemini_cmd(gemini, "x", timeout=120) == _build_gemini_cmd(gemini, "x")
+
+
+class TestParseAntigravityOutput:
+    def test_success(self):
+        assert _parse_antigravity_output(_AGY_SUCCESS) == ("pong\n", None)
+
+    def test_auto_denied_tool_is_failure(self):
+        output, reason = _parse_antigravity_output(_AGY_DENIED)
+        assert output == ""
+        assert reason == "tool permission auto-denied in headless mode (Bash); no output produced"
+
+    def test_denied_names_fall_back_to_action(self):
+        stdout = json.dumps({
+            "status": "SUCCESS", "response": "",
+            "denied_actions": [{"action": "command", "display_name": "Bash"}, {"action": "write_file"}],
+        })
+        _, reason = _parse_antigravity_output(stdout)
+        assert "(Bash, write_file)" in reason
+
+    def test_invalid_model(self):
+        assert _parse_antigravity_output(_AGY_INVALID_MODEL) == ("", _AGY_INVALID_MODEL_ERROR)
+
+    def test_print_timeout(self):
+        output, reason = _parse_antigravity_output(_AGY_PRINT_TIMEOUT)
+        assert output == ""
+        assert reason == "print timeout after 2s with the turn still in progress; the response is partial"
+
+    def test_error_status_without_error_field(self):
+        assert _parse_antigravity_output('{"status":"ERROR","response":""}') == ("", "status ERROR")
+
+    def test_response_with_denied_actions_is_success(self):
+        stdout = json.dumps({
+            "status": "SUCCESS", "response": "answer",
+            "denied_actions": [{"action": "command", "display_name": "Bash"}],
+        })
+        assert _parse_antigravity_output(stdout) == ("answer", None)
+
+    def test_empty_response_without_denials(self):
+        assert _parse_antigravity_output('{"status":"SUCCESS","response":"  "}') == ("", "empty response")
+
+    def test_non_json(self):
+        assert _parse_antigravity_output("  plain text\n") == ("plain text", None)
+
+    def test_json_not_an_object(self):
+        assert _parse_antigravity_output("[1, 2]") == ("[1, 2]", None)
+
+    def test_blank(self):
+        assert _parse_antigravity_output("") == ("", "empty output")
+        assert _parse_antigravity_output("  \n") == ("", "empty output")
+
+
+class TestExecuteAntigravity:
+    @patch("llm_relay.orch.executor.subprocess.run")
+    def test_success(self, mock_run):
+        mock_run.return_value = MagicMock(returncode=0, stdout=_AGY_SUCCESS, stderr="")
+        result = execute_cli(_agy_cli(), "ping", timeout=120)
+        assert result.success is True
+        assert result.output == "pong\n"
+        assert result.error is None
+        assert result.exit_code == 0
+        cmd = mock_run.call_args[0][0]
+        assert cmd[:5] == ["/usr/bin/agy", "-p", "ping", "--output-format", "json"]
+        assert cmd[cmd.index("--print-timeout") + 1] == "110s"
+        assert mock_run.call_args[1]["timeout"] == 120
+        assert mock_run.call_args[1]["stdin"] == subprocess.DEVNULL
+
+    @patch("llm_relay.orch.executor.subprocess.run")
+    def test_auto_denied_rc0_is_failure(self, mock_run):
+        mock_run.return_value = MagicMock(returncode=0, stdout=_AGY_DENIED, stderr="")
+        result = execute_cli(_agy_cli(), "run ls")
+        assert result.success is False
+        assert "Bash" in result.error
+        assert result.output == ""
+        assert result.exit_code == 0
+
+    @patch("llm_relay.orch.executor.subprocess.run")
+    def test_invalid_model_uses_envelope_error(self, mock_run):
+        mock_run.return_value = MagicMock(returncode=1, stdout=_AGY_INVALID_MODEL, stderr="some stderr noise")
+        result = execute_cli(_agy_cli(), "ping", model="no-such-model")
+        assert result.success is False
+        assert result.error == _AGY_INVALID_MODEL_ERROR
+        assert result.exit_code == 1
+
+    @patch("llm_relay.orch.executor.subprocess.run")
+    def test_print_timeout_rc3(self, mock_run):
+        mock_run.return_value = MagicMock(returncode=3, stdout=_AGY_PRINT_TIMEOUT, stderr="")
+        result = execute_cli(_agy_cli(), "ping")
+        assert result.success is False
+        assert "print timeout" in result.error
+        assert result.exit_code == 3
+
+    @patch("llm_relay.orch.executor.subprocess.run")
+    def test_non_json_nonzero_rc_falls_back_to_stderr(self, mock_run):
+        mock_run.return_value = MagicMock(returncode=2, stdout="boom", stderr="agy: crashed")
+        result = execute_cli(_agy_cli(), "ping")
+        assert result.success is False
+        assert result.error == "agy: crashed"
+        assert result.output == "boom"
+        assert result.exit_code == 2
+
+    @patch("llm_relay.orch.executor.subprocess.run")
+    def test_gemini_empty_rc0_unchanged(self, mock_run):
+        # The envelope check is agy-only; other CLIs keep the return-code rule.
+        mock_run.return_value = MagicMock(returncode=0, stdout="", stderr="")
+        result = execute_cli(_make_cli("gemini-cli", "gemini", "/usr/bin/gemini"), "ping")
+        assert result.success is True
+        assert result.output == ""
 
 
 class TestParseOutput:
