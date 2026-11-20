@@ -13,11 +13,18 @@ from llm_relay.orch.models import AuthMethod, CLIStatus
 logger = logging.getLogger(__name__)
 
 # (cli_id, binary_name, api_key_env_var)
+# An empty api_key_env_var means the CLI has no API-key auth path (subscription sign-in only).
 _CLI_REGISTRY: List[Tuple[str, str, str]] = [
     ("claude-code", "claude", "ANTHROPIC_API_KEY"),
     ("openai-codex", "codex", "OPENAI_API_KEY"),
     ("gemini-cli", "gemini", "GEMINI_API_KEY"),
+    ("antigravity-cli", "agy", ""),
 ]
+
+# Antigravity CLI writes this file after a successful OAuth sign-in. A headless call
+# without it blocks on an interactive login instead of failing, so the file is the
+# only cheap signal we have.
+_AGY_OAUTH_TOKEN_PATH = "~/.gemini/antigravity-cli/antigravity-oauth-token"
 
 _PROBE_TIMEOUT = int(os.environ.get("LLM_RELAY_ORCH_PROBE_TIMEOUT", "10"))
 
@@ -53,7 +60,9 @@ def _discover_one(cli_id: str, binary_name: str, api_key_env: str) -> CLIStatus:
     """Probe a single CLI for installation and auth status."""
     binary_path = shutil.which(binary_name)
     installed = binary_path is not None
-    api_key_available = bool(os.environ.get(api_key_env, ""))
+    # Empty api_key_env = no API-key auth for this CLI; never report another CLI's key.
+    api_key_available = bool(api_key_env) and bool(os.environ.get(api_key_env, ""))
+    api_key_name: Optional[str] = api_key_env or None
     cli_authenticated = False
     version: Optional[str] = None
 
@@ -75,7 +84,7 @@ def _discover_one(cli_id: str, binary_name: str, api_key_env: str) -> CLIStatus:
         binary_path=binary_path,
         installed=installed,
         cli_authenticated=cli_authenticated,
-        api_key_name=api_key_env,
+        api_key_name=api_key_name,
         api_key_available=api_key_available,
         preferred_auth=preferred_auth,
         version=version,
@@ -111,6 +120,7 @@ def _probe_auth(cli_id: str, binary_path: str) -> bool:
         "claude-code": _probe_claude,
         "openai-codex": _probe_codex,
         "gemini-cli": _probe_gemini,
+        "antigravity-cli": _probe_antigravity,
     }
     prober = probers.get(cli_id)
     if prober is None:
@@ -150,3 +160,15 @@ def _probe_gemini(binary_path: str) -> bool:
     """Check Gemini CLI auth by looking for OAuth credentials."""
     oauth_file = os.path.expanduser("~/.gemini/oauth_creds.json")
     return os.path.isfile(oauth_file)
+
+
+def _probe_antigravity(binary_path: str) -> bool:
+    """Check Antigravity CLI sign-in by looking for a non-empty OAuth token file.
+
+    Only the file's type and size are inspected; its contents are never read.
+    """
+    token_file = os.path.expanduser(_AGY_OAUTH_TOKEN_PATH)
+    try:
+        return os.path.isfile(token_file) and os.path.getsize(token_file) > 0
+    except OSError:
+        return False

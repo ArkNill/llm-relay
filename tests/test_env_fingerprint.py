@@ -2,6 +2,11 @@
 
 from __future__ import annotations
 
+from unittest.mock import patch
+
+import pytest
+
+import llm_relay.orch.discovery as discovery
 from llm_relay.env_fingerprint import (
     _DEFAULT_PROXY_PORTS,
     _RELEVANT_ENV_VARS,
@@ -9,6 +14,28 @@ from llm_relay.env_fingerprint import (
     _safe_call,
     collect_fingerprint,
 )
+
+
+@pytest.fixture(autouse=True, scope="module")
+def _no_real_agy():
+    """Keep the real Antigravity CLI out of this module's live discovery.
+
+    collect_fingerprint() runs the un-mocked discover_all(), which would spawn
+    `agy --version` and stat the user's sign-in token. Stub only the agy entry so
+    the other CLIs keep their existing live-discovery behavior.
+    """
+    real_get_version = discovery._get_version
+
+    def _get_version(binary_path, binary_name):
+        if binary_name == "agy":
+            return None
+        return real_get_version(binary_path, binary_name)
+
+    discovery._cache = None
+    with patch.object(discovery, "_get_version", _get_version), \
+            patch.object(discovery, "_probe_antigravity", return_value=False):
+        yield
+    discovery._cache = None
 
 
 class TestSafeCall:
@@ -62,7 +89,7 @@ class TestCollectFingerprint:
         cli_ids = {c["id"] for c in snap["clis"]}
         # discover_all always returns the full registry; ids should match the
         # known set even when the binary is missing.
-        assert cli_ids == {"claude-code", "openai-codex", "gemini-cli"}
+        assert cli_ids == {"claude-code", "openai-codex", "gemini-cli", "antigravity-cli"}
 
     def test_cli_entries_have_required_fields(self):
         snap = collect_fingerprint(include_doctor=False)
