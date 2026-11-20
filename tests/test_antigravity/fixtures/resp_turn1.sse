@@ -1,0 +1,8 @@
+data: {"response": {"candidates": [{"content": {"role": "model","parts": [{"thought": true,"text": "Reading the file `note.txt` and creating `created.txt` appear straightforward operations, easily executed within the current context. Attempting both actions.\n\n\n"}]}}],"usageMetadata": {"promptTokenCount": 10279,"totalTokenCount": 10399,"thoughtsTokenCount": 120},"modelVersion": "gemini-4-hydrogen","responseId": "resp-fixture"},"traceId": "trace-fixture","metadata": {}}
+
+data: {"response": {"candidates": [{"content": {"role": "model","parts": [{"thoughtSignature": "c2lnbmF0dXJl","functionCall": {"name": "read_file","args": {"Path": "/work/proj/note.txt"},"id": "call_0001"}}]}}],"usageMetadata": {"promptTokenCount": 10279,"candidatesTokenCount": 77,"totalTokenCount": 10476,"thoughtsTokenCount": 120},"modelVersion": "gemini-4-hydrogen","responseId": "resp-fixture"},"traceId": "trace-fixture","metadata": {}}
+
+data: {"response": {"candidates": [{"content": {"role": "model","parts": [{"functionCall": {"name": "run_command","args": {"toolSummary": "Create created.txt with hello","WaitMsBeforeAsync": 5000,"CommandLine": "echo hello \u003e created.txt"},"id": "call_0002"}}]}}],"usageMetadata": {"promptTokenCount": 10279,"candidatesTokenCount": 121,"totalTokenCount": 10520,"thoughtsTokenCount": 120},"modelVersion": "gemini-4-hydrogen","responseId": "resp-fixture"},"traceId": "trace-fixture","metadata": {}}
+
+data: {"response": {"candidates": [{"content": {"role": "model","parts": [{"text": ""}]},"finishReason": "STOP"}],"usageMetadata": {"promptTokenCount": 10279,"candidatesTokenCount": 129,"totalTokenCount": 10528,"thoughtsTokenCount": 120},"modelVersion": "gemini-4-hydrogen","responseId": "resp-fixture"},"traceId": "trace-fixture","metadata": {}}
+
