@@ -5,6 +5,17 @@ All notable changes to llm-relay are documented here.
 ## [Unreleased]
 
 ### Added
+- **Antigravity CLI (`agy`) as an orchestration target** (2026-11-20): `cli_delegate` (`cli="agy"` or
+  `"antigravity"`), `cli_probe` and `orch_delegate` reach registry id `antigravity-cli`; `"gemini"`
+  still means Gemini CLI. Routing puts it after Codex for `strongest`/`auto` and first for `fastest`
+  and `cheapest`. Sign-in is detected from a non-empty `~/.gemini/antigravity-cli/antigravity-oauth-token`
+  (no API-key path). Calls run `agy -p ... --output-format json` with `--print-timeout` 10 s below the
+  delegation timeout and read-only permission rules passed through `--settings` (file and URL reads
+  allowed; shell, file writes, URL execution and MCP tools denied); `LLM_RELAY_AGY_PERMISSIONS=full`
+  switches to `--dangerously-skip-permissions`. Success is decided from the JSON envelope, not the
+  exit code: a non-`SUCCESS` status reports the envelope `error`, and an empty `response` (for
+  example a tool approval auto-denied in headless mode, which still exits 0 with `SUCCESS`) is a
+  failure that names the denied tools.
 - **Non-200 upstream streams are labelled** (2026-10-23, R9-6): a streamed request the upstream
   answered with an error status (429, 529, ...) was recorded as `stream_end=completed`; its
   `requests.raw_usage` now says `stream_end=upstream_status` with `upstream_status`, and
