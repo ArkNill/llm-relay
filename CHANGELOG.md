@@ -15,6 +15,10 @@ All notable changes to llm-relay are documented here.
   `conversation_turns` tables are never written. PostgreSQL: create the tables with
   `docs/migrate-provider-tables.py --pg ... --apply`; until they exist the relay forwards without
   recording. `LLM_RELAY_AGY_CAPTURE=0` forwards only. Header values and bodies are never logged.
+- **`python -m llm_relay.antigravity.report` -- read-only reports on recorded agy traffic**
+  (2026-11-20): `quota` (latest remaining percentage per bucket), `recent [-n N]` (last
+  conversations with peak context, output and thinking tokens, model seconds) and
+  `show SESSION_ID` (stored turns as readable text).
 - **`python -m llm_relay.orch delegate` -- delegation from the shell** (2026-11-20): same discovery,
   command building and success rules as the `cli_delegate` MCP tool, but as a process a caller can
   run in the background or several at once (`--prompt` / `--prompt-file`, `--model`,
