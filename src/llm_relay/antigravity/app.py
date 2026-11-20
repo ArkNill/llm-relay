@@ -59,6 +59,11 @@ DEFAULT_SPILL_DIR = "~/.llm-relay/antigravity"
 SESSION_STATE_MAX = 2048  # conversations whose delta state is kept in memory (LRU)
 SCHEMA_RECHECK_S = 60.0  # while a provider table is missing, look again at most this often
 QUOTA_BODY_MAX = 1024 * 1024  # retrieveUserQuotaSummary answers with a few KB of JSON
+# Quota rows: agy polls the summary several times per call, unused buckets report a reset time
+# that rolls with the clock, and replicas disagree in the third decimal. So a bucket is written
+# again only on a real move (>= QUOTA_STEP) or, for smaller drift, at most every QUOTA_MIN_INTERVAL_S.
+QUOTA_STEP = 0.01
+QUOTA_MIN_INTERVAL_S = 300.0
 CLOSE_TIMEOUT_S = 5.0  # bound on closing an upstream response during teardown
 
 UPSTREAM_TIMEOUT = httpx.Timeout(connect=10.0, read=300.0, write=60.0, pool=30.0)
@@ -304,7 +309,7 @@ class _Relay:
         self._error_kinds: set = set()
         # Writer-thread state (the job is the only reader and writer).
         self._sessions = _LRU(SESSION_STATE_MAX)  # conversation id -> (turn_number, total_messages, fingerprint)
-        self._quota_last: Dict[str, Tuple[Any, Any]] = {}  # bucket id -> (remaining_fraction, reset_time) written
+        self._quota_last: Dict[str, Tuple[Any, float]] = {}  # bucket id -> (remaining_fraction, monotonic) written
         self._schema: Optional[Dict[str, bool]] = None
         self._schema_checked = 0.0
 
@@ -726,18 +731,29 @@ class _Relay:
         self._sessions.put(session_id, (turn_number, count, fingerprint))
         self._count("turns_captured")
 
+    def _quota_changed(self, bucket: Dict[str, Any], now: float) -> bool:
+        last = self._quota_last.get(bucket["bucket_id"], _MISSING)
+        if last is _MISSING:
+            return True  # first sight of the bucket by this process
+        last_fraction, last_written = last
+        fraction = bucket.get("remaining_fraction")
+        if fraction == last_fraction:
+            return False  # reset_time alone rolls with the clock on unused buckets
+        if not isinstance(fraction, (int, float)) or not isinstance(last_fraction, (int, float)):
+            return True  # a value appeared or disappeared
+        if abs(fraction - last_fraction) >= QUOTA_STEP:
+            return True
+        return now - last_written >= QUOTA_MIN_INTERVAL_S
+
     def _write_quota(self, conn: Any, flight: _Flight) -> None:
-        """Write the buckets whose (remaining_fraction, reset_time) changed since this process last wrote them."""
-        changed = [
-            bucket for bucket in flight.quota or ()
-            if self._quota_last.get(bucket["bucket_id"], _MISSING)
-            != (bucket.get("remaining_fraction"), bucket.get("reset_time"))
-        ]
+        """Write the buckets whose remaining fraction really moved since this process last wrote them."""
+        now = time.monotonic()
+        changed = [bucket for bucket in flight.quota or () if self._quota_changed(bucket, now)]
         if not changed:
             return
         inserted = store.log_quota(conn, provider=PROVIDER, buckets=changed)
         for bucket in changed:
-            self._quota_last[bucket["bucket_id"]] = (bucket.get("remaining_fraction"), bucket.get("reset_time"))
+            self._quota_last[bucket["bucket_id"]] = (bucket.get("remaining_fraction"), now)
         self._count("quota_rows", inserted)
 
 

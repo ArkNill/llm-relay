@@ -374,6 +374,32 @@ def test_generate_content_json_response_is_parsed(conn):
 # ── Quota ──
 
 
+def test_quota_rows_ignore_rolling_reset_time_and_small_jitter(conn, monkeypatch):
+    """Unused buckets report a reset time that moves with the clock and replicas disagree in the
+    third decimal; neither is a change worth a row until the throttle interval has passed."""
+    summary = json.loads(_raw("quota_summary.json"))
+    rolled = copy.deepcopy(summary)
+    for group in rolled["groups"]:
+        for bucket in group["buckets"]:
+            bucket["resetTime"] = "2099-01-01T00:00:00Z"
+    jitter = copy.deepcopy(rolled)
+    first_bucket = jitter["groups"][0]["buckets"][0]
+    first_bucket["remainingFraction"] = first_bucket["remainingFraction"] - 0.004
+    answers = [summary, rolled, jitter, jitter]
+
+    upstream = Upstream(lambda request: reply_json(200, answers.pop(0)))
+    counts = []
+    with relay(upstream, SyncWriter(conn)) as client:
+        for i in range(4):
+            if i == 3:  # same small drift again, but the throttle interval has passed
+                relay_app = client.app.state.relay
+                relay_app._quota_last = {k: (v[0], v[1] - app_module.QUOTA_MIN_INTERVAL_S - 1)
+                                         for k, v in relay_app._quota_last.items()}
+            assert client.post(QUOTA_PATH, content=b"{}", headers=AUTH).status_code == 200
+            counts.append(len(rows(conn, "provider_quota")))
+    assert counts == [5, 5, 5, 6]
+
+
 def test_quota_rows_only_on_change(conn):
     summary = json.loads(_raw("quota_summary.json"))
     answers = [summary, summary]
