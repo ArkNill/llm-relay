@@ -5,6 +5,8 @@ import os
 import subprocess
 from unittest.mock import MagicMock, patch
 
+import pytest
+
 from llm_relay.orch.executor import (
     _AGY_READ_ONLY_SETTINGS,
     _build_antigravity_cmd,
@@ -19,6 +21,16 @@ from llm_relay.orch.executor import (
     prompt_preview,
 )
 from llm_relay.orch.models import AuthMethod, CLIStatus
+
+
+@pytest.fixture(autouse=True)
+def _no_agy_quota_preflight(monkeypatch):
+    """Keep the agy tests here about the main command only (one subprocess call each).
+
+    The quota preflight that execute_cli runs before agy has its own tests in
+    test_agy_quota.py, which switch it back on.
+    """
+    monkeypatch.setenv("LLM_RELAY_AGY_QUOTA_CHECK", "0")
 
 
 def _make_cli(cli_id: str = "claude-code", binary_name: str = "claude", path: str = "/usr/bin/claude") -> CLIStatus:

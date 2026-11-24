@@ -8,8 +8,9 @@ import logging
 import os
 import subprocess
 import time
-from typing import List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
+from llm_relay.orch import agy_quota
 from llm_relay.orch.models import CLIStatus, DelegationResult
 
 logger = logging.getLogger(__name__)
@@ -104,6 +105,8 @@ def execute_cli(
     working_dir: Optional[str] = None,
     max_budget_usd: Optional[float] = None,
     timeout: int = _DEFAULT_TIMEOUT,
+    quota_check: bool = True,
+    quota_block_pct: Optional[float] = None,
 ) -> DelegationResult:
     """Execute a headless CLI command and return parsed result.
 
@@ -117,6 +120,15 @@ def execute_cli(
     For antigravity-cli the JSON envelope decides success: agy can exit 0 with
     status SUCCESS and an empty response (tool approval auto-denied), so the
     return code alone is not trusted.
+
+    For antigravity-cli a quota preflight (orch.agy_quota) runs first unless
+    quota_check is False or LLM_RELAY_AGY_QUOTA_CHECK=0. When a bucket the model
+    draws from is below the floor (quota_block_pct, else
+    LLM_RELAY_AGY_QUOTA_BLOCK_PCT, default 10) agy is not started and the result
+    fails with an error starting "quota preflight:" and exit_code -1. A failed
+    quota query never blocks. The verdict (and, after a call that ran at least
+    LLM_RELAY_AGY_QUOTA_AFTER_MIN_S, the quota spent) is attached as
+    result.quota; read it with getattr(result, "quota", None).
     """
     if not cli.binary_path:
         return DelegationResult(
@@ -149,6 +161,31 @@ def execute_cli(
     cmd = builder(
         cli, prompt, model=model, working_dir=working_dir, max_budget_usd=max_budget_usd, timeout=timeout,
     )
+
+    # agy quota preflight. quota stays None for every other CLI and when the check is off.
+    quota: Optional[Dict[str, Any]] = None
+    quota_model: Optional[str] = None
+    quota_cwd: Optional[str] = None
+    if cli.cli_id == "antigravity-cli" and quota_check and agy_quota.check_enabled():
+        quota_model = _agy_effective_model(model)
+        # The query only needs a directory to start in; a missing one must not fail it.
+        quota_cwd = working_dir if working_dir and os.path.isdir(working_dir) else None
+        quota, preflight_ms = _agy_quota_preflight(cli, quota_model, quota_cwd, quota_block_pct)
+        if quota.get("verdict") == "blocked":
+            blocked = DelegationResult(
+                cli_id=cli.cli_id,
+                auth_method=cli.preferred_auth,
+                success=False,
+                output="",
+                error=agy_quota.block_message(quota),
+                duration_ms=preflight_ms,
+                exit_code=-1,
+            )
+            # Attached, not passed to the constructor: a long-lived MCP process may still
+            # hold an older DelegationResult without the quota field.
+            blocked.quota = quota
+            return blocked
+
     logger.info("Executing %s: %s", cli.cli_id, " ".join(cmd[:4]) + " ...")
 
     # Inject Codex bot-account GitHub App token when invoking Codex. None
@@ -203,12 +240,11 @@ def execute_cli(
             "Completed %s: success=%s, duration=%.0fms, output=%d chars",
             cli.cli_id, success, duration_ms, len(output),
         )
-        return result
 
     except subprocess.TimeoutExpired:
         duration_ms = (time.monotonic() - start) * 1000
         logger.warning("Timeout after %.0fms for %s", duration_ms, cli.cli_id)
-        return DelegationResult(
+        result = DelegationResult(
             cli_id=cli.cli_id,
             auth_method=cli.preferred_auth,
             success=False,
@@ -220,7 +256,7 @@ def execute_cli(
     except OSError as e:
         duration_ms = (time.monotonic() - start) * 1000
         logger.error("OS error executing %s: %s", cli.cli_id, e)
-        return DelegationResult(
+        result = DelegationResult(
             cli_id=cli.cli_id,
             auth_method=cli.preferred_auth,
             success=False,
@@ -229,6 +265,88 @@ def execute_cli(
             duration_ms=duration_ms,
             exit_code=-1,
         )
+
+    if quota is not None:
+        # Outside the try: the follow-up query must not be mistaken for a failure of the call itself.
+        _agy_quota_after(quota, cli, quota_model, quota_cwd, result.duration_ms)
+        result.quota = quota
+    return result
+
+
+def _agy_quota_preflight(
+    cli: CLIStatus,
+    model: Optional[str],
+    cwd: Optional[str],
+    block_pct: Optional[float],
+) -> Tuple[Dict[str, Any], float]:
+    """Query agy's quota and judge it for ``model``; returns (quota, elapsed ms). Never raises.
+
+    A failed query gives verdict ``unknown`` so the delegation still runs (fail-open):
+    agy updates itself often and the /usage shape may change.
+    """
+    start = time.monotonic()
+    buckets, reason = agy_quota.fetch_usage(cli.binary_path, cwd=cwd)
+    if buckets is None:
+        quota: Dict[str, Any] = {"verdict": "unknown", "note": reason}
+    else:
+        env_block_pct, warn_pct = agy_quota.thresholds_from_env()
+        quota = agy_quota.evaluate(
+            buckets,
+            model,
+            block_pct=block_pct if block_pct is not None else env_block_pct,
+            warn_pct=warn_pct,
+        )
+    elapsed_ms = (time.monotonic() - start) * 1000
+    logger.info(
+        "agy quota preflight: verdict=%s, lowest=%s, took=%.0fms",
+        quota["verdict"], _lowest_bucket(quota), elapsed_ms,
+    )
+    return quota, elapsed_ms
+
+
+def _lowest_bucket(quota: Dict[str, Any]) -> str:
+    """``id remaining%`` of the tightest bucket in quota["before"], or ``-`` (log text only)."""
+    known = [
+        (info["remaining_pct"], bucket_id)
+        for bucket_id, info in (quota.get("before") or {}).items()
+        if isinstance(info, dict) and info.get("remaining_pct") is not None
+    ]
+    if not known:
+        return "-"
+    pct, bucket_id = min(known)
+    return "{} {:.1f}%".format(bucket_id, pct)
+
+
+def _agy_quota_after(
+    quota: Dict[str, Any],
+    cli: CLIStatus,
+    model: Optional[str],
+    cwd: Optional[str],
+    run_ms: float,
+) -> None:
+    """Re-query after a long enough call and record what it spent (in place). Never raises.
+
+    Runs whatever the call's outcome: a call that failed because the quota ran out
+    should show that. Skipped when the preflight had no usable reading.
+    """
+    if quota.get("verdict") not in ("ok", "warn"):
+        return
+    if run_ms / 1000.0 < agy_quota.after_min_seconds():
+        return
+    buckets, reason = agy_quota.fetch_usage(cli.binary_path, cwd=cwd)
+    if buckets is None:
+        quota["after_note"] = reason
+        return
+    after = agy_quota.summarize(agy_quota.relevant_buckets(buckets, quota.get("group") or "", model))
+    before = quota.get("before") or {}
+    quota["after"] = after
+    quota["used_pct"] = {
+        bucket_id: round(before[bucket_id]["remaining_pct"] - info["remaining_pct"], 1)
+        for bucket_id, info in after.items()
+        if bucket_id in before
+        and before[bucket_id].get("remaining_pct") is not None
+        and info.get("remaining_pct") is not None
+    }
 
 
 def _build_claude_cmd(
@@ -300,6 +418,16 @@ def _build_gemini_cmd(
     return cmd
 
 
+def _agy_effective_model(model: Optional[str]) -> Optional[str]:
+    """Model an agy delegation runs with; shared by the command builder and the quota preflight.
+
+    No model given: pin one instead of inheriting whatever the interactive agy session last
+    selected (its /model choice is saved to settings.json and would silently change
+    delegated calls). An empty LLM_RELAY_AGY_DEFAULT_MODEL leaves the choice to agy.
+    """
+    return model or os.environ.get("LLM_RELAY_AGY_DEFAULT_MODEL", _AGY_DEFAULT_MODEL)
+
+
 def _build_antigravity_cmd(
     cli: CLIStatus,
     prompt: str,
@@ -343,10 +471,7 @@ def _build_antigravity_cmd(
         cmd.append("--dangerously-skip-permissions")
     else:
         cmd.extend(["--settings", json.dumps(_AGY_READ_ONLY_SETTINGS, separators=(",", ":"))])
-    # No model given: pin one instead of inheriting whatever the interactive agy session last
-    # selected (its /model choice is saved to settings.json and would silently change
-    # delegated calls). An empty LLM_RELAY_AGY_DEFAULT_MODEL leaves the choice to agy.
-    model = model or os.environ.get("LLM_RELAY_AGY_DEFAULT_MODEL", _AGY_DEFAULT_MODEL)
+    model = _agy_effective_model(model)
     if model:
         cmd.extend(["--model", model])
     return cmd

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import enum
 from dataclasses import dataclass
-from typing import Optional
+from typing import Any, Dict, Optional
 
 
 class AuthMethod(enum.Enum):
@@ -69,3 +69,7 @@ class DelegationResult:
     duration_ms: float = 0.0
     exit_code: int = 0
     model_used: Optional[str] = None
+    # agy quota preflight (see orch.agy_quota); None for other CLIs or when the check is off.
+    # executor attaches it after construction, and readers use getattr(result, "quota", None),
+    # so a process that still holds an older DelegationResult without this field keeps working.
+    quota: Optional[Dict[str, Any]] = None
