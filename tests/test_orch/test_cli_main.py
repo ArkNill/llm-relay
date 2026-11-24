@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import json
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
+
+import pytest
 
 from llm_relay.orch import __main__ as orch_cli
 from llm_relay.orch.models import AuthMethod, CLIStatus, DelegationResult
@@ -101,6 +103,122 @@ class TestDelegate:
         assert mock_conn.called
         kwargs = mock_log_delegation.call_args.kwargs
         assert kwargs["cli_id"] == "antigravity-cli" and kwargs["strategy"] == "cli" and kwargs["success"] is True
+
+
+_USAGE_LOW = json.dumps({"status": "SUCCESS", "num_turns": 0, "command": {"name": "usage", "data": {"groups": [
+    {"name": "Gemini Models", "buckets": [
+        {"id": "gemini-weekly", "window": "weekly", "remaining_fraction": 0.75, "reset_time": "2026-12-01T00:15:23Z"},
+        {"id": "gemini-5h", "window": "5h", "remaining_fraction": 0.04, "reset_time": "2026-11-24T10:51:05Z"},
+    ]},
+]}}})
+_AGY_PONG = json.dumps({"conversation_id": "c1", "status": "SUCCESS", "response": "pong\n", "num_turns": 1})
+
+
+def _claude() -> CLIStatus:
+    return CLIStatus(
+        cli_id="claude-code", binary_name="claude", binary_path="/usr/bin/claude", installed=True,
+        cli_authenticated=True, api_key_name=None, api_key_available=False, preferred_auth=AuthMethod.CLI_OAUTH,
+    )
+
+
+def _fake_run(calls):
+    """subprocess.run stand-in: the /usage query reports gemini-5h at 4%, the call itself answers pong."""
+    def run(cmd, **kwargs):
+        calls.append(cmd)
+        stdout = _USAGE_LOW if cmd[1:3] == ["-p", "/usage"] else _AGY_PONG
+        return MagicMock(returncode=0, stdout=stdout, stderr="")
+    return run
+
+
+class TestDelegateQuota:
+    @pytest.fixture(autouse=True)
+    def _clean_env(self, monkeypatch):
+        for name in ("LLM_RELAY_AGY_QUOTA_CHECK", "LLM_RELAY_AGY_QUOTA_BLOCK_PCT", "LLM_RELAY_AGY_QUOTA_WARN_PCT",
+                     "LLM_RELAY_AGY_QUOTA_AFTER_MIN_S", "LLM_RELAY_AGY_DEFAULT_MODEL"):
+            monkeypatch.delenv(name, raising=False)
+
+    @patch("llm_relay.orch.__main__._log")
+    @patch("llm_relay.orch.discovery.discover_all")
+    def test_blocked_exits_three_without_starting_agy(self, mock_discover, mock_log, capsys):
+        mock_discover.return_value = [_agy()]
+        calls = []
+        with patch("llm_relay.orch.executor.subprocess.run", side_effect=_fake_run(calls)):
+            rc = orch_cli.main(["delegate", "--prompt", "ping"])
+        assert rc == 3
+        assert calls == [["/home/u/bin/agyGt", "-p", "/usage", "--output-format", "json", "--print-timeout", "30s"]]
+        payload = json.loads(capsys.readouterr().out)
+        assert payload["success"] is False and payload["exit_code"] == -1
+        assert payload["error"].startswith("quota preflight: gemini-5h has 4.0% left (floor 10%)")
+        assert payload["quota"]["verdict"] == "blocked"
+        assert payload["quota"]["note"] == "gemini-5h 4.0% < floor 10%"
+        assert mock_log.called  # a blocked delegation is still recorded
+
+    @patch("llm_relay.orch.__main__._log")
+    @patch("llm_relay.orch.discovery.discover_all")
+    def test_lower_floor_lets_the_call_run(self, mock_discover, mock_log, capsys):
+        mock_discover.return_value = [_agy()]
+        calls = []
+        with patch("llm_relay.orch.executor.subprocess.run", side_effect=_fake_run(calls)):
+            rc = orch_cli.main(["delegate", "--prompt", "ping", "--quota-floor", "2"])
+        assert rc == 0 and len(calls) == 2
+        payload = json.loads(capsys.readouterr().out)
+        assert payload["output"] == "pong\n"
+        assert payload["quota"]["verdict"] == "warn" and payload["quota"]["block_pct"] == 2.0
+
+    @patch("llm_relay.orch.__main__._log")
+    @patch("llm_relay.orch.discovery.discover_all")
+    def test_no_quota_check_skips_the_query(self, mock_discover, mock_log, capsys):
+        mock_discover.return_value = [_agy()]
+        calls = []
+        with patch("llm_relay.orch.executor.subprocess.run", side_effect=_fake_run(calls)):
+            rc = orch_cli.main(["delegate", "--prompt", "ping", "--no-quota-check"])
+        assert rc == 0 and len(calls) == 1 and calls[0][1:3] == ["-p", "ping"]
+        assert "quota" not in json.loads(capsys.readouterr().out)
+
+    @patch("llm_relay.orch.__main__._log")
+    @patch("llm_relay.orch.executor.execute_cli")
+    @patch("llm_relay.orch.discovery.discover_all")
+    def test_quota_options_are_passed_through(self, mock_discover, mock_exec, mock_log, capsys):
+        mock_discover.return_value = [_agy()]
+        mock_exec.return_value = _result()
+        assert orch_cli.main(["delegate", "--prompt", "ping", "--quota-floor", "5", "--no-quota-check"]) == 0
+        kwargs = mock_exec.call_args.kwargs
+        assert kwargs["quota_block_pct"] == 5.0 and kwargs["quota_check"] is False
+
+    @pytest.mark.parametrize("floor", ["-1", "100.5", "nan"])
+    @patch("llm_relay.orch.executor.execute_cli")
+    @patch("llm_relay.orch.discovery.discover_all")
+    def test_floor_out_of_range_is_a_usage_error(self, mock_discover, mock_exec, floor, capsys):
+        assert orch_cli.main(["delegate", "--prompt", "ping", "--quota-floor", floor]) == 2
+        assert "--quota-floor" in capsys.readouterr().err
+        assert not mock_exec.called and not mock_discover.called
+
+    @patch("llm_relay.orch.__main__._log")
+    @patch("llm_relay.orch.executor.execute_cli")
+    @patch("llm_relay.orch.discovery.discover_all")
+    def test_failure_with_quota_is_still_one(self, mock_discover, mock_exec, mock_log, capsys):
+        mock_discover.return_value = [_agy()]
+        result = _result(success=False, output="", error="print timeout after 110s", exit_code=3)
+        result.quota = {"verdict": "ok", "group": "gemini"}
+        mock_exec.return_value = result
+        assert orch_cli.main(["delegate", "--prompt", "ping"]) == 1
+        assert json.loads(capsys.readouterr().out)["quota"] == {"verdict": "ok", "group": "gemini"}
+
+    @patch("llm_relay.orch.__main__._log")
+    @patch("llm_relay.orch.discovery.discover_all")
+    def test_other_cli_payload_has_no_quota_key(self, mock_discover, mock_log, capsys):
+        mock_discover.return_value = [_claude()]
+        calls = []
+
+        def run(cmd, **kwargs):
+            calls.append(cmd)
+            return MagicMock(returncode=0, stdout=json.dumps({"result": "done"}), stderr="")
+
+        with patch("llm_relay.orch.executor.subprocess.run", side_effect=run):
+            rc = orch_cli.main(["delegate", "--cli", "claude", "--prompt", "ping"])
+        assert rc == 0 and len(calls) == 1
+        payload = json.loads(capsys.readouterr().out)
+        assert set(payload) == {"success", "cli_id", "model", "output", "error", "duration_ms", "exit_code"}
 
 
 class TestStatusAndUsage:

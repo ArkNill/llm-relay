@@ -12,7 +12,11 @@ file the caller reads when the job ends.
 
 ``delegate`` prints (or writes with ``--out``) one JSON object:
 ``{"success", "cli_id", "model", "output", "error", "duration_ms", "exit_code"}``
-and exits 0 on success, 1 on a failed delegation, 2 on a usage error.
+plus ``"quota"`` when the agy quota preflight ran (see ``llm_relay.orch.agy_quota``),
+and exits 0 on success, 1 on a failed delegation, 2 on a usage error and 3 when the
+quota preflight blocked the call (agy was not started; ``error`` starts with
+``quota preflight:``). ``--quota-floor PCT`` sets the blocking floor for one call
+and ``--no-quota-check`` skips the preflight.
 stdlib only.
 """
 
@@ -102,6 +106,11 @@ def cmd_delegate(args: argparse.Namespace) -> int:
     from llm_relay.orch.discovery import discover_all
     from llm_relay.orch.executor import execute_cli
 
+    quota_floor = args.quota_floor
+    if quota_floor is not None and not 0.0 <= quota_floor <= 100.0:  # also rejects NaN
+        print("error: --quota-floor must be between 0 and 100", file=sys.stderr)
+        return 2
+
     try:
         prompt = _read_prompt(args)
     except OSError as exc:
@@ -133,7 +142,15 @@ def cmd_delegate(args: argparse.Namespace) -> int:
         _emit(payload, args.out)
         return 1
 
-    result = execute_cli(target, prompt, model=model, working_dir=working_dir, timeout=args.timeout)
+    # Quota options are passed only when set, so the call stays the same as before for the defaults.
+    quota_kwargs: Dict[str, Any] = {}
+    if args.no_quota_check:
+        quota_kwargs["quota_check"] = False
+    if quota_floor is not None:
+        quota_kwargs["quota_block_pct"] = quota_floor
+    result = execute_cli(
+        target, prompt, model=model, working_dir=working_dir, timeout=args.timeout, **quota_kwargs,
+    )
     if not args.no_log:
         _log(result, prompt, model, working_dir)
     payload = {
@@ -145,8 +162,15 @@ def cmd_delegate(args: argparse.Namespace) -> int:
         "duration_ms": round(result.duration_ms, 1),
         "exit_code": result.exit_code,
     }
+    quota = getattr(result, "quota", None)
+    if quota is not None:
+        payload["quota"] = quota
     _emit(payload, args.out)
-    return 0 if result.success else 1
+    if result.success:
+        return 0
+    if isinstance(quota, dict) and quota.get("verdict") == "blocked":
+        return 3
+    return 1
 
 
 def cmd_status(args: argparse.Namespace) -> int:
@@ -182,6 +206,14 @@ def build_parser() -> argparse.ArgumentParser:
     delegate.add_argument("--timeout", type=int, default=600, help="seconds before the call is cut (default 600)")
     delegate.add_argument("--out", default="", help="write the JSON result to this file instead of stdout")
     delegate.add_argument("--no-log", action="store_true", help="do not record the delegation in the orch table")
+    delegate.add_argument(
+        "--quota-floor", type=float, default=None, metavar="PCT",
+        help="agy only: do not start the call when a quota bucket it draws from is below PCT percent "
+             "(0-100, 0 = never block; default: LLM_RELAY_AGY_QUOTA_BLOCK_PCT or 10)",
+    )
+    delegate.add_argument(
+        "--no-quota-check", action="store_true", help="agy only: skip the quota preflight before the call",
+    )
     delegate.set_defaults(func=cmd_delegate)
 
     status = sub.add_parser("status", help="list registered CLIs and whether they are usable")
