@@ -215,6 +215,74 @@ class TestAntigravityAliases:
         assert mock_exec.call_args.args[0].cli_id == "antigravity-cli"
 
 
+_QUOTA = {"verdict": "blocked", "group": "gemini", "note": "gemini-5h 4.0% < floor 10%"}
+
+
+def _agy_result(quota=None) -> DelegationResult:
+    result = DelegationResult(
+        cli_id="antigravity-cli", auth_method=AuthMethod.CLI_OAUTH,
+        success=quota is None, output="" if quota else "pong\n", exit_code=-1 if quota else 0,
+        error="quota preflight: gemini-5h has 4.0% left (floor 10%). agy was not started." if quota else None,
+    )
+    if quota is not None:
+        result.quota = quota
+    return result
+
+
+class TestDelegateQuotaPayload:
+    @patch("llm_relay.orch.discovery.discover_all", return_value=_make_statuses_with_agy())
+    @patch("llm_relay.orch.executor.execute_cli")
+    def test_cli_delegate_carries_quota(self, mock_exec, mock_discover):
+        mock_exec.return_value = _agy_result(_QUOTA)
+        from llm_relay.mcp.server import cli_delegate
+        result = json.loads(cli_delegate("agy", "ping"))
+        assert result["success"] is False and result["quota"] == _QUOTA
+        assert result["error"].startswith("quota preflight:")
+        assert set(mock_exec.call_args.kwargs) == {"model", "working_dir", "max_budget_usd", "timeout"}
+
+    @patch("llm_relay.orch.discovery.discover_all", return_value=_make_statuses_with_agy())
+    @patch("llm_relay.orch.executor.execute_cli")
+    def test_cli_delegate_without_quota_has_no_key(self, mock_exec, mock_discover):
+        mock_exec.return_value = _agy_result()
+        from llm_relay.mcp.server import cli_delegate
+        result = json.loads(cli_delegate("agy", "ping"))
+        assert "quota" not in result
+
+    @patch("llm_relay.orch.discovery.discover_all", return_value=_make_statuses_with_agy())
+    @patch("llm_relay.orch.executor.execute_cli")
+    def test_cli_delegate_result_without_quota_attribute(self, mock_exec, mock_discover):
+        # A result object from an older class that has no quota attribute at all.
+        mock_exec.return_value = MagicMock(
+            spec=["cli_id", "auth_method", "success", "output", "error", "duration_ms", "exit_code"],
+            cli_id="antigravity-cli", auth_method=AuthMethod.CLI_OAUTH, success=True, output="pong",
+            error=None, duration_ms=1.0, exit_code=0,
+        )
+        from llm_relay.mcp.server import cli_delegate
+        assert "quota" not in json.loads(cli_delegate("agy", "ping"))
+
+    @patch("llm_relay.orch.router.get_available", return_value=_make_statuses_with_agy())
+    @patch("llm_relay.orch.router.execute_cli")
+    @patch("llm_relay.orch.router.get_orch_conn")
+    def test_orch_delegate_carries_quota(self, mock_conn, mock_exec, mock_avail):
+        mock_exec.return_value = _agy_result(_QUOTA)
+        mock_conn.return_value = MagicMock()
+        from llm_relay.mcp.server import orch_delegate
+        result = json.loads(orch_delegate("task", preferred_cli="agy"))
+        assert result["quota"] == _QUOTA
+
+    @patch("llm_relay.orch.router.get_available", return_value=_make_statuses())
+    @patch("llm_relay.orch.router.execute_cli")
+    @patch("llm_relay.orch.router.get_orch_conn")
+    def test_orch_delegate_other_cli_has_no_key(self, mock_conn, mock_exec, mock_avail):
+        mock_exec.return_value = DelegationResult(
+            cli_id="claude-code", auth_method=AuthMethod.CLI_OAUTH,
+            success=True, output="result", duration_ms=200.0, exit_code=0,
+        )
+        mock_conn.return_value = MagicMock()
+        from llm_relay.mcp.server import orch_delegate
+        assert "quota" not in json.loads(orch_delegate("task", strategy="strongest"))
+
+
 class TestOrchHistory:
     @patch("llm_relay.orch.db.get_orch_conn")
     @patch("llm_relay.orch.db.get_delegation_history")

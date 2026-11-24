@@ -132,14 +132,19 @@ def cli_delegate(
         except Exception:
             logger.debug("Failed to capture delegation history", exc_info=True)
 
-    return _json({
+    payload = {
         "success": result.success,
         "cli_id": result.cli_id,
         "output": result.output,
         "error": result.error,
         "duration_ms": round(result.duration_ms, 1),
         "exit_code": result.exit_code,
-    })
+    }
+    # agy quota preflight verdict; getattr because an older DelegationResult has no quota field.
+    quota = getattr(result, "quota", None)
+    if quota is not None:
+        payload["quota"] = quota
+    return _json(payload)
 
 
 # ── Tool 2: cli_status ──
@@ -249,7 +254,7 @@ def orch_delegate(
 
     result = route(request)
 
-    return _json({
+    payload = {
         "success": result.success,
         "cli_id": result.cli_id,
         "auth_method": result.auth_method.value,
@@ -258,7 +263,12 @@ def orch_delegate(
         "duration_ms": round(result.duration_ms, 1),
         "exit_code": result.exit_code,
         "strategy": strategy,
-    })
+    }
+    # agy quota preflight verdict; getattr because an older DelegationResult has no quota field.
+    quota = getattr(result, "quota", None)
+    if quota is not None:
+        payload["quota"] = quota
+    return _json(payload)
 
 
 # ── Tool 5: orch_history ──
