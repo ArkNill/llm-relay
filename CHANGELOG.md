@@ -5,6 +5,21 @@ All notable changes to llm-relay are documented here.
 ## [Unreleased]
 
 ### Added
+- **Delegated `agy` calls check the quota first** (2026-11-24): before an `antigravity-cli`
+  delegation starts (`python -m llm_relay.orch delegate`, `cli_delegate`, `orch_delegate`), the
+  executor runs `agy -p "/usage" --output-format json` (no agent turn, no tokens) and reads the
+  buckets the model draws from (`gemini-5h` / `gemini-weekly`, `3p-*` for Claude and GPT models,
+  model-specific buckets such as `gemini-argon-*` only for that model). When one is below
+  `LLM_RELAY_AGY_QUOTA_BLOCK_PCT` (default 10; 0 = never block) agy is not started and the
+  delegation fails with an error starting `quota preflight:` that names the bucket and its reset
+  time; below `LLM_RELAY_AGY_QUOTA_WARN_PCT` (default 30) the call runs with verdict `warn`. A
+  failed or unreadable query never blocks (verdict `unknown`). After a call that ran at least
+  `LLM_RELAY_AGY_QUOTA_AFTER_MIN_S` seconds (default 60; 0 = always) the quota is read again and
+  the spent percentage recorded. The result carries a `quota` object (verdict, thresholds, buckets
+  before / after, `used_pct`) in the `delegate` payload and the two MCP tools' JSON, only for agy.
+  `delegate` gains `--quota-floor PCT` and `--no-quota-check` and exits 3 when the preflight
+  blocked the call; `LLM_RELAY_AGY_QUOTA_CHECK=0` turns the check off. Settings are read on every
+  call.
 - **Antigravity relay: a separate process that records `agy` traffic** (2026-11-20):
   `python -m llm_relay.antigravity` (default `127.0.0.1:8086`) is the address `agy` uses when
   `CLOUD_CODE_URL` points at it. Every Code Assist call (`/v1internal:*`) is forwarded unchanged to
