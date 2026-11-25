@@ -1,0 +1,129 @@
+{
+ "project": "aicode-consumers",
+ "requestId": "agent/00000000-0000-4000-8000-000000000001/1795160716714/00000000-0000-4000-8000-000000000002/4",
+ "request": {
+  "contents": [
+   {
+    "role": "user",
+    "parts": [
+     {
+      "text": "<USER_REQUEST>\nDo two things and report each in one short line. (1) Read note.txt in the current directory and report the secret word. (2) Run the shell command: echo hello > created.txt .\n</USER_REQUEST>\n<ADDITIONAL_METADATA>\nThe current local time is: 2026-11-20T16:45:11+09:00.\n</ADDITIONAL_METADATA>\n<USER_SETTINGS_CHANGE>\nThe user changed setting `Model Selection` from None to Gemini 4 Hydrogen (Low). No need to comment on this change if the user doesn't ask about it. If reporting what model you are, please use a human readable name instead of the exact string.\n</USER_SETTINGS_CHANGE>"
+     }
+    ]
+   },
+   {
+    "role": "model",
+    "parts": [
+     {
+      "functionCall": {
+       "id": "call_0001",
+       "name": "read_file",
+       "args": {
+        "Path": "/work/proj/note.txt"
+       }
+      },
+      "thoughtSignature": "c2lnbmF0dXJl"
+     },
+     {
+      "functionCall": {
+       "id": "call_0002",
+       "name": "run_command",
+       "args": {
+        "CommandLine": "echo hello > created.txt",
+        "WaitMsBeforeAsync": 5000,
+        "toolSummary": "Create created.txt with hello"
+       }
+      }
+     }
+    ]
+   },
+   {
+    "role": "model",
+    "parts": [
+     {
+      "functionResponse": {
+       "id": "call_0001",
+       "name": "read_file",
+       "response": {
+        "output": "Created At: 2026-11-20T16:45:15+09:00\nCompleted At: 2026-11-20T16:45:15+09:00\nShowing lines 1-1 of 1\n1: The secret word is: heliotrope"
+       }
+      }
+     },
+     {
+      "functionResponse": {
+       "id": "call_0002",
+       "name": "run_command",
+       "response": {
+        "error": "Encountered error in tool execution: permission check failed for unsandboxed \"echo hello > created.txt\": Permission denied for unsandboxed(echo hello > created.txt). Matches user-configured deny rule."
+       }
+      }
+     }
+    ]
+   }
+  ],
+  "systemInstruction": {
+   "role": "user",
+   "parts": [
+    {
+     "text": "SYSTEM PROMPT PLACEHOLDER (fixture)"
+    }
+   ]
+  },
+  "tools": [
+   {
+    "functionDeclarations": [
+     {
+      "name": "read_file",
+      "description": "fixture stub",
+      "parameters": {
+       "type": "OBJECT",
+       "properties": {
+        "Path": {
+         "type": "STRING"
+        }
+       }
+      }
+     }
+    ]
+   },
+   {
+    "functionDeclarations": [
+     {
+      "name": "run_command",
+      "description": "fixture stub",
+      "parameters": {
+       "type": "OBJECT",
+       "properties": {
+        "CommandLine": {
+         "type": "STRING"
+        }
+       }
+      }
+     }
+    ]
+   }
+  ],
+  "labels": {
+   "cascade_id": "00000000-0000-4000-8000-000000000001",
+   "last_step_index": "3",
+   "model_enum": "MODEL_PLACEHOLDER_M527",
+   "request_id": "00000000-0000-4000-8000-000000000002-1",
+   "root_cascade_id": "00000000-0000-4000-8000-000000000001",
+   "trajectory_id": "00000000-0000-4000-8000-000000000002",
+   "used_claude": "false",
+   "used_claude_conservative": "false",
+   "used_non_gemini_model": "false"
+  },
+  "generationConfig": {
+   "maxOutputTokens": 262144,
+   "thinkingConfig": {
+    "includeThoughts": true,
+    "thinkingLevel": "LOW"
+   }
+  },
+  "sessionId": "-1234567890123456789"
+ },
+ "model": "gemini-4-hydrogen-low",
+ "userAgent": "antigravity",
+ "requestType": "agent"
+}

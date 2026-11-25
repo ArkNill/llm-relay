@@ -1,0 +1,34 @@
+{
+ "project": "aicode-consumers",
+ "requestId": "agent_monitoring/00000000-0000-4000-8000-000000000004",
+ "request": {
+  "contents": [
+   {
+    "role": "user",
+    "parts": [
+     {
+      "text": "MONITORING PROMPT PLACEHOLDER (fixture)"
+     }
+    ]
+   }
+  ],
+  "systemInstruction": {
+   "role": "user",
+   "parts": [
+    {
+     "text": "SYSTEM PROMPT PLACEHOLDER (fixture)"
+    }
+   ]
+  },
+  "generationConfig": {
+   "thinkingConfig": {
+    "includeThoughts": true,
+    "thinkingLevel": "MINIMAL"
+   }
+  },
+  "sessionId": "-1234567890123456789"
+ },
+ "model": "gemini-3.5-flash-lite",
+ "userAgent": "antigravity",
+ "requestType": "agent_monitoring"
+}

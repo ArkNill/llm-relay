@@ -6,7 +6,9 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from llm_relay.orch.discovery import (
+    _CLI_REGISTRY,
     _discover_one,
+    _probe_antigravity,
     _probe_claude,
     _probe_codex,
     _probe_gemini,
@@ -64,6 +66,34 @@ class TestDiscoverOne:
         assert s.cli_authenticated is False
         assert s.preferred_auth == AuthMethod.API_KEY
 
+    @patch("llm_relay.orch.discovery.shutil.which", return_value=None)
+    def test_antigravity_has_no_api_key_auth(self, mock_which):
+        # GEMINI_API_KEY belongs to gemini-cli; agy is subscription sign-in only.
+        with patch.dict(os.environ, {"GEMINI_API_KEY": "test-value"}, clear=False):
+            s = _discover_one("antigravity-cli", "agy", "")
+        assert s.api_key_available is False
+        assert s.api_key_name is None
+        assert s.preferred_auth == AuthMethod.NONE
+
+    @patch("llm_relay.orch.discovery.shutil.which", return_value="/usr/bin/agy")
+    @patch("llm_relay.orch.discovery._get_version", return_value="1.5.13")
+    @patch("llm_relay.orch.discovery._probe_auth", return_value=True)
+    def test_antigravity_installed_and_signed_in(self, mock_probe, mock_ver, mock_which):
+        s = _discover_one("antigravity-cli", "agy", "")
+        assert s.installed is True
+        assert s.preferred_auth == AuthMethod.CLI_OAUTH
+        assert s.api_key_name is None
+
+
+class TestRegistry:
+    def test_antigravity_registered(self):
+        assert ("antigravity-cli", "agy", "") in _CLI_REGISTRY
+
+    def test_existing_entries_unchanged(self):
+        assert ("gemini-cli", "gemini", "GEMINI_API_KEY") in _CLI_REGISTRY
+        assert ("claude-code", "claude", "ANTHROPIC_API_KEY") in _CLI_REGISTRY
+        assert ("openai-codex", "codex", "OPENAI_API_KEY") in _CLI_REGISTRY
+
 
 class TestProbes:
     def test_probe_claude_no_dir(self, tmp_path):
@@ -108,6 +138,38 @@ class TestProbes:
         with patch("llm_relay.orch.discovery.os.path.isfile", return_value=True):
             assert _probe_gemini("/usr/bin/gemini") is True
 
+    def test_probe_antigravity_no_file(self, tmp_path):
+        missing = tmp_path / "antigravity-oauth-token"
+        with patch("llm_relay.orch.discovery.os.path.expanduser", return_value=str(missing)):
+            assert _probe_antigravity("/usr/bin/agy") is False
+
+    def test_probe_antigravity_empty_file(self, tmp_path):
+        token = tmp_path / "antigravity-oauth-token"
+        token.write_text("")
+        with patch("llm_relay.orch.discovery.os.path.expanduser", return_value=str(token)):
+            assert _probe_antigravity("/usr/bin/agy") is False
+
+    def test_probe_antigravity_non_empty_file(self, tmp_path):
+        token = tmp_path / "antigravity-oauth-token"
+        token.write_text("x")
+        with patch("llm_relay.orch.discovery.os.path.expanduser", return_value=str(token)):
+            assert _probe_antigravity("/usr/bin/agy") is True
+
+    def test_probe_antigravity_directory_is_not_a_token(self, tmp_path):
+        with patch("llm_relay.orch.discovery.os.path.expanduser", return_value=str(tmp_path)):
+            assert _probe_antigravity("/usr/bin/agy") is False
+
+    def test_probe_antigravity_os_error(self, tmp_path):
+        with patch("llm_relay.orch.discovery.os.path.isfile", return_value=True):
+            with patch("llm_relay.orch.discovery.os.path.getsize", side_effect=OSError("denied")):
+                assert _probe_antigravity("/usr/bin/agy") is False
+
+    def test_probe_auth_dispatches_antigravity(self):
+        from llm_relay.orch.discovery import _probe_auth
+        with patch("llm_relay.orch.discovery._probe_antigravity", return_value=True) as mock_probe:
+            assert _probe_auth("antigravity-cli", "/usr/bin/agy") is True
+        mock_probe.assert_called_once_with("/usr/bin/agy")
+
 
 class TestDiscoverAll:
     @patch("llm_relay.orch.discovery._discover_one")
@@ -120,10 +182,10 @@ class TestDiscoverAll:
         )
         result1 = discover_all()
         result2 = discover_all()
-        # Should only call _discover_one 3 times (once per CLI, first call only)
-        assert mock_discover.call_count == 3
-        assert len(result1) == 3
-        assert len(result2) == 3
+        # Should only call _discover_one 4 times (once per CLI, first call only)
+        assert mock_discover.call_count == 4
+        assert len(result1) == 4
+        assert len(result2) == 4
 
     @patch("llm_relay.orch.discovery._discover_one")
     def test_refresh_clears_cache(self, mock_discover):
@@ -134,9 +196,9 @@ class TestDiscoverAll:
             preferred_auth=AuthMethod.NONE,
         )
         discover_all()
-        assert mock_discover.call_count == 3
+        assert mock_discover.call_count == 4
         refresh()
-        assert mock_discover.call_count == 6
+        assert mock_discover.call_count == 8
 
 
 class TestGetAvailable:
@@ -164,3 +226,66 @@ class TestGetAvailable:
         assert len(result) == 1  # Only installed ones
         assert result[0].cli_id == "a"
 
+
+class TestAntigravityLauncher:
+    """Delegated agy calls go through the agyGt wrapper (Antigravity relay) when it is installed."""
+
+    @staticmethod
+    def _which_factory(available):
+        def fake_which(name):
+            return available.get(name)
+        return fake_which
+
+    def test_prefers_wrapper_when_present(self, monkeypatch):
+        from llm_relay.orch import discovery
+
+        monkeypatch.delenv("LLM_RELAY_AGY_DIRECT", raising=False)
+        monkeypatch.setattr(discovery.shutil, "which", self._which_factory(
+            {"agyGt": "/home/u/bin/agyGt", "agy": "/home/u/.local/bin/agy"}))
+        assert discovery._which("antigravity-cli", "agy") == "/home/u/bin/agyGt"
+
+    def test_falls_back_to_plain_binary(self, monkeypatch):
+        from llm_relay.orch import discovery
+
+        monkeypatch.delenv("LLM_RELAY_AGY_DIRECT", raising=False)
+        monkeypatch.setattr(discovery.shutil, "which", self._which_factory({"agy": "/home/u/.local/bin/agy"}))
+        assert discovery._which("antigravity-cli", "agy") == "/home/u/.local/bin/agy"
+
+    def test_direct_env_skips_wrapper(self, monkeypatch):
+        from llm_relay.orch import discovery
+
+        monkeypatch.setenv("LLM_RELAY_AGY_DIRECT", "1")
+        monkeypatch.setattr(discovery.shutil, "which", self._which_factory(
+            {"agyGt": "/home/u/bin/agyGt", "agy": "/home/u/.local/bin/agy"}))
+        assert discovery._which("antigravity-cli", "agy") == "/home/u/.local/bin/agy"
+
+    def test_missing_everywhere(self, monkeypatch):
+        from llm_relay.orch import discovery
+
+        monkeypatch.setattr(discovery.shutil, "which", self._which_factory({}))
+        assert discovery._which("antigravity-cli", "agy") is None
+
+    def test_other_clis_only_look_for_their_binary(self, monkeypatch):
+        from llm_relay.orch import discovery
+
+        asked = []
+
+        def fake_which(name):
+            asked.append(name)
+            return "/usr/bin/" + name
+
+        monkeypatch.setattr(discovery.shutil, "which", fake_which)
+        assert discovery._which("claude-code", "claude") == "/usr/bin/claude"
+        assert asked == ["claude"]
+
+    def test_status_keeps_binary_name_agy(self, monkeypatch):
+        from llm_relay.orch import discovery
+
+        monkeypatch.delenv("LLM_RELAY_AGY_DIRECT", raising=False)
+        monkeypatch.setattr(discovery.shutil, "which", self._which_factory({"agyGt": "/home/u/bin/agyGt"}))
+        monkeypatch.setattr(discovery, "_get_version", lambda path, name: "1.5.13")
+        monkeypatch.setattr(discovery, "_probe_antigravity", lambda path: True)
+        status = discovery._discover_one("antigravity-cli", "agy", "")
+        assert status.binary_name == "agy"  # cli="agy" still resolves by binary name
+        assert status.binary_path == "/home/u/bin/agyGt"
+        assert status.is_usable()

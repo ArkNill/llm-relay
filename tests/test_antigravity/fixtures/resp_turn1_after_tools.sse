@@ -1,0 +1,12 @@
+data: {"response": {"candidates": [{"content": {"role": "model", "parts": [{"text": "1. [note.txt](file:///work/pro"}]}}], "usageMetadata": {"promptTokenCount": 10685, "candidatesTokenCount": 12, "totalTokenCount": 10778, "cachedContentTokenCount": 8225, "thoughtsTokenCount": 81}, "modelVersion": "gemini-4-hydrogen", "responseId": "resp-fixture"}, "traceId": "trace-fixture", "metadata": {}}
+
+data: {"response": {"candidates": [{"content": {"role": "model", "parts": [{"text": "j/note.txt)의 비밀 단어는 `heliotrop"}]}}], "usageMetadata": {"promptTokenCount": 10685, "candidatesTokenCount": 36, "totalTokenCount": 10802, "cachedContentTokenCount": 8225, "thoughtsTokenCount": 81}, "modelVersion": "gemini-4-hydrogen", "responseId": "resp-fixture"}, "traceId": "trace-fixture", "metadata": {}}
+
+data: {"response": {"candidates": [{"content": {"role": "model", "parts": [{"text": "e`입니다.\n2. `echo hello > create"}]}}], "usageMetadata": {"promptTokenCount": 10685, "candidatesTokenCount": 65, "totalTokenCount": 10831, "cachedContentTokenCount": 8225, "thoughtsTokenCount": 81}, "modelVersion": "gemini-4-hydrogen", "responseId": "resp-fixture"}, "traceId": "trace-fixture", "metadata": {}}
+
+data: {"response": {"candidates": [{"content": {"role": "model", "parts": [{"text": "d.txt` 명령어는 사용자 설정 거부 규칙(deny "}]}}], "usageMetadata": {"promptTokenCount": 10685, "candidatesTokenCount": 89, "totalTokenCount": 10855, "cachedContentTokenCount": 8225, "thoughtsTokenCount": 81}, "modelVersion": "gemini-4-hydrogen", "responseId": "resp-fixture"}, "traceId": "trace-fixture", "metadata": {}}
+
+data: {"response": {"candidates": [{"content": {"role": "model", "parts": [{"text": "rule)에 의해 권한이 거부되어 실행하지 못했습니다."}]}}], "usageMetadata": {"promptTokenCount": 10685, "candidatesTokenCount": 114, "totalTokenCount": 10880, "cachedContentTokenCount": 8225, "thoughtsTokenCount": 81}, "modelVersion": "gemini-4-hydrogen", "responseId": "resp-fixture"}, "traceId": "trace-fixture", "metadata": {}}
+
+data: {"response": {"candidates": [{"content": {"role": "model", "parts": [{"thoughtSignature": "c2lnbmF0dXJl", "text": ""}]}, "finishReason": "STOP"}], "usageMetadata": {"promptTokenCount": 10685, "candidatesTokenCount": 118, "totalTokenCount": 10884, "cachedContentTokenCount": 8225, "thoughtsTokenCount": 81}, "modelVersion": "gemini-4-hydrogen", "responseId": "resp-fixture"}, "traceId": "trace-fixture", "metadata": {}}
+

@@ -25,6 +25,14 @@ def _cli(cli_id: str, auth: AuthMethod = AuthMethod.CLI_OAUTH) -> CLIStatus:
     )
 
 
+def _agy() -> CLIStatus:
+    return CLIStatus(
+        cli_id="antigravity-cli", binary_name="agy", binary_path="/usr/bin/agy",
+        installed=True, cli_authenticated=True, api_key_name=None,
+        api_key_available=False, preferred_auth=AuthMethod.CLI_OAUTH,
+    )
+
+
 class TestSelectCli:
     def test_preferred_found(self):
         available = [_cli("claude-code"), _cli("gemini-cli")]
@@ -80,6 +88,42 @@ class TestSelectCli:
         )]
         result = _select_cli(available, DelegationStrategy.STRONGEST)
         assert result.cli_id == "custom-cli"
+
+
+class TestSelectCliAntigravity:
+    def test_strongest_prefers_codex_over_agy(self):
+        available = [_cli("gemini-cli"), _agy(), _cli("openai-codex")]
+        assert _select_cli(available, DelegationStrategy.STRONGEST).cli_id == "openai-codex"
+
+    def test_strongest_prefers_agy_over_gemini(self):
+        available = [_cli("gemini-cli"), _agy()]
+        assert _select_cli(available, DelegationStrategy.STRONGEST).cli_id == "antigravity-cli"
+
+    def test_strongest_still_prefers_claude(self):
+        available = [_agy(), _cli("gemini-cli"), _cli("claude-code"), _cli("openai-codex")]
+        assert _select_cli(available, DelegationStrategy.STRONGEST).cli_id == "claude-code"
+
+    def test_fastest_prefers_agy(self):
+        available = [_cli("claude-code"), _cli("gemini-cli"), _cli("openai-codex"), _agy()]
+        assert _select_cli(available, DelegationStrategy.FASTEST).cli_id == "antigravity-cli"
+
+    def test_cheapest_prefers_agy(self):
+        available = [_cli("claude-code"), _cli("openai-codex"), _cli("gemini-cli"), _agy()]
+        assert _select_cli(available, DelegationStrategy.CHEAPEST).cli_id == "antigravity-cli"
+
+    def test_preferred_by_binary_name_agy(self):
+        available = [_cli("claude-code"), _agy()]
+        assert _select_cli(available, DelegationStrategy.AUTO, preferred="agy").cli_id == "antigravity-cli"
+
+    def test_preferred_by_cli_id(self):
+        available = [_cli("claude-code"), _agy()]
+        result = _select_cli(available, DelegationStrategy.AUTO, preferred="antigravity-cli")
+        assert result.cli_id == "antigravity-cli"
+
+    @patch("llm_relay.orch.router.get_available", return_value=[])
+    def test_no_cli_message_lists_agy(self, mock_avail):
+        result = route(DelegationRequest(prompt="hello"))
+        assert "claude, codex, agy, gemini" in result.error
 
 
 class TestRoute:

@@ -1,0 +1,4 @@
+data: {"response": {"candidates": [{"content": {"role": "model","parts": [{"text": "done"}]}}],"usageMetadata": {"promptTokenCount": 11090,"candidatesTokenCount": 1,"totalTokenCount": 11109,"cachedContentTokenCount": 8636,"thoughtsTokenCount": 18},"modelVersion": "gemini-4-hydrogen","responseId": "resp-fixture"},"traceId": "trace-fixture","metadata": {}}
+
+data: {"response": {"candidates": [{"content": {"role": "model","parts": [{"thoughtSignature": "c2lnbmF0dXJl","text": ""}]},"finishReason": "STOP"}],"usageMetadata": {"promptTokenCount": 11090,"candidatesTokenCount": 5,"totalTokenCount": 11113,"cachedContentTokenCount": 8636,"thoughtsTokenCount": 18},"modelVersion": "gemini-4-hydrogen","responseId": "resp-fixture"},"traceId": "trace-fixture","metadata": {}}
+

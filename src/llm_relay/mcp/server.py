@@ -20,7 +20,7 @@ mcp = FastMCP(
     "llm-relay",
     instructions=(
         "CLI orchestration tools for delegating tasks to Claude Code, "
-        "OpenAI Codex, and Gemini CLI. Provides smart routing, "
+        "OpenAI Codex, Gemini CLI, and Antigravity CLI (agy). Provides smart routing, "
         "usage tracking, and multi-CLI session diagnostics."
     ),
 )
@@ -28,6 +28,17 @@ mcp = FastMCP(
 
 def _json(obj: object) -> str:
     return json.dumps(obj, ensure_ascii=False, default=str)
+
+
+# Short names accepted by the tools below, mapped to registry cli_ids.
+# "gemini" stays the legacy Gemini CLI; Antigravity CLI is "agy" / "antigravity".
+_CLI_ALIASES = {
+    "claude": "claude-code",
+    "codex": "openai-codex",
+    "gemini": "gemini-cli",
+    "agy": "antigravity-cli",
+    "antigravity": "antigravity-cli",
+}
 
 
 # ── Tool 1: cli_delegate ──
@@ -42,15 +53,15 @@ def cli_delegate(
     max_budget_usd: float = 0,
     timeout: int = 120,
 ) -> str:
-    """Delegate a task to a specific CLI tool (claude, codex, or gemini).
+    """Delegate a task to a specific CLI tool (claude, codex, gemini, or agy).
 
     The CLI is invoked in headless mode via subprocess using its official binary.
     Requires the CLI to be installed and authenticated.
 
     Args:
-        cli: Which CLI to use ("claude", "codex", or "gemini")
+        cli: Which CLI to use ("claude", "codex", "gemini", or "agy" / "antigravity")
         prompt: The task prompt to send to the CLI
-        model: Optional model override (e.g. "sonnet", "gpt-5.4", "gemini-2.5-pro")
+        model: Optional model override (e.g. "sonnet", "gpt-5.4", "gemini-2.5-pro", "gemini-4-neon-medium")
         working_dir: Optional working directory for the CLI
         max_budget_usd: Optional budget limit in USD (claude only, 0 = no limit)
         timeout: Execution timeout in seconds (default 120)
@@ -59,8 +70,7 @@ def cli_delegate(
     from llm_relay.orch.executor import execute_cli, prompt_hash, prompt_preview
 
     # Map short names to cli_id
-    cli_map = {"claude": "claude-code", "codex": "openai-codex", "gemini": "gemini-cli"}
-    cli_id = cli_map.get(cli, cli)
+    cli_id = _CLI_ALIASES.get(cli, cli)
 
     all_clis = discover_all()
     target = None
@@ -122,14 +132,19 @@ def cli_delegate(
         except Exception:
             logger.debug("Failed to capture delegation history", exc_info=True)
 
-    return _json({
+    payload = {
         "success": result.success,
         "cli_id": result.cli_id,
         "output": result.output,
         "error": result.error,
         "duration_ms": round(result.duration_ms, 1),
         "exit_code": result.exit_code,
-    })
+    }
+    # agy quota preflight verdict; getattr because an older DelegationResult has no quota field.
+    quota = getattr(result, "quota", None)
+    if quota is not None:
+        payload["quota"] = quota
+    return _json(payload)
 
 
 # ── Tool 2: cli_status ──
@@ -139,7 +154,7 @@ def cli_delegate(
 def cli_status() -> str:
     """Check which CLI tools are installed and authenticated.
 
-    Returns the status of all registered CLI tools (Claude Code, Codex, Gemini)
+    Returns the status of all registered CLI tools (Claude Code, Codex, Gemini, Antigravity)
     including installation path, authentication status, and preferred auth method.
     """
     from llm_relay.orch.discovery import discover_all
@@ -168,12 +183,11 @@ def cli_probe(cli: str) -> str:
     """Deep probe of a specific CLI: version, auth status, default model, binary path.
 
     Args:
-        cli: Which CLI to probe ("claude", "codex", or "gemini")
+        cli: Which CLI to probe ("claude", "codex", "gemini", or "agy" / "antigravity")
     """
     from llm_relay.orch.discovery import discover_all
 
-    cli_map = {"claude": "claude-code", "codex": "openai-codex", "gemini": "gemini-cli"}
-    cli_id = cli_map.get(cli, cli)
+    cli_id = _CLI_ALIASES.get(cli, cli)
 
     for s in discover_all():
         if s.cli_id == cli_id or s.binary_name == cli:
@@ -206,7 +220,7 @@ def orch_delegate(
 
     Strategies:
     - auto: Smart selection (strongest model first)
-    - fastest: Shortest response time (typically Gemini)
+    - fastest: Shortest response time (typically Antigravity, then Gemini)
     - cheapest: Prefer subscription CLIs (no extra cost)
     - strongest: Most capable model (typically Claude)
     - round_robin: Rotate through available CLIs
@@ -214,7 +228,7 @@ def orch_delegate(
     Args:
         prompt: The task to delegate
         strategy: Routing strategy (default "auto")
-        preferred_cli: Optional preferred CLI hint ("claude", "codex", "gemini")
+        preferred_cli: Optional preferred CLI hint ("claude", "codex", "gemini", "agy")
     """
     from llm_relay.orch.models import DelegationRequest, DelegationStrategy
     from llm_relay.orch.router import route
@@ -230,8 +244,7 @@ def orch_delegate(
     strat = strategy_map.get(strategy, DelegationStrategy.AUTO)
 
     # Map short name to cli_id
-    cli_map = {"claude": "claude-code", "codex": "openai-codex", "gemini": "gemini-cli"}
-    pref = cli_map.get(preferred_cli, preferred_cli) if preferred_cli else None
+    pref = _CLI_ALIASES.get(preferred_cli, preferred_cli) if preferred_cli else None
 
     request = DelegationRequest(
         prompt=prompt,
@@ -241,7 +254,7 @@ def orch_delegate(
 
     result = route(request)
 
-    return _json({
+    payload = {
         "success": result.success,
         "cli_id": result.cli_id,
         "auth_method": result.auth_method.value,
@@ -250,7 +263,12 @@ def orch_delegate(
         "duration_ms": round(result.duration_ms, 1),
         "exit_code": result.exit_code,
         "strategy": strategy,
-    })
+    }
+    # agy quota preflight verdict; getattr because an older DelegationResult has no quota field.
+    quota = getattr(result, "quota", None)
+    if quota is not None:
+        payload["quota"] = quota
+    return _json(payload)
 
 
 # ── Tool 5: orch_history ──

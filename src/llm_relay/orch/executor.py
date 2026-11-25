@@ -8,8 +8,9 @@ import logging
 import os
 import subprocess
 import time
-from typing import List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
+from llm_relay.orch import agy_quota
 from llm_relay.orch.models import CLIStatus, DelegationResult
 
 logger = logging.getLogger(__name__)
@@ -36,6 +37,23 @@ _CODEX_GH_TOKEN_SCRIPT = os.environ.get(
 _CODEX_GH_TOKEN_AGENT = os.environ.get("LLM_RELAY_CODEX_GH_AGENT", "codex-reviewer")
 _CODEX_GH_TOKEN_TTL_S = 3000  # 50 min cache; tokens themselves expire at 60
 _codex_gh_token_cache: Optional[tuple] = None  # (token, expiry_monotonic)
+
+# Antigravity CLI (agy) headless settings.
+# --print-timeout is set this many seconds below the subprocess timeout so agy
+# can emit its own JSON envelope (with a real error) before we kill it.
+_AGY_PRINT_TIMEOUT_MARGIN_S = 10
+# Model used when a delegation does not name one (override: LLM_RELAY_AGY_DEFAULT_MODEL).
+_AGY_DEFAULT_MODEL = "gemini-4-neon-xhigh"
+# Default permission rules passed via --settings. Without explicit rules, a tool
+# call that needs approval is auto-denied in headless mode and the whole answer
+# is lost (rc=0, status SUCCESS, empty response). With explicit deny rules the
+# denied tool returns an error to the model and the answer still comes back.
+_AGY_READ_ONLY_SETTINGS = {
+    "permissions": {
+        "allow": ["read_file(*)", "read_url(*)"],
+        "deny": ["command(*)", "write_file(*)", "execute_url(*)", "mcp(*)"],
+    },
+}
 
 
 def _get_codex_gh_token() -> Optional[str]:
@@ -87,6 +105,8 @@ def execute_cli(
     working_dir: Optional[str] = None,
     max_budget_usd: Optional[float] = None,
     timeout: int = _DEFAULT_TIMEOUT,
+    quota_check: bool = True,
+    quota_block_pct: Optional[float] = None,
 ) -> DelegationResult:
     """Execute a headless CLI command and return parsed result.
 
@@ -94,6 +114,21 @@ def execute_cli(
       claude:  claude -p "{prompt}" --output-format=json [--model X]
       codex:   codex exec "{prompt}" --json --full-auto [--model X]
       gemini:  gemini -p "{prompt}" --output-format=json -y [--model X]
+      agy:     agy -p "{prompt}" --output-format json [--print-timeout Ns]
+               (--settings {read-only rules} | --dangerously-skip-permissions) [--model X]
+
+    For antigravity-cli the JSON envelope decides success: agy can exit 0 with
+    status SUCCESS and an empty response (tool approval auto-denied), so the
+    return code alone is not trusted.
+
+    For antigravity-cli a quota preflight (orch.agy_quota) runs first unless
+    quota_check is False or LLM_RELAY_AGY_QUOTA_CHECK=0. When a bucket the model
+    draws from is below the floor (quota_block_pct, else
+    LLM_RELAY_AGY_QUOTA_BLOCK_PCT, default 10) agy is not started and the result
+    fails with an error starting "quota preflight:" and exit_code -1. A failed
+    quota query never blocks. The verdict (and, after a call that ran at least
+    LLM_RELAY_AGY_QUOTA_AFTER_MIN_S, the quota spent) is attached as
+    result.quota; read it with getattr(result, "quota", None).
     """
     if not cli.binary_path:
         return DelegationResult(
@@ -109,6 +144,7 @@ def execute_cli(
         "claude-code": _build_claude_cmd,
         "openai-codex": _build_codex_cmd,
         "gemini-cli": _build_gemini_cmd,
+        "antigravity-cli": _build_antigravity_cmd,
     }
 
     builder = builders.get(cli.cli_id)
@@ -122,7 +158,34 @@ def execute_cli(
             exit_code=-1,
         )
 
-    cmd = builder(cli, prompt, model=model, working_dir=working_dir, max_budget_usd=max_budget_usd)
+    cmd = builder(
+        cli, prompt, model=model, working_dir=working_dir, max_budget_usd=max_budget_usd, timeout=timeout,
+    )
+
+    # agy quota preflight. quota stays None for every other CLI and when the check is off.
+    quota: Optional[Dict[str, Any]] = None
+    quota_model: Optional[str] = None
+    quota_cwd: Optional[str] = None
+    if cli.cli_id == "antigravity-cli" and quota_check and agy_quota.check_enabled():
+        quota_model = _agy_effective_model(model)
+        # The query only needs a directory to start in; a missing one must not fail it.
+        quota_cwd = working_dir if working_dir and os.path.isdir(working_dir) else None
+        quota, preflight_ms = _agy_quota_preflight(cli, quota_model, quota_cwd, quota_block_pct)
+        if quota.get("verdict") == "blocked":
+            blocked = DelegationResult(
+                cli_id=cli.cli_id,
+                auth_method=cli.preferred_auth,
+                success=False,
+                output="",
+                error=agy_quota.block_message(quota),
+                duration_ms=preflight_ms,
+                exit_code=-1,
+            )
+            # Attached, not passed to the constructor: a long-lived MCP process may still
+            # hold an older DelegationResult without the quota field.
+            blocked.quota = quota
+            return blocked
+
     logger.info("Executing %s: %s", cli.cli_id, " ".join(cmd[:4]) + " ...")
 
     # Inject Codex bot-account GitHub App token when invoking Codex. None
@@ -153,8 +216,16 @@ def execute_cli(
         success = proc.returncode == 0
 
         # Parse output based on CLI type
-        output = _extract_output(cli.cli_id, stdout, stderr)
+        failure_reason: Optional[str] = None
+        if cli.cli_id == "antigravity-cli":
+            output, failure_reason = _parse_antigravity_output(stdout)
+        else:
+            output = _extract_output(cli.cli_id, stdout, stderr)
         error = stderr.strip() if not success and stderr.strip() else None
+        if failure_reason is not None:
+            # The envelope overrides the return code (rc=0 can still mean no answer).
+            success = False
+            error = failure_reason
 
         result = DelegationResult(
             cli_id=cli.cli_id,
@@ -169,12 +240,11 @@ def execute_cli(
             "Completed %s: success=%s, duration=%.0fms, output=%d chars",
             cli.cli_id, success, duration_ms, len(output),
         )
-        return result
 
     except subprocess.TimeoutExpired:
         duration_ms = (time.monotonic() - start) * 1000
         logger.warning("Timeout after %.0fms for %s", duration_ms, cli.cli_id)
-        return DelegationResult(
+        result = DelegationResult(
             cli_id=cli.cli_id,
             auth_method=cli.preferred_auth,
             success=False,
@@ -186,7 +256,7 @@ def execute_cli(
     except OSError as e:
         duration_ms = (time.monotonic() - start) * 1000
         logger.error("OS error executing %s: %s", cli.cli_id, e)
-        return DelegationResult(
+        result = DelegationResult(
             cli_id=cli.cli_id,
             auth_method=cli.preferred_auth,
             success=False,
@@ -196,6 +266,88 @@ def execute_cli(
             exit_code=-1,
         )
 
+    if quota is not None:
+        # Outside the try: the follow-up query must not be mistaken for a failure of the call itself.
+        _agy_quota_after(quota, cli, quota_model, quota_cwd, result.duration_ms)
+        result.quota = quota
+    return result
+
+
+def _agy_quota_preflight(
+    cli: CLIStatus,
+    model: Optional[str],
+    cwd: Optional[str],
+    block_pct: Optional[float],
+) -> Tuple[Dict[str, Any], float]:
+    """Query agy's quota and judge it for ``model``; returns (quota, elapsed ms). Never raises.
+
+    A failed query gives verdict ``unknown`` so the delegation still runs (fail-open):
+    agy updates itself often and the /usage shape may change.
+    """
+    start = time.monotonic()
+    buckets, reason = agy_quota.fetch_usage(cli.binary_path, cwd=cwd)
+    if buckets is None:
+        quota: Dict[str, Any] = {"verdict": "unknown", "note": reason}
+    else:
+        env_block_pct, warn_pct = agy_quota.thresholds_from_env()
+        quota = agy_quota.evaluate(
+            buckets,
+            model,
+            block_pct=block_pct if block_pct is not None else env_block_pct,
+            warn_pct=warn_pct,
+        )
+    elapsed_ms = (time.monotonic() - start) * 1000
+    logger.info(
+        "agy quota preflight: verdict=%s, lowest=%s, took=%.0fms",
+        quota["verdict"], _lowest_bucket(quota), elapsed_ms,
+    )
+    return quota, elapsed_ms
+
+
+def _lowest_bucket(quota: Dict[str, Any]) -> str:
+    """``id remaining%`` of the tightest bucket in quota["before"], or ``-`` (log text only)."""
+    known = [
+        (info["remaining_pct"], bucket_id)
+        for bucket_id, info in (quota.get("before") or {}).items()
+        if isinstance(info, dict) and info.get("remaining_pct") is not None
+    ]
+    if not known:
+        return "-"
+    pct, bucket_id = min(known)
+    return "{} {:.1f}%".format(bucket_id, pct)
+
+
+def _agy_quota_after(
+    quota: Dict[str, Any],
+    cli: CLIStatus,
+    model: Optional[str],
+    cwd: Optional[str],
+    run_ms: float,
+) -> None:
+    """Re-query after a long enough call and record what it spent (in place). Never raises.
+
+    Runs whatever the call's outcome: a call that failed because the quota ran out
+    should show that. Skipped when the preflight had no usable reading.
+    """
+    if quota.get("verdict") not in ("ok", "warn"):
+        return
+    if run_ms / 1000.0 < agy_quota.after_min_seconds():
+        return
+    buckets, reason = agy_quota.fetch_usage(cli.binary_path, cwd=cwd)
+    if buckets is None:
+        quota["after_note"] = reason
+        return
+    after = agy_quota.summarize(agy_quota.relevant_buckets(buckets, quota.get("group") or "", model))
+    before = quota.get("before") or {}
+    quota["after"] = after
+    quota["used_pct"] = {
+        bucket_id: round(before[bucket_id]["remaining_pct"] - info["remaining_pct"], 1)
+        for bucket_id, info in after.items()
+        if bucket_id in before
+        and before[bucket_id].get("remaining_pct") is not None
+        and info.get("remaining_pct") is not None
+    }
+
 
 def _build_claude_cmd(
     cli: CLIStatus,
@@ -204,6 +356,7 @@ def _build_claude_cmd(
     model: Optional[str] = None,
     working_dir: Optional[str] = None,
     max_budget_usd: Optional[float] = None,
+    timeout: Optional[int] = None,
 ) -> List[str]:
     """Build Claude Code headless command."""
     cmd = [cli.binary_path, "-p", prompt, "--output-format", "json"]
@@ -221,6 +374,7 @@ def _build_codex_cmd(
     model: Optional[str] = None,
     working_dir: Optional[str] = None,
     max_budget_usd: Optional[float] = None,
+    timeout: Optional[int] = None,
 ) -> List[str]:
     """Build Codex CLI headless command.
 
@@ -255,11 +409,71 @@ def _build_gemini_cmd(
     model: Optional[str] = None,
     working_dir: Optional[str] = None,
     max_budget_usd: Optional[float] = None,
+    timeout: Optional[int] = None,
 ) -> List[str]:
     """Build Gemini CLI headless command."""
     cmd = [cli.binary_path, "-p", prompt, "--output-format", "json", "-y"]
     if model:
         cmd.extend(["-m", model])
+    return cmd
+
+
+def _agy_effective_model(model: Optional[str]) -> Optional[str]:
+    """Model an agy delegation runs with; shared by the command builder and the quota preflight.
+
+    No model given: pin one instead of inheriting whatever the interactive agy session last
+    selected (its /model choice is saved to settings.json and would silently change
+    delegated calls). An empty LLM_RELAY_AGY_DEFAULT_MODEL leaves the choice to agy.
+    """
+    return model or os.environ.get("LLM_RELAY_AGY_DEFAULT_MODEL", _AGY_DEFAULT_MODEL)
+
+
+def _build_antigravity_cmd(
+    cli: CLIStatus,
+    prompt: str,
+    *,
+    model: Optional[str] = None,
+    working_dir: Optional[str] = None,
+    max_budget_usd: Optional[float] = None,
+    timeout: Optional[int] = None,
+) -> List[str]:
+    """Build Antigravity CLI (agy) headless command.
+
+    When a positive timeout is given, --print-timeout is set to
+    timeout - _AGY_PRINT_TIMEOUT_MARGIN_S (at least 1s) so agy returns its own
+    error envelope before the subprocess is killed. agy start-up time is not
+    counted by --print-timeout, which the margin also absorbs.
+
+    Permission mode is controlled by LLM_RELAY_AGY_PERMISSIONS env var, read on
+    every invocation so operators can change the setting without restarting
+    the orchestrator process:
+      - "read-only" (default, and any value other than "full"): pass
+        _AGY_READ_ONLY_SETTINGS via --settings -- file/URL reads allowed,
+        shell commands, file writes, URL execution and MCP tools denied
+      - "full": --dangerously-skip-permissions (every tool call auto-approved)
+
+    Without an explicit model the call uses LLM_RELAY_AGY_DEFAULT_MODEL (default
+    "gemini-4-neon-xhigh"), read on every invocation; set it to an empty string to
+    let agy use its own configured default.
+
+    Read-only rules are the default because headless agy without explicit rules
+    auto-denies any tool call that needs approval and then returns an empty
+    response with status SUCCESS and exit code 0, losing the whole answer. With
+    explicit deny rules the denied tool only returns an error to the model and
+    the answer still comes back.
+    """
+    cmd = [cli.binary_path, "-p", prompt, "--output-format", "json"]
+    if isinstance(timeout, int) and not isinstance(timeout, bool) and timeout > 0:
+        print_timeout = max(timeout - _AGY_PRINT_TIMEOUT_MARGIN_S, 1)
+        cmd.extend(["--print-timeout", "{}s".format(print_timeout)])
+    permissions = os.environ.get("LLM_RELAY_AGY_PERMISSIONS", "read-only")
+    if permissions == "full":
+        cmd.append("--dangerously-skip-permissions")
+    else:
+        cmd.extend(["--settings", json.dumps(_AGY_READ_ONLY_SETTINGS, separators=(",", ":"))])
+    model = _agy_effective_model(model)
+    if model:
+        cmd.extend(["--model", model])
     return cmd
 
 
@@ -288,6 +502,49 @@ def _parse_json_output(stdout: str) -> str:
         return stdout.strip()
     except (json.JSONDecodeError, ValueError):
         return stdout.strip()
+
+
+def _parse_antigravity_output(stdout: str) -> Tuple[str, Optional[str]]:
+    """Parse the agy JSON envelope into (output, failure_reason).
+
+    failure_reason is None when the envelope is acceptable. A non-None reason
+    marks the delegation as failed even when agy exited 0: a tool approval that
+    is auto-denied in headless mode yields status SUCCESS with an empty
+    response and a denied_actions list.
+    """
+    if not stdout.strip():
+        return "", "empty output"
+    try:
+        data = json.loads(stdout)
+    except (json.JSONDecodeError, ValueError):
+        return stdout.strip(), None
+    if not isinstance(data, dict):
+        return stdout.strip(), None
+
+    response = data.get("response")
+    response = "" if response is None else str(response)
+
+    status = data.get("status")
+    if status is not None and status != "SUCCESS":
+        return response, str(data.get("error") or "status {}".format(status))
+
+    if not response.strip():
+        denied = data.get("denied_actions")
+        if isinstance(denied, list) and denied:
+            names = []
+            for entry in denied:
+                if isinstance(entry, dict):
+                    name = entry.get("display_name") or entry.get("action")
+                    if name:
+                        names.append(str(name))
+            reason = "tool permission auto-denied in headless mode ({}); no output produced".format(
+                ", ".join(names),
+            )
+            return "", reason
+        return "", "empty response"
+
+    # A non-empty response is a success even if some tool calls were denied.
+    return response, None
 
 
 def _parse_codex_jsonl(stdout: str) -> str:

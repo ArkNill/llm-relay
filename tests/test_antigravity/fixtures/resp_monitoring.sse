@@ -1,0 +1,18 @@
+data: {"response": {"candidates": [{"content": {"role": "model", "parts": [{"thought": true, "text": "xxxxxxxxx"}]}}], "usageMetadata": {"promptTokenCount": 2604, "totalTokenCount": 2606, "thoughtsTokenCount": 2}, "modelVersion": "gemini-3.5-flash-lite", "responseId": "resp-fixture"}, "traceId": "trace-fixture", "metadata": {}}
+
+data: {"response": {"candidates": [{"content": {"role": "model", "parts": [{"thought": true, "text": "xxxxxxxxxxxx"}]}}], "usageMetadata": {"promptTokenCount": 2604, "totalTokenCount": 2627, "thoughtsTokenCount": 23}, "modelVersion": "gemini-3.5-flash-lite", "responseId": "resp-fixture"}, "traceId": "trace-fixture", "metadata": {}}
+
+data: {"response": {"candidates": [{"content": {"role": "model", "parts": [{"thought": true, "text": "xxxxxxxxxxxx"}]}}], "usageMetadata": {"promptTokenCount": 2604, "totalTokenCount": 2654, "thoughtsTokenCount": 50}, "modelVersion": "gemini-3.5-flash-lite", "responseId": "resp-fixture"}, "traceId": "trace-fixture", "metadata": {}}
+
+data: {"response": {"candidates": [{"content": {"role": "model", "parts": [{"thought": true, "text": "xxxxxxxxxxxx"}]}}], "usageMetadata": {"promptTokenCount": 2604, "totalTokenCount": 2680, "thoughtsTokenCount": 76}, "modelVersion": "gemini-3.5-flash-lite", "responseId": "resp-fixture"}, "traceId": "trace-fixture", "metadata": {}}
+
+data: {"response": {"candidates": [{"content": {"role": "model", "parts": [{"thought": true, "text": "xxxxxxxxxxxx"}]}}], "usageMetadata": {"promptTokenCount": 2604, "totalTokenCount": 2688, "thoughtsTokenCount": 84}, "modelVersion": "gemini-3.5-flash-lite", "responseId": "resp-fixture"}, "traceId": "trace-fixture", "metadata": {}}
+
+data: {"response": {"candidates": [{"content": {"role": "model", "parts": [{"text": "xxxxxxxxxxxx"}]}}], "usageMetadata": {"promptTokenCount": 2604, "candidatesTokenCount": 18, "totalTokenCount": 2790, "thoughtsTokenCount": 168}, "modelVersion": "gemini-3.5-flash-lite", "responseId": "resp-fixture"}, "traceId": "trace-fixture", "metadata": {}}
+
+data: {"response": {"candidates": [{"content": {"role": "model", "parts": [{"text": "xxxxxxxxxxxx"}]}}], "usageMetadata": {"promptTokenCount": 2604, "candidatesTokenCount": 44, "totalTokenCount": 2816, "thoughtsTokenCount": 168}, "modelVersion": "gemini-3.5-flash-lite", "responseId": "resp-fixture"}, "traceId": "trace-fixture", "metadata": {}}
+
+data: {"response": {"candidates": [{"content": {"role": "model", "parts": [{"text": "xxxxxxxxxxxx"}]}}], "usageMetadata": {"promptTokenCount": 2604, "candidatesTokenCount": 54, "totalTokenCount": 2826, "thoughtsTokenCount": 168}, "modelVersion": "gemini-3.5-flash-lite", "responseId": "resp-fixture"}, "traceId": "trace-fixture", "metadata": {}}
+
+data: {"response": {"candidates": [{"content": {"role": "model", "parts": [{"thoughtSignature": "c2lnbmF0dXJl", "text": ""}]}, "finishReason": "STOP"}], "usageMetadata": {"promptTokenCount": 2604, "candidatesTokenCount": 54, "totalTokenCount": 2742, "thoughtsTokenCount": 84}, "modelVersion": "gemini-3.5-flash-lite", "responseId": "resp-fixture"}, "traceId": "trace-fixture", "metadata": {}}
+

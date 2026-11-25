@@ -5,6 +5,59 @@ All notable changes to llm-relay are documented here.
 ## [Unreleased]
 
 ### Added
+- **Delegated `agy` calls check the quota first** (2026-11-24): before an `antigravity-cli`
+  delegation starts (`python -m llm_relay.orch delegate`, `cli_delegate`, `orch_delegate`), the
+  executor runs `agy -p "/usage" --output-format json` (no agent turn, no tokens) and reads the
+  buckets the model draws from (`gemini-5h` / `gemini-weekly`, `3p-*` for Claude and GPT models,
+  model-specific buckets such as `gemini-argon-*` only for that model). When one is below
+  `LLM_RELAY_AGY_QUOTA_BLOCK_PCT` (default 10; 0 = never block) agy is not started and the
+  delegation fails with an error starting `quota preflight:` that names the bucket and its reset
+  time; below `LLM_RELAY_AGY_QUOTA_WARN_PCT` (default 30) the call runs with verdict `warn`. A
+  failed or unreadable query never blocks (verdict `unknown`). After a call that ran at least
+  `LLM_RELAY_AGY_QUOTA_AFTER_MIN_S` seconds (default 60; 0 = always) the quota is read again and
+  the spent percentage recorded. The result carries a `quota` object (verdict, thresholds, buckets
+  before / after, `used_pct`) in the `delegate` payload and the two MCP tools' JSON, only for agy.
+  `delegate` gains `--quota-floor PCT` and `--no-quota-check` and exits 3 when the preflight
+  blocked the call; `LLM_RELAY_AGY_QUOTA_CHECK=0` turns the check off. Settings are read on every
+  call.
+- **Antigravity relay: a separate process that records `agy` traffic** (2026-11-20):
+  `python -m llm_relay.antigravity` (default `127.0.0.1:8086`) is the address `agy` uses when
+  `CLOUD_CODE_URL` points at it. Every Code Assist call (`/v1internal:*`) is forwarded unchanged to
+  `LLM_RELAY_AGY_UPSTREAM` and streamed back as received; on the side, requests (tokens, model,
+  latency), conversation turns (full or delta, tool calls and results as blocks) and quota changes
+  are written to dedicated `provider_requests` / `provider_turns` / `provider_quota` tables, each row
+  tagged `provider='antigravity-cli'`. The Claude Code proxy is not imported and its `requests` /
+  `conversation_turns` tables are never written. PostgreSQL: create the tables with
+  `docs/migrate-provider-tables.py --pg ... --apply`; until they exist the relay forwards without
+  recording. `LLM_RELAY_AGY_CAPTURE=0` forwards only. Header values and bodies are never logged.
+- **`python -m llm_relay.antigravity.report` -- read-only reports on recorded agy traffic**
+  (2026-11-20): `quota` (latest remaining percentage per bucket), `recent [-n N]` (last
+  conversations with peak context, output and thinking tokens, model seconds) and
+  `show SESSION_ID` (stored turns as readable text).
+- **`python -m llm_relay.orch delegate` -- delegation from the shell** (2026-11-20): same discovery,
+  command building and success rules as the `cli_delegate` MCP tool, but as a process a caller can
+  run in the background or several at once (`--prompt` / `--prompt-file`, `--model`,
+  `--working-dir`, `--timeout`, `--out result.json`). Prints one JSON result, exits 0 / 1 / 2
+  (success / failed delegation / usage error) and records the delegation with strategy `cli`.
+  `python -m llm_relay.orch status` lists the registered CLIs.
+- **Delegated `agy` calls pin a default model** (2026-11-20): without an explicit `model` the call
+  passes `--model` from `LLM_RELAY_AGY_DEFAULT_MODEL` (default `gemini-4-neon-xhigh`) instead of
+  inheriting the interactive session's saved `/model` choice; an empty value leaves it to agy.
+- **Delegated `agy` calls use the `agyGt` wrapper when it is on PATH** (2026-11-20): discovery
+  looks for `agyGt` before `agy` for `antigravity-cli`, so `cli_delegate` / `orch_delegate` calls go
+  through the Antigravity relay and are recorded like interactive sessions. `binary_name` stays
+  `agy`. `LLM_RELAY_AGY_DIRECT=1` skips the wrapper.
+- **Antigravity CLI (`agy`) as an orchestration target** (2026-11-20): `cli_delegate` (`cli="agy"` or
+  `"antigravity"`), `cli_probe` and `orch_delegate` reach registry id `antigravity-cli`; `"gemini"`
+  still means Gemini CLI. Routing puts it after Codex for `strongest`/`auto` and first for `fastest`
+  and `cheapest`. Sign-in is detected from a non-empty `~/.gemini/antigravity-cli/antigravity-oauth-token`
+  (no API-key path). Calls run `agy -p ... --output-format json` with `--print-timeout` 10 s below the
+  delegation timeout and read-only permission rules passed through `--settings` (file and URL reads
+  allowed; shell, file writes, URL execution and MCP tools denied); `LLM_RELAY_AGY_PERMISSIONS=full`
+  switches to `--dangerously-skip-permissions`. Success is decided from the JSON envelope, not the
+  exit code: a non-`SUCCESS` status reports the envelope `error`, and an empty `response` (for
+  example a tool approval auto-denied in headless mode, which still exits 0 with `SUCCESS`) is a
+  failure that names the denied tools.
 - **Non-200 upstream streams are labelled** (2026-10-23, R9-6): a streamed request the upstream
   answered with an error status (429, 529, ...) was recorded as `stream_end=completed`; its
   `requests.raw_usage` now says `stream_end=upstream_status` with `upstream_status`, and
