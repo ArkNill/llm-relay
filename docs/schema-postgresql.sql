@@ -185,6 +185,9 @@ CREATE TABLE conversation_turns (
     request_size_bytes  INTEGER DEFAULT 0,
     response_size_bytes INTEGER DEFAULT 0,
     provider        TEXT DEFAULT 'anthropic',
+    -- fingerprint of the conversation's first message (2026-10-23, R9-7; NULL = older rows).
+    -- Existing stores: docs/migrate-conversation-key.py
+    conversation_key    TEXT,
     -- pgvector: embedding for semantic search
     summary         TEXT,
     embedding       vector(1536)
@@ -192,6 +195,7 @@ CREATE TABLE conversation_turns (
 
 CREATE INDEX idx_conv_turns_session ON conversation_turns(session_id, turn_number);
 CREATE INDEX idx_conv_turns_ts ON conversation_turns(ts);
+CREATE INDEX idx_conversation_turns_conv ON conversation_turns(session_id, conversation_key, turn_number);
 
 -- ══════════════════════════════════════════════
 -- 10. compaction_events

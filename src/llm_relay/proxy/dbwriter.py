@@ -19,7 +19,9 @@ Guarantees -- every CC conversation turn MUST land in the DB:
     ``LLM_RELAY_DB_QUEUE_MAX_BYTES``); a job that does not fit is spilled at
     once rather than kept in RAM while the database is slow;
   * ``stop()`` (lifespan shutdown) drains the queue; anything left after the
-    timeout is spilled.
+    timeout is spilled, including the job the writer thread is still working on
+    (2026-10-23), and a job failing during shutdown is spilled at once instead
+    of backing off into the timeout.
 """
 
 from __future__ import annotations
@@ -66,6 +68,12 @@ class DBWriter:
         self._thread: Optional[threading.Thread] = None
         self._lock = threading.Lock()
         self._stopped = False
+        # The job the writer thread is working on, and the one stop() spilled on
+        # its behalf (R9-10b). Before 2026-10-23 a job taken off the queue but not
+        # finished by the drain timeout was in neither the database nor the
+        # spill file: it died with the daemon thread. Both guarded by _lock.
+        self._current: Optional[Job] = None
+        self._handed_off: Optional[Job] = None
         # Bytes held by queued and in-progress jobs; producer (event loop) and
         # consumer (writer thread) both touch it, so it has its own lock.
         self._queued_bytes = 0
@@ -96,6 +104,13 @@ class DBWriter:
         thread.join(timeout)
         if thread.is_alive():
             self._drain_to_spill("shutdown timeout")
+            # The thread is still inside a job (a hung connect or INSERT). It may yet
+            # finish, so the record says so; the thread will not spill it a second time.
+            with self._lock:
+                current, self._current = self._current, None
+                self._handed_off = current
+            if current is not None:
+                self._spill(current, reason="shutdown timeout (in progress; may also have been written)")
 
     def alive(self) -> bool:
         return self._thread is not None and self._thread.is_alive()
@@ -158,11 +173,16 @@ class DBWriter:
             try:
                 if job is None:
                     break
+                with self._lock:
+                    self._current = job
                 self._write_or_spill(job, attempts=_RETRIES)
             except Exception:  # pragma: no cover - _write_or_spill handles its own errors
                 logger.exception("dbwriter: unexpected error")
             finally:
                 if job is not None:
+                    with self._lock:
+                        if self._current is job:
+                            self._current = None
                     self._release(job)
                 self._q.task_done()
         self._reset_conn()
@@ -200,9 +220,21 @@ class DBWriter:
                 logger.warning("dbwriter: %s failed (attempt %d/%d): %r", name, attempt, attempts, exc)
                 self._reset_conn()
                 if attempt < attempts:
+                    if self._stopped:
+                        # Shutting down: the backoff would only run into stop()'s
+                        # drain timeout, so spill now rather than risk the job.
+                        self._spill_unless_handed_off(job, reason="shutdown")
+                        return
                     time.sleep(delay)
                     delay = min(delay * 2, 4.0)
-        self._spill(job, reason="retries exhausted")
+        self._spill_unless_handed_off(job, reason="retries exhausted")
+
+    def _spill_unless_handed_off(self, job: Job, reason: str) -> None:
+        """Spill ``job`` unless stop() already spilled it as the in-progress job."""
+        with self._lock:
+            handed_off = job is self._handed_off
+        if not handed_off:
+            self._spill(job, reason=reason)
 
     def _drain_to_spill(self, reason: str) -> None:
         while True:

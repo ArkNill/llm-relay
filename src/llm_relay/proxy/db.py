@@ -6,12 +6,15 @@ Supports SQLite (default) and PostgreSQL (when LLM_RELAY_DB starts with postgres
 from __future__ import annotations
 
 import json
+import logging
 import os
 import sqlite3
 import statistics
 import time
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any, Dict, Optional
+
+logger = logging.getLogger("llm-relay.db")
 
 
 def _load_env_files(base: Optional[Path] = None) -> None:
@@ -302,7 +305,61 @@ _MIGRATIONS = [
     # TTL tier tracking (ephemeral cache token fields from SSE message_start)
     "ALTER TABLE requests ADD COLUMN ephemeral_1h_tokens INTEGER DEFAULT 0",
     "ALTER TABLE requests ADD COLUMN ephemeral_5m_tokens INTEGER DEFAULT 0",
+    # Conversation identity per turn (2026-10-23, R9-7): history's fingerprint of the
+    # conversation's first message, NULL for older rows. PostgreSQL gets the same
+    # column and index from docs/migrate-conversation-key.py (see _has_conversation_key).
+    "ALTER TABLE conversation_turns ADD COLUMN conversation_key TEXT",
+    "CREATE INDEX IF NOT EXISTS idx_conversation_turns_conv"
+    " ON conversation_turns(session_id, conversation_key, turn_number)",
 ]
+
+# PostgreSQL: whether conversation_turns.conversation_key exists (see _has_conversation_key).
+_pg_conv_key: Dict[str, Any] = {"present": False, "checked": None, "warned": False}
+_CONV_KEY_RECHECK_S = 60.0
+
+
+def _has_conversation_key(conn: Any) -> bool:
+    """Whether ``conversation_turns`` has the ``conversation_key`` column (R9-7).
+
+    SQLite stores get it from _MIGRATIONS in get_conn(); a table made elsewhere
+    (an old file opened directly, a test fixture) may lack it, and PRAGMA is
+    cheap enough to ask every time. The PostgreSQL schema is managed outside
+    the relay (``_PGWrapper.executescript`` is a no-op), so the operator adds the
+    column with docs/migrate-conversation-key.py and the relay must work before
+    and after that: a present column is cached for the process, a missing one
+    is looked up again at most once a minute (no restart needed after the
+    migration) and logged once at WARNING.
+    """
+    if not _USE_PG:
+        try:
+            rows = conn.execute("PRAGMA table_info(conversation_turns)").fetchall()
+        except sqlite3.Error:
+            return False
+        return any(row[1] == "conversation_key" for row in rows)
+    state = _pg_conv_key
+    if state["present"]:
+        return True
+    now = time.monotonic()
+    if state["checked"] is not None and now - state["checked"] < _CONV_KEY_RECHECK_S:
+        return False
+    state["checked"] = now
+    try:
+        row = conn.execute(
+            "SELECT 1 AS present FROM information_schema.columns"
+            " WHERE table_schema = current_schema() AND table_name = 'conversation_turns'"
+            " AND column_name = 'conversation_key'"
+        ).fetchone()
+    except Exception:
+        logger.debug("conversation_key column lookup failed", exc_info=True)
+        return False
+    state["present"] = row is not None
+    if not state["present"] and not state["warned"]:
+        state["warned"] = True
+        logger.warning(
+            "conversation_turns.conversation_key is missing: turns are stored without it "
+            "until docs/migrate-conversation-key.py has been applied",
+        )
+    return state["present"]
 
 
 def get_conn(db_path: Path = DEFAULT_DB) -> Any:
@@ -958,9 +1015,21 @@ def log_conversation_turn(
     response_size_bytes: int = 0,
     provider: str = "anthropic",
     request_id: Optional[int] = None,
+    conversation_key: Optional[str] = None,
 ) -> int:
-    """Insert a conversation turn record. Returns the row id."""
-    params = (
+    """Insert a conversation turn record. Returns the row id.
+
+    ``conversation_key`` (R9-7) is stored when the table has the column (see
+    _has_conversation_key); against an older schema the row is written without it.
+    """
+    columns = [
+        "ts", "session_id", "request_id", "turn_number", "storage_mode",
+        "request_messages", "response_message", "thinking_blocks",
+        "model", "temperature", "max_tokens",
+        "total_message_count", "previous_message_count",
+        "request_size_bytes", "response_size_bytes", "provider",
+    ]
+    params = [
         _ts_now(),
         session_id,
         request_id,
@@ -977,29 +1046,18 @@ def log_conversation_turn(
         request_size_bytes,
         response_size_bytes,
         provider,
-    )
+    ]
+    if _has_conversation_key(conn):
+        columns.append("conversation_key")
+        params.append(conversation_key)
+    placeholders = ", ".join(["%s" if _USE_PG else "?"] * len(columns))
+    sql = "INSERT INTO conversation_turns ({}) VALUES ({})".format(", ".join(columns), placeholders)
     if _USE_PG:
-        sql = """INSERT INTO conversation_turns
-               (ts, session_id, request_id, turn_number, storage_mode,
-                request_messages, response_message, thinking_blocks,
-                model, temperature, max_tokens,
-                total_message_count, previous_message_count,
-                request_size_bytes, response_size_bytes, provider)
-               VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s) RETURNING id"""
-        cursor = conn.execute(sql, params)
+        cursor = conn.execute(sql + " RETURNING id", tuple(params))
         row = cursor.fetchone()
         conn.commit()
         return row["id"] if row else 0
-    cursor = conn.execute(
-        """INSERT INTO conversation_turns
-           (ts, session_id, request_id, turn_number, storage_mode,
-            request_messages, response_message, thinking_blocks,
-            model, temperature, max_tokens,
-            total_message_count, previous_message_count,
-            request_size_bytes, response_size_bytes, provider)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-        params,
-    )
+    cursor = conn.execute(sql, tuple(params))
     conn.commit()
     return cursor.lastrowid or 0
 
@@ -1064,26 +1122,36 @@ def get_session_history(
     turn_start: int = 0,
     turn_end: int = -1,
     include_thinking: bool = False,
+    limit: Optional[int] = None,
 ) -> list[dict[str, Any]]:
     """Return conversation turns for a session, optionally filtering by turn range.
 
     When include_thinking is False, the thinking_blocks field is excluded.
     Turn range is inclusive on both ends. turn_end=-1 means no upper limit.
+    ``limit`` (2026-10-23, R9-10c) keeps only the newest ``limit`` turns of the
+    range, still returned oldest first: the history API and MCP tool used to
+    load every row of a long session (thousands of turns, hundreds of MB).
     """
     params: list[Any] = [session_id, turn_start]
+    # conversation_key (R9-7) is always in the result; NULL against an older schema.
+    key_column = "conversation_key" if _has_conversation_key(conn) else "NULL AS conversation_key"
     sql = """SELECT id, ts, session_id, request_id, turn_number, storage_mode,
                     request_messages, response_message, thinking_blocks,
                     model, temperature, max_tokens,
                     total_message_count, previous_message_count,
-                    request_size_bytes, response_size_bytes, provider
+                    request_size_bytes, response_size_bytes, provider, {}
              FROM conversation_turns
-             WHERE session_id = ? AND turn_number >= ?"""
+             WHERE session_id = ? AND turn_number >= ?""".format(key_column)
     if turn_end >= 0:
         sql += " AND turn_number <= ?"
         params.append(turn_end)
-    sql += " ORDER BY turn_number ASC"
-
-    rows = conn.execute(sql, params).fetchall()
+    if limit is not None and limit > 0:
+        sql += " ORDER BY turn_number DESC, id DESC LIMIT ?"
+        params.append(limit)
+        rows = list(reversed(conn.execute(sql, params).fetchall()))
+    else:
+        sql += " ORDER BY turn_number ASC"
+        rows = conn.execute(sql, params).fetchall()
     result = []
     for r in rows:
         d = dict(r)
@@ -1091,6 +1159,46 @@ def get_session_history(
             d.pop("thinking_blocks", None)
         result.append(d)
     return result
+
+
+def history_default_turns() -> int:
+    """Turns the history detail API and MCP tool return when no range is asked for (R9-10c).
+
+    ``LLM_RELAY_HISTORY_DEFAULT_TURNS`` (default 200); 0 or less returns every
+    turn, as before 2026-10-23. Read per call, so a change needs no restart.
+    """
+    try:
+        return int(os.getenv("LLM_RELAY_HISTORY_DEFAULT_TURNS", "200"))
+    except ValueError:
+        return 200
+
+
+def count_session_turns(conn: sqlite3.Connection, session_id: str) -> int:
+    """Number of stored turns of a session (``total_turns_available`` of a capped history reply)."""
+    row = conn.execute(
+        "SELECT count(*) AS n FROM conversation_turns WHERE session_id = ?", (session_id,),
+    ).fetchone()
+    if not row:
+        return 0
+    try:
+        return int(row["n"])
+    except (IndexError, KeyError, TypeError):  # plain tuple rows
+        return int(row[0])
+
+
+def history_cap_fields(
+    conn: sqlite3.Connection, session_id: str, returned: int, limit: Optional[int],
+) -> dict[str, Any]:
+    """``truncated`` / ``total_turns_available`` for a reply capped at ``limit`` turns; {} when uncapped.
+
+    The count query only runs when the cap was reached.
+    """
+    if limit is None:
+        return {}
+    available = returned
+    if returned >= limit:
+        available = max(returned, count_session_turns(conn, session_id))
+    return {"truncated": available > returned, "total_turns_available": available}
 
 
 def get_session_compactions(

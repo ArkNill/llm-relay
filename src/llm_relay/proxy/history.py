@@ -10,16 +10,31 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+import os
+import re
 import sqlite3
-from typing import Any, Dict, List, Optional, Set, Tuple
+import threading
+from collections import OrderedDict
+from typing import Any, Dict, List, Optional, Tuple
 
 from .db import get_last_turn_state, log_compaction_event, log_conversation_turn
 
 logger = logging.getLogger("llm-relay.history")
 
-# Per-session state (process lifetime, re-seeded from the DB after a restart).
-# Key: session_id, Value: (turn_number, message_count, input_tokens) of the last capture.
-_session_prev: Dict[str, Tuple[int, int, int]] = {}
+# Upper bound on each state dict below (2026-10-23, R9-10a). They used to live for
+# the whole process, one key per helper call (WebSearch/WebFetch, title generation),
+# so they only grew. Beyond the cap the least recently used key is evicted, which
+# never loses a turn: an evicted conversation whose session is still known restarts
+# with a full snapshot, and an evicted session is re-seeded from the DB exactly as
+# after a relay restart. 0 = unbounded.
+_STATE_MAX = int(os.getenv("LLM_RELAY_HISTORY_STATE_MAX", "4096"))
+
+# Per-session state of the sessions captured by this process (re-seeded from the DB
+# after a restart or an eviction). Key: session_id, Value: (turn_number,
+# message_count, input_tokens) of the last capture. Holding a key also means "this
+# session already captured a turn in this process" (restart fallback in _baseline),
+# which is why _prev_state does not store the DB-seeded value here.
+_session_prev: OrderedDict[str, Tuple[int, int, int]] = OrderedDict()
 
 # Per-conversation delta baseline. Several conversations share one session_id
 # (CC subagents, WebSearch/WebFetch helper calls, title generation), so a delta
@@ -27,16 +42,49 @@ _session_prev: Dict[str, Tuple[int, int, int]] = {}
 # session's last capture -- otherwise every interleave looks like a compaction
 # (2026-09-29: 263 false compaction events and 295 full snapshots of up to
 # 24 MB in one session). Key: (session_id, fingerprint of the first message).
-_conv_prev: Dict[Tuple[str, str], Tuple[int, int]] = {}
-# Sessions that captured at least one turn in this process (restart fallback in _baseline).
-_session_seen: Set[str] = set()
+_conv_prev: OrderedDict[Tuple[str, str], Tuple[int, int]] = OrderedDict()
+
+# Captures normally run on the background writer's single thread; the lock keeps
+# the LRU bookkeeping consistent if a delegation capture runs elsewhere.
+_state_lock = threading.Lock()
+_state_evicted = [0]
+
+
+def _state_get(state: OrderedDict[Any, Any], key: Any) -> Any:
+    """``state[key]`` or None; a hit becomes the most recently used key."""
+    with _state_lock:
+        value = state.get(key)
+        if value is not None:
+            state.move_to_end(key)
+        return value
+
+
+def _state_put(state: OrderedDict[Any, Any], key: Any, value: Any) -> None:
+    """Store ``value`` as the most recently used key, evicting the oldest keys beyond _STATE_MAX."""
+    with _state_lock:
+        state[key] = value
+        state.move_to_end(key)
+        while _STATE_MAX > 0 and len(state) > _STATE_MAX:
+            state.popitem(last=False)
+            _state_evicted[0] += 1
+
+
+def state_stats() -> Dict[str, int]:
+    """Sizes of the capture state and evictions since start (/_health ``history_state``)."""
+    return {
+        "sessions": len(_session_prev),
+        "conversations": len(_conv_prev),
+        "evicted": _state_evicted[0],
+        "max": _STATE_MAX,
+    }
 
 
 def reset_state() -> None:
     """Forget all in-memory capture state (tests, restart simulation)."""
-    _session_prev.clear()
-    _conv_prev.clear()
-    _session_seen.clear()
+    with _state_lock:
+        _session_prev.clear()
+        _conv_prev.clear()
+        _state_evicted[0] = 0
 
 
 def _prev_state(conn: sqlite3.Connection, session_id: str) -> Optional[Tuple[int, int, int]]:
@@ -46,8 +94,10 @@ def _prev_state(conn: sqlite3.Connection, session_id: str) -> Optional[Tuple[int
     full snapshot, leaving duplicate turn numbers inside one session (2026-09-28).
     input_tokens is unknown after a restart, so the token-drop compaction
     heuristic is off for the first captured turn; the message-count check still runs.
+    The seeded value is not cached: a key in _session_prev means the session
+    captured a turn in this process, and the capture stores the real state.
     """
-    prev = _session_prev.get(session_id)
+    prev = _state_get(_session_prev, session_id)
     if prev is not None:
         return prev
     try:
@@ -57,9 +107,39 @@ def _prev_state(conn: sqlite3.Connection, session_id: str) -> Optional[Tuple[int
         return None
     if seeded is None:
         return None
-    prev = (seeded[0], seeded[1], 0)
-    _session_prev[session_id] = prev
-    return prev
+    return (seeded[0], seeded[1], 0)
+
+
+# ── NUL escapes ──
+
+# PostgreSQL jsonb rejects the JSON escape \u0000 (2026-10-23, R9-12): a turn whose
+# messages carried a NUL character (a binary tool_result, for one) failed to insert,
+# and because the conversation state only advances after a successful insert, every
+# later turn of that conversation re-sent the same delta and failed too (about 660
+# turns lost in 10 days, silently). The escape is matched only behind an odd run of
+# backslashes: "\\u0000" in serialized JSON is a literal backslash followed by the
+# text "u0000", not a NUL.
+_NUL_ESCAPE = "\\u0000"
+_NUL_ESCAPE_RE = re.compile(r"(?<!\\)((?:\\\\)*)\\u0000")
+
+
+def _sanitize_json_text(text: str) -> Tuple[str, int]:
+    r"""Replace every JSON ``\u0000`` escape in serialized JSON with ``\ufffd``.
+
+    Returns ``(text, replacements)``. ``json.dumps`` always writes control
+    characters as ``\uXXXX`` escapes (``ensure_ascii`` only affects non-ASCII),
+    so working on the serialized text catches every NUL; the result is still
+    valid ASCII-safe JSON. Text without the escape is returned as is.
+    """
+    if _NUL_ESCAPE not in text:
+        return text, 0
+    return _NUL_ESCAPE_RE.subn(r"\1\\ufffd", text)
+
+
+def _sanitize_optional(text: Optional[str]) -> Tuple[Optional[str], int]:
+    if text is None:
+        return None, 0
+    return _sanitize_json_text(text)
 
 
 # ── Inline binary payload stripping ──
@@ -246,16 +326,17 @@ def _baseline(
     prev: Optional[Tuple[int, int, int]],
 ) -> Tuple[int, int]:
     """(message_count, input_tokens) the delta / compaction check compares against."""
-    base = _conv_prev.get(conv_key)
+    base = _state_get(_conv_prev, conv_key)
     if base is not None:
         return base
-    if prev is not None and session_id not in _session_seen:
-        # First capture of this session since the process started: the DB-seeded
-        # session state is the best available baseline, so turn numbers and the
-        # delta continue across restarts (2026-09-28).
+    if prev is not None and session_id not in _session_prev:
+        # First capture of this session since the process started (or since its
+        # state was evicted): the DB-seeded session state is the best available
+        # baseline, so turn numbers and the delta continue across restarts (2026-09-28).
         return (prev[1], prev[2])
-    # A new conversation inside a known session (subagent, helper call): full
-    # snapshot, and no compaction event -- nothing was dropped.
+    # A new conversation inside a known session (subagent, helper call), or one
+    # whose baseline was evicted: full snapshot, and no compaction event --
+    # nothing was dropped.
     return (0, 0)
 
 
@@ -406,7 +487,10 @@ def capture_turn(
 ) -> None:
     """Capture a conversation turn from a non-streaming response.
 
-    Called from proxy._proxy() after log_request().
+    Called through the background DB writer after log_request(). A failure
+    propagates: the writer retries it on a fresh connection and spills it to
+    disk (with a WARNING) instead of the turn vanishing at debug level, which
+    hid 660 failed inserts until 2026-10-23.
     """
     if not session_id or not req_json:
         return
@@ -415,21 +499,18 @@ def capture_turn(
     if not messages:
         return
 
-    try:
-        _do_capture(
-            conn=conn,
-            session_id=session_id,
-            messages=messages,
-            req_json=req_json,
-            response_content=resp_json.get("content"),
-            input_tokens=input_tokens,
-            request_size=request_size,
-            response_size=response_size,
-            raw_mode=raw_mode,
-            provider="anthropic",
-        )
-    except Exception:
-        logger.debug("history capture failed (non-stream)", exc_info=True)
+    _do_capture(
+        conn=conn,
+        session_id=session_id,
+        messages=messages,
+        req_json=req_json,
+        response_content=resp_json.get("content"),
+        input_tokens=input_tokens,
+        request_size=request_size,
+        response_size=response_size,
+        raw_mode=raw_mode,
+        provider="anthropic",
+    )
 
 
 def capture_turn_streamed(
@@ -445,8 +526,10 @@ def capture_turn_streamed(
 ) -> None:
     """Capture a conversation turn from a streaming response.
 
-    Called from proxy._proxy_stream() finally block after log_request().
-    accumulated_content is the list of content blocks built from SSE events.
+    Called through the background DB writer from the proxy stream's finally
+    block, after log_request(). accumulated_content is the list of content
+    blocks built from SSE events. A failure propagates to the writer, which
+    retries and then spills the job (see capture_turn).
     """
     if not session_id or not req_json:
         return
@@ -455,22 +538,19 @@ def capture_turn_streamed(
     if not messages:
         return
 
-    try:
-        _do_capture(
-            conn=conn,
-            session_id=session_id,
-            messages=messages,
-            req_json=req_json,
-            response_content=accumulated_content,
-            input_tokens=input_tokens,
-            request_size=request_size,
-            response_size=response_size,
-            raw_mode=raw_mode,
-            provider="anthropic",
-            model_override=model,
-        )
-    except Exception:
-        logger.debug("history capture failed (stream)", exc_info=True)
+    _do_capture(
+        conn=conn,
+        session_id=session_id,
+        messages=messages,
+        req_json=req_json,
+        response_content=accumulated_content,
+        input_tokens=input_tokens,
+        request_size=request_size,
+        response_size=response_size,
+        raw_mode=raw_mode,
+        provider="anthropic",
+        model_override=model,
+    )
 
 
 def capture_delegation_turn(
@@ -485,22 +565,29 @@ def capture_delegation_turn(
     """Capture a CLI delegation (Codex/Gemini) as a conversation turn.
 
     These don't flow through the proxy, so we record them at the MCP layer.
+    There is no background writer to retry or spill here, so a failure is
+    logged at WARNING (it used to be debug, like the proxy paths before
+    2026-10-23) and the delegation itself is never failed by it.
     """
     try:
         # Delegation turns don't have Anthropic message structure;
         # store as simple user/assistant exchange.
-        request_msg = json.dumps(
+        request_msg, n_req = _sanitize_json_text(json.dumps(
             [{"role": "user", "content": prompt}],
             ensure_ascii=False,
-        )
-        response_msg = json.dumps(
+        ))
+        response_msg, n_resp = _sanitize_json_text(json.dumps(
             [{"type": "text", "text": output}],
             ensure_ascii=False,
-        )
+        ))
 
         # Use a delegation-scoped turn counter
         prev = _prev_state(conn, session_id)
         turn_number = (prev[0] + 1) if prev else 1
+        if n_req + n_resp:
+            logger.info(
+                "history: replaced %d NUL escape(s) session=%s turn=%d", n_req + n_resp, session_id[:8], turn_number,
+            )
 
         log_conversation_turn(
             conn,
@@ -517,10 +604,9 @@ def capture_delegation_turn(
             provider=cli_id,
         )
 
-        _session_prev[session_id] = (turn_number, 1, 0)
-        _session_seen.add(session_id)
-    except Exception:
-        logger.debug("history capture failed (delegation)", exc_info=True)
+        _state_put(_session_prev, session_id, (turn_number, 1, 0))
+    except Exception as exc:
+        logger.warning("history capture failed (delegation) session=%s: %r", (session_id or "")[:8], exc)
 
 
 # ── Internal implementation ──
@@ -595,6 +681,19 @@ def _do_capture(
     # Serialize request messages (inline images/documents reduced to size markers)
     request_msg_json = json.dumps(_strip_binary_payloads(msgs_to_store), ensure_ascii=False)
 
+    # NUL escapes would make PostgreSQL reject the whole row (see _sanitize_json_text).
+    request_msg_json, n_req = _sanitize_json_text(request_msg_json)
+    response_msg_json, n_resp = _sanitize_optional(response_msg_json)
+    thinking_json, n_think = _sanitize_optional(thinking_json)
+    if n_req + n_resp + n_think:
+        logger.info(
+            "history: replaced %d NUL escape(s) session=%s turn=%d",
+            n_req + n_resp + n_think, session_id[:8], turn_number,
+        )
+
+    # If the insert raises, the state below is deliberately left at the previous
+    # turn: the writer's retry, or the next turn, then stores the same delta again.
+    # Advancing it anyway would make the next delta skip these messages for good.
     log_conversation_turn(
         conn,
         session_id=session_id,
@@ -611,9 +710,11 @@ def _do_capture(
         request_size_bytes=request_size,
         response_size_bytes=response_size,
         provider=provider,
+        # Which conversation of the session this turn belongs to (R9-7): the same
+        # first-message fingerprint the delta baseline is keyed by.
+        conversation_key=conv_key[1] or None,
     )
 
     # Update session + conversation state
-    _session_prev[session_id] = (turn_number, current_count, input_tokens)
-    _conv_prev[conv_key] = (current_count, input_tokens)
-    _session_seen.add(session_id)
+    _state_put(_session_prev, session_id, (turn_number, current_count, input_tokens))
+    _state_put(_conv_prev, conv_key, (current_count, input_tokens))

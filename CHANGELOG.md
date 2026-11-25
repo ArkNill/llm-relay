@@ -4,6 +4,54 @@ All notable changes to llm-relay are documented here.
 
 ## [Unreleased]
 
+### Added
+- **Non-200 upstream streams are labelled** (2026-10-23, R9-6): a streamed request the upstream
+  answered with an error status (429, 529, ...) was recorded as `stream_end=completed`; its
+  `requests.raw_usage` now says `stream_end=upstream_status` with `upstream_status`, and
+  `error_type` (the API's `error.type`, e.g. `overloaded_error`) is kept from an SSE `error` event,
+  a plain JSON error body, or a non-streaming error reply. No schema change.
+- **`/_health` in-flight detail** (2026-10-23, R9-15): `proxy_in_flight_detail` lists the /v1/
+  requests behind `proxy_in_flight` (oldest first, up to 20: `id`, `age_s`, `phase` `open`/`ended`,
+  `path`, `session`, `ended_s`) and `proxy_in_flight_ended` counts the ones whose response the relay
+  has finished while the ASGI call has not returned yet. A request still counted more than 2 s after
+  it ended is logged once at WARNING (`proxy_in_flight lag: ...`). The counter is unchanged.
+- **`conversation_turns.conversation_key`** (2026-10-23, R9-7): every captured turn records which
+  conversation of its session it belongs to (the fingerprint of the first message that history's
+  delta baseline is already keyed by; NULL for older rows and delegation turns), with an index on
+  `(session_id, conversation_key, turn_number)`, and `db.get_session_history` returns it. SQLite
+  stores are migrated on connect. PostgreSQL stores get the column and index from
+  `docs/migrate-conversation-key.py` (report only unless `--apply`; `ADD COLUMN IF NOT EXISTS` under
+  a lock timeout, `CREATE INDEX CONCURRENTLY`); until then the relay keeps writing rows without the
+  key and logs one WARNING. Composition and display do not use the key yet.
+
+### Changed
+- **History capture state is bounded** (2026-10-23, R9-10a): the per-session and per-conversation
+  delta baselines (one key per helper call, kept for the life of the process) are LRU dicts capped
+  by `LLM_RELAY_HISTORY_STATE_MAX` (default 4096 each, 0 = unbounded). An evicted conversation
+  restarts with a full snapshot and an evicted session is re-seeded from the DB as after a restart,
+  so no turn is lost. `/_health` reports `history_state` (`sessions`, `conversations`, `evicted`,
+  `max`).
+- **History detail is capped to the newest turns by default** (2026-10-23, R9-10c):
+  `GET /api/v1/history/{session_id}` and the MCP `session_history` tool used to return every turn
+  of a session. Without a turn range they now return the newest `LLM_RELAY_HISTORY_DEFAULT_TURNS`
+  turns (default 200, oldest first as before; 0 = no cap) and add `truncated` and
+  `total_turns_available`. `?all=1` (MCP: `all_turns=true`) or an explicit range returns the turns
+  as before. `db.get_session_history` takes an optional `limit`.
+
+### Fixed
+- **History turns carrying a NUL character were lost** (2026-10-23, R9-12): PostgreSQL jsonb rejects
+  the `\u0000` escape, so a turn whose messages held a NUL (a binary `tool_result`, for one) failed to
+  insert; the error was swallowed at debug level and the conversation's state never advanced, so every
+  later turn of that conversation failed the same way (about 660 turns in 10 days). The capture now
+  writes `\ufffd` instead (one INFO line with the count), and a capture failure propagates to the
+  background writer, which retries it and spills it to disk with a WARNING. Delegation capture
+  failures are logged at WARNING.
+- **The DB writer no longer drops the job in progress at shutdown** (2026-10-23, R9-10b): a job the
+  writer thread had taken off the queue but not finished when `stop()`'s drain timeout ran out was in
+  neither the database nor the spill file. It is now spilled with the reason `shutdown timeout (in
+  progress; may also have been written)`, and a job that fails while the writer is stopping is
+  spilled at once (`shutdown`) instead of backing off into the timeout.
+
 ## [0.9.7] - 2026-10-22
 
 > Relay hardening after the 2026-09-29 out-of-memory incident, plus the 2026-10-22 brotli
