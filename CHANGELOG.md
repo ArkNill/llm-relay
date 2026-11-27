@@ -134,6 +134,15 @@ All notable changes to llm-relay are documented here.
   neither the database nor the spill file. It is now spilled with the reason `shutdown timeout (in
   progress; may also have been written)`, and a job that fails while the writer is stopping is
   spilled at once (`shutdown`) instead of backing off into the timeout.
+- **Antigravity capture: values PostgreSQL refuses no longer cost whole rows** (2026-11-27): jsonb
+  rejects unpaired UTF-16 surrogates (in values and keys) and `NaN` / `Infinity`, and a text column
+  cannot carry a lone surrogate at all, so one such value in an upstream answer could drop the request
+  row of that call and the turn row behind it (none seen in production). The store now writes `\ufffd`
+  for every surrogate code point (as it already did for NUL) and the strings `"NaN"`, `"Infinity"`,
+  `"-Infinity"` for non-finite numbers. If the database still refuses a request row that carries
+  `response_message`, `thinking_blocks` or `response_extra`, the row is written once more without them
+  (counted in `capture_errors` as `request_ext`); a refused blob costs only itself and is not retried
+  by that process.
 
 ## [0.9.7] - 2026-10-22
 
