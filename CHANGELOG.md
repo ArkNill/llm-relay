@@ -5,6 +5,28 @@ All notable changes to llm-relay are documented here.
 ## [Unreleased]
 
 ### Added
+- **Antigravity relay records more of each call** (2026-11-27): `provider_requests` gains 15
+  nullable columns. Values the relay already parsed: `finish_reason`, `trace_id`, `response_id`,
+  `trajectory_id`, `system_chars`, `tools_count`. Timing from receipt of the request:
+  `headers_ms` (upstream headers), `first_thought_ms` and `first_answer_ms` (first thinking and
+  first non-thinking part of a stream). Bodies of generate calls that get no turn row --
+  `checkpoint` and `web_search` by default, any request type listed in
+  `LLM_RELAY_AGY_AUX_BODY_TYPES` (`*` = every non-agent type, empty = none), and agent calls cut
+  off mid-stream or failed -- go to `response_message` / `thinking_blocks`; turns stored in
+  `provider_turns` are not duplicated. `response_extra` keeps the candidate's other keys (e.g.
+  `groundingMetadata`, capped at 1 MiB). `system_hash`, `tools_hash` and `response_hash` are
+  sha256 digests of the system instruction, the tool list and the `fetchAvailableModels` /
+  `listExperiments` responses; the bodies themselves are stored once each in a new
+  `provider_blobs` table (`LLM_RELAY_AGY_BLOBS=0` turns that off; at most
+  `LLM_RELAY_AGY_BLOB_MAX_NEW_PER_DAY` new bodies per kind per 24 h, default 16, 0 = no limit,
+  the hash is still recorded). Earlier rows stay NULL. `/_health` reports `schema_ext`
+  (`request_columns_missing`, `provider_blobs`) and the counters `aux_bodies`, `blobs_written`
+  and `blobs_skipped_cap`. SQLite stores are upgraded by the relay; PostgreSQL needs
+  `docs/migrate-provider-columns.py --pg ... --apply` (nullable columns without DEFAULT, the
+  table and its unique index; refuses anything else). Until then rows keep being written with the
+  original columns, and the relay picks the new ones up within a minute of the migration, without
+  a restart. `python -m llm_relay.antigravity.report` gains `show SESSION --thinking`,
+  `aux [-n N] [--type T]`, `blobs [--kind K]` and `blob SHA_PREFIX`.
 - **`LLM_TOKEN_ZONE_B=off` lets the Claude Code zone follow Zone A alone** (2026-11-27): the
   overall zone is the worse of Zone A (absolute thresholds, `LLM_TOKEN_A_*`) and Zone B (a fixed
   50/70/90% of `LLM_TOKEN_CEILING`), so raising the Zone A thresholds above those ratios had no
@@ -112,6 +134,15 @@ All notable changes to llm-relay are documented here.
   neither the database nor the spill file. It is now spilled with the reason `shutdown timeout (in
   progress; may also have been written)`, and a job that fails while the writer is stopping is
   spilled at once (`shutdown`) instead of backing off into the timeout.
+- **Antigravity capture: values PostgreSQL refuses no longer cost whole rows** (2026-11-27): jsonb
+  rejects unpaired UTF-16 surrogates (in values and keys) and `NaN` / `Infinity`, and a text column
+  cannot carry a lone surrogate at all, so one such value in an upstream answer could drop the request
+  row of that call and the turn row behind it (none seen in production). The store now writes `\ufffd`
+  for every surrogate code point (as it already did for NUL) and the strings `"NaN"`, `"Infinity"`,
+  `"-Infinity"` for non-finite numbers. If the database still refuses a request row that carries
+  `response_message`, `thinking_blocks` or `response_extra`, the row is written once more without them
+  (counted in `capture_errors` as `request_ext`); a refused blob costs only itself and is not retried
+  by that process.
 
 ## [0.9.7] - 2026-10-22
 

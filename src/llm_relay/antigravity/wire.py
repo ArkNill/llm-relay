@@ -12,9 +12,14 @@ turn what passes through the relay into plain values the store can write:
   blocks (``text``, ``thinking``, ``tool_use``, ``tool_result``, ...).
 * ``SSEAccumulator`` / ``parse_json_response`` -- a streamed (or plain JSON)
   response into an ``AgyResponse``: merged text / tool_use blocks, thinking
-  blocks, the last cumulative ``usageMetadata`` and the finish reason.
+  blocks, the last cumulative ``usageMetadata``, the finish reason, the other
+  keys of candidate 0 (``extra``) and, with a clock, when the first thought and
+  the first answer part arrived.
 * ``last_user_prompt``, ``first_message_fingerprint``, ``usage_columns`` and
   ``parse_quota_summary`` -- the derived columns.
+* ``content_hash`` / ``parse_json_value`` -- the sha256 and size of a JSON value
+  in one canonical serialization, and a JSON body decoded as is (for the blob
+  store, which keeps each distinct system prompt / tool list / snapshot once).
 
 Role mapping: Gemini ``"model"`` becomes ``"assistant"`` and every other role
 (or a missing one) becomes ``"user"``, except that a content whose parts are all
@@ -37,10 +42,16 @@ import json
 import logging
 import math
 import re
-from dataclasses import dataclass
-from typing import Any, Dict, List, Optional
+from dataclasses import dataclass, field
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 logger = logging.getLogger("llm-relay.antigravity.wire")
+
+# Upper bound for AgyResponse.extra in canonical JSON bytes; a larger value is replaced by its size.
+EXTRA_MAX_BYTES = 1024 * 1024
+# Candidate keys that already have their own place in AgyResponse; every other key goes to extra.
+_CANDIDATE_OWN_KEYS = frozenset({"content", "finishReason", "index"})
+_EVENT_METADATA_KEY = "_event_metadata"
 
 # agy wraps the typed prompt in these tags and appends <ADDITIONAL_METADATA>.
 _USER_REQUEST_OPEN = "<USER_REQUEST>"
@@ -68,6 +79,8 @@ class AgyRequest:
     system_chars: int  # total chars of systemInstruction text parts
     tools_count: int  # total functionDeclarations
     contents: List[Dict[str, Any]]  # the raw contents list (same objects, not copied)
+    system_instruction: Any = None  # request.systemInstruction as sent (same object, not copied)
+    tools: Any = None  # request.tools as sent (same object, not copied)
 
 
 @dataclass
@@ -83,6 +96,12 @@ class AgyResponse:
     n_bad_events: int  # data lines that were not valid JSON objects
     error: Optional[str]  # "<status|code>: <message>" from an {"error": {...}} payload, else None
     response_bytes: int  # total bytes fed
+    # Candidate-0 keys other than content / finishReason / index, last non-empty value of each, plus
+    # "_event_metadata" (the last non-empty top-level event metadata); {"_omitted_bytes": n} above
+    # EXTRA_MAX_BYTES.
+    extra: Dict[str, Any] = field(default_factory=dict)
+    first_thought_at: Optional[float] = None  # clock() at the first thinking part; None without a clock
+    first_answer_at: Optional[float] = None  # clock() at the first other kept part (text, tool_use, ...)
 
 
 # ── Small coercion helpers (all total: they never raise on JSON-shaped input) ──
@@ -120,6 +139,21 @@ def _loads(body: Any) -> Any:
     if data is None:
         raise ValueError("body is not bytes")
     return json.loads(data.decode("utf-8", "replace").lstrip(_BOM))
+
+
+def _canonical_json(obj: Any) -> bytes:
+    """The one serialization behind content_hash and the extra size bound. Raises on unserializable input.
+
+    Sorted keys and no whitespace make equal values hash alike whatever their key
+    order; "replace" turns a lone surrogate into "?" instead of failing.
+    """
+    text = json.dumps(obj, sort_keys=True, ensure_ascii=False, separators=(",", ":"), default=str)
+    return text.encode("utf-8", "replace")
+
+
+def _is_empty(value: Any) -> bool:
+    """None and empty containers / strings carry nothing worth keeping; False and 0 do."""
+    return value is None or (isinstance(value, (dict, list, str)) and not value)
 
 
 def _int_or_none(value: Any) -> Optional[int]:
@@ -198,6 +232,8 @@ def parse_request(body: bytes, method: str) -> Optional[AgyRequest]:
         if not isinstance(contents, list):
             contents = []
         thinking_config = _dict(_dict(request.get("generationConfig")).get("thinkingConfig"))
+        system_instruction = request.get("systemInstruction")
+        tools = request.get("tools")
         return AgyRequest(
             method=method,
             request_type=_str(obj.get("requestType")),
@@ -211,9 +247,11 @@ def parse_request(body: bytes, method: str) -> Optional[AgyRequest]:
             client_session_id=_session_id(request.get("sessionId")),
             project=_str(obj.get("project")),
             message_count=len(contents),
-            system_chars=_system_chars(request.get("systemInstruction")),
-            tools_count=_tools_count(request.get("tools")),
+            system_chars=_system_chars(system_instruction),
+            tools_count=_tools_count(tools),
             contents=contents,
+            system_instruction=system_instruction,
+            tools=tools,
         )
     except Exception:
         logger.debug("agy request parse failed", exc_info=True)
@@ -380,9 +418,19 @@ class SSEAccumulator:
     on LF before decoding (LF never occurs inside a multi-byte UTF-8 sequence)
     and a trailing CR is stripped, so the CRLF CRLF event separators on the wire
     need no special handling.
+
+    ``clock`` (e.g. ``time.monotonic``) is read when the first thinking part and
+    the first other kept part are parsed, once each, so the caller can tell
+    how long the model thought before it answered. Parts are parsed inside
+    ``feed``, so the readings are as late as the chunk that completed the
+    line. Without a clock nothing is timed.
     """
 
-    def __init__(self) -> None:
+    def __init__(self, clock: Optional[Callable[[], float]] = None) -> None:
+        self._clock = clock
+        self._first_thought_at: Optional[float] = None
+        self._first_answer_at: Optional[float] = None
+        self._extra: Dict[str, Any] = {}
         self._buf = bytearray()  # the incomplete last line; never contains LF
         self._bytes = 0
         # Blocks in order: a list of str = a text run still being merged, a dict = a finished block.
@@ -506,12 +554,21 @@ class SSEAccumulator:
         response_id = _nonempty_str(response.get("responseId"))
         if response_id is not None:
             self._response_id = response_id
+        metadata = obj.get("metadata")
+        if not _is_empty(metadata):
+            self._extra[_EVENT_METADATA_KEY] = metadata
         candidate = self._first_candidate(response)
         if candidate is None:
             return
         finish_reason = _nonempty_str(candidate.get("finishReason"))
         if finish_reason is not None:
             self._finish_reason = finish_reason
+        # Keys we have no column for (groundingMetadata, citationMetadata, safetyRatings, ...) are kept
+        # without assuming their names or shapes; most are repeated or sent once near the end, so the
+        # last non-empty value wins.
+        for key, value in candidate.items():
+            if key not in _CANDIDATE_OWN_KEYS and not _is_empty(value):
+                self._extra[key] = value
         for part in _list(_dict(candidate.get("content")).get("parts")):
             self._part(part)
 
@@ -527,8 +584,14 @@ class SSEAccumulator:
     def _part(self, part: Any) -> None:
         block = _part_to_block(part)
         if block is None:
-            return  # empty text / bare signature: does not end a run
+            return  # empty text / bare signature: does not end a run, is not an answer
         kind = block["type"]
+        if self._clock is not None:
+            if kind == "thinking":
+                if self._first_thought_at is None:
+                    self._first_thought_at = self._now()
+            elif self._first_answer_at is None:
+                self._first_answer_at = self._now()
         if kind == "thinking":
             if self._last_kind == "thinking":
                 self._thinking[-1].append(block["thinking"])
@@ -542,6 +605,30 @@ class SSEAccumulator:
         else:
             self._items.append(block)
         self._last_kind = kind
+
+    def _now(self) -> Optional[float]:
+        clock = self._clock
+        if clock is None:
+            return None
+        try:
+            return float(clock())
+        except Exception:
+            # A clock that fails once is dropped: one debug line, not one per part.
+            self._clock = None
+            logger.debug("agy SSE clock failed", exc_info=True)
+            return None
+
+    def _bounded_extra(self) -> Dict[str, Any]:
+        if not self._extra:
+            return {}
+        try:
+            size = len(_canonical_json(self._extra))
+        except Exception:
+            logger.debug("agy SSE extra not serializable", exc_info=True)
+            return {}
+        if size > EXTRA_MAX_BYTES:
+            return {"_omitted_bytes": size}
+        return dict(self._extra)
 
     def _result(self) -> AgyResponse:
         blocks = [
@@ -560,13 +647,17 @@ class SSEAccumulator:
             n_bad_events=self._n_bad,
             error=self._error,
             response_bytes=self._bytes,
+            extra=self._bounded_extra(),
+            first_thought_at=self._first_thought_at,
+            first_answer_at=self._first_answer_at,
         )
 
 
 def parse_json_response(body: bytes) -> AgyResponse:
     """Parse a non-SSE response body: one JSON object or a JSON array of them.
 
-    A body that is not JSON counts as one bad event; an empty body as none.
+    A body that is not JSON counts as one bad event; an empty body as none. The
+    whole body arrives before parsing, so nothing is timed.
     """
     acc = SSEAccumulator()
     try:
@@ -646,3 +737,38 @@ def parse_quota_summary(body: bytes) -> List[Dict[str, Any]]:
     except Exception:
         logger.debug("agy quota summary parse failed", exc_info=True)
         return []
+
+
+# ── Blobs ──
+
+
+def content_hash(obj: Any) -> Optional[Tuple[str, int]]:
+    """(sha256 hex, byte count) of ``obj`` in canonical JSON; None for None / empty values or on failure.
+
+    Canonical = sorted keys, no whitespace, non-ASCII kept as UTF-8, unknown types
+    via ``str``. Equal JSON values therefore hash alike whatever their key order,
+    and the byte count is the size the blob store keeps.
+    """
+    try:
+        if _is_empty(obj):
+            return None
+        data = _canonical_json(obj)
+        return hashlib.sha256(data).hexdigest(), len(data)
+    except Exception:
+        logger.debug("agy content hash failed", exc_info=True)
+        return None
+
+
+def parse_json_value(body: Any) -> Any:
+    """A response body decoded as JSON, whatever its top-level type; None for an empty or non-JSON body."""
+    try:
+        data = _as_bytes(body)
+        if not data:
+            return None
+        text = data.decode("utf-8", "replace").lstrip(_BOM).strip()
+        if not text:
+            return None
+        return json.loads(text)
+    except Exception:
+        logger.debug("agy JSON value parse failed", exc_info=True)
+        return None

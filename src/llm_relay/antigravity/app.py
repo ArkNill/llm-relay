@@ -24,8 +24,17 @@ Capture never changes, delays or fails a response:
 * every capture failure is counted (``capture_errors``) and logged once per
   kind, by exception type only.
 
-Never written to logs or rows: header values (the bearer token above all) and
-request/response bodies. Log lines name endpoints, statuses and exception types.
+Beyond the turn rows, the job keeps a few things a turn row cannot hold: the
+answer of a generate call that gets no turn row (``checkpoint`` / ``web_search``
+side calls, an agent answer cut short) on its request row, the system prompt,
+tool list and model / experiment snapshots once per distinct content in
+``provider_blobs`` (the request row carries their sha256), and per-call timing.
+A database migrated before those columns or that table keeps capturing with
+what it has (``_ext_schema``).
+
+Never written to logs: header values (the bearer token above all) and
+request/response bodies. Log lines name endpoints, statuses, exception types
+and table / column names. Rows never hold header values.
 """
 
 from __future__ import annotations
@@ -37,9 +46,9 @@ import logging
 import os
 import threading
 import time
-from collections import OrderedDict
+from collections import OrderedDict, deque
 from pathlib import Path
-from typing import Any, AsyncIterator, Callable, Dict, List, Optional, Tuple
+from typing import Any, AsyncIterator, Callable, Deque, Dict, FrozenSet, List, Optional, Set, Tuple
 
 import anyio
 import httpx
@@ -57,8 +66,21 @@ DEFAULT_UPSTREAM = "https://daily-cloudcode-pa.googleapis.com"
 DEFAULT_MAX_CAPTURE_BYTES = 64 * 1024 * 1024
 DEFAULT_SPILL_DIR = "~/.llm-relay/antigravity"
 SESSION_STATE_MAX = 2048  # conversations whose delta state is kept in memory (LRU)
-SCHEMA_RECHECK_S = 60.0  # while a provider table is missing, look again at most this often
+# While a provider table (or a newer provider_requests column / provider_blobs) is missing,
+# look again at most this often.
+SCHEMA_RECHECK_S = 60.0
 QUOTA_BODY_MAX = 1024 * 1024  # retrieveUserQuotaSummary answers with a few KB of JSON
+SNAPSHOT_BODY_MAX = 4 * 1024 * 1024  # fetchAvailableModels / listExperiments; larger answers are not kept
+# Request types whose answer goes on the request row (they never get a turn row). "*" = every
+# type but "agent", calls without a requestType included; agent calls get it only when they get
+# no turn row (see _aux_body_wanted).
+DEFAULT_AUX_BODY_TYPES = "checkpoint,web_search"
+BLOB_SEEN_MAX = 4096  # (kind, sha256) this process already stored or found stored (LRU)
+# Safety valve: if a system prompt or snapshot changed on every call, each call would add a blob.
+# At most this many new blobs per kind and BLOB_CAP_WINDOW_S; beyond that only the hash is kept.
+# The window lives in process memory only: a restart starts it empty.
+DEFAULT_BLOB_MAX_NEW_PER_DAY = 16
+BLOB_CAP_WINDOW_S = 24 * 3600.0
 # Quota rows: agy polls the summary several times per call, unused buckets report a reset time
 # that rolls with the clock, and replicas disagree in the third decimal. So a bucket is written
 # again only on a real move (>= QUOTA_STEP) or, for smaller drift, at most every QUOTA_MIN_INTERVAL_S.
@@ -72,6 +94,8 @@ UPSTREAM_LIMITS = httpx.Limits(max_connections=64, max_keepalive_connections=16,
 
 GENERATE_ENDPOINTS = frozenset(("streamGenerateContent", "generateContent"))
 QUOTA_ENDPOINT = "retrieveUserQuotaSummary"
+# Endpoint -> provider_blobs kind of its (JSON) answer.
+SNAPSHOT_ENDPOINTS = {"fetchAvailableModels": "available_models", "listExperiments": "experiments"}
 RELAY_ERROR_STATUS = "RELAY_UPSTREAM_ERROR"
 
 # Hop-by-hop headers (plus content-length, which httpx / the ASGI server recompute)
@@ -87,8 +111,18 @@ _HOP_BY_HOP = frozenset(
 _CLIENT_DEFAULT_HEADERS = ("accept", "user-agent", "connection")
 _COUNTERS = (
     "requests", "turns_captured", "quota_rows", "capture_errors", "capture_skipped_no_schema", "upstream_errors",
+    "aux_bodies", "blobs_written", "blobs_skipped_cap",
 )
 _MISSING = object()
+# _Relay._blobs_seen values: in provider_blobs (written now or found there), left out by the cap,
+# or rejected by the database while the connection stayed fine (the value itself is the problem,
+# so this process neither tries it again nor counts it again).
+_BLOB_STORED = "stored"
+_BLOB_CAPPED = "capped"
+_BLOB_FAILED = "failed"
+# Request row JSON columns that carry arbitrary upstream values; when the database rejects the row
+# with them, it is written once more without them (see _write_request).
+_REQUEST_BODY_COLUMNS = ("response_message", "thinking_blocks", "response_extra")
 
 
 # ── Small helpers ──
@@ -116,6 +150,21 @@ def _env_int(name: str, default: int) -> int:
     except ValueError:
         logger.warning("agy relay: %s is not an integer; using %d", name, default)
         return default
+
+
+def _aux_body_types() -> Tuple[bool, FrozenSet[str]]:
+    """``LLM_RELAY_AGY_AUX_BODY_TYPES`` as (every non-agent type, named types).
+
+    Unset = ``DEFAULT_AUX_BODY_TYPES``; set but blank = none; ``*`` = every type
+    but ``agent``. ``agent`` itself is ignored: an agent call gets its answer on
+    the request row only when it gets no turn row, so naming it cannot store a
+    turn's answer twice.
+    """
+    value = os.environ.get("LLM_RELAY_AGY_AUX_BODY_TYPES")
+    if value is None:
+        value = DEFAULT_AUX_BODY_TYPES
+    names = frozenset(item.strip() for item in value.split(",") if item.strip())
+    return "*" in names, names - {"*", "agent"}
 
 
 def _spill_dir() -> Path:
@@ -197,13 +246,16 @@ class _Flight:
     The writer thread fills the parse results and remembers which rows it already
     wrote, so a job retried by the writer does not write them twice. ``repr`` (what a
     spill record shows) names the endpoint only -- no payload, no headers.
+    ``t0``, ``headers_at`` and the accumulator's part times are ``time.monotonic``
+    readings; the request row gets them as milliseconds since ``t0``.
     """
 
     __slots__ = (
         "endpoint", "kind", "t0", "request_body_bytes", "body", "body_too_large", "status_code", "is_stream",
         "encoded", "acc", "collect_limit", "collected", "collect_overflow", "response_bytes", "stream_end",
         "latency_ms", "error", "done", "parsed", "req", "resp", "quota", "row_written", "request_row_id",
-        "turn_done", "quota_done",
+        "turn_done", "quota_done", "headers_at", "snapshot", "blob_done", "system_hash", "tools_hash",
+        "response_hash",
     )
 
     def __init__(self, endpoint: str, t0: float, request_body_bytes: int) -> None:
@@ -212,9 +264,12 @@ class _Flight:
             self.kind = "generate"
         elif endpoint == QUOTA_ENDPOINT:
             self.kind = "quota"
+        elif endpoint in SNAPSHOT_ENDPOINTS:
+            self.kind = "snapshot"
         else:
             self.kind = "other"
         self.t0 = t0
+        self.headers_at: Optional[float] = None  # upstream response headers received
         self.request_body_bytes = request_body_bytes
         self.body: Optional[bytes] = None
         self.body_too_large = False
@@ -235,10 +290,15 @@ class _Flight:
         self.req: Optional[wire.AgyRequest] = None
         self.resp: Optional[wire.AgyResponse] = None
         self.quota: Optional[List[Dict[str, Any]]] = None
+        self.snapshot: Any = None  # the decoded JSON answer of a snapshot endpoint, until the blob stage
         self.row_written = False
         self.request_row_id: Optional[int] = None
         self.turn_done = False
         self.quota_done = False
+        self.blob_done = False
+        self.system_hash: Optional[str] = None
+        self.tools_hash: Optional[str] = None
+        self.response_hash: Optional[str] = None
 
     def held_bytes(self) -> int:
         """Bytes this capture keeps alive while it waits for the writer (the queue's byte cap counts them)."""
@@ -297,6 +357,13 @@ class _Relay:
         self.upstream = os.environ.get("LLM_RELAY_AGY_UPSTREAM") or DEFAULT_UPSTREAM
         self.capture = _env_flag("LLM_RELAY_AGY_CAPTURE", True)
         self.max_capture_bytes = _env_int("LLM_RELAY_AGY_MAX_CAPTURE_BYTES", DEFAULT_MAX_CAPTURE_BYTES)
+        self.aux_all_types, self.aux_body_types = _aux_body_types()
+        self.blobs = _env_flag("LLM_RELAY_AGY_BLOBS", True)
+        self.blob_max_new_per_day = _env_int("LLM_RELAY_AGY_BLOB_MAX_NEW_PER_DAY", DEFAULT_BLOB_MAX_NEW_PER_DAY)
+        if self.blob_max_new_per_day < 0:
+            logger.warning("agy relay: LLM_RELAY_AGY_BLOB_MAX_NEW_PER_DAY is negative; using %d",
+                           DEFAULT_BLOB_MAX_NEW_PER_DAY)
+            self.blob_max_new_per_day = DEFAULT_BLOB_MAX_NEW_PER_DAY
         self.spill_dir = _spill_dir()
         self._transport = upstream_transport
         self._writer = writer
@@ -312,6 +379,15 @@ class _Relay:
         self._quota_last: Dict[str, Tuple[Any, float]] = {}  # bucket id -> (remaining_fraction, monotonic) written
         self._schema: Optional[Dict[str, bool]] = None
         self._schema_checked = 0.0
+        # Extended schema (newer provider_requests columns, provider_blobs); see _ext_schema.
+        self._ext_columns: Set[str] = set()
+        self._ext_blobs = False
+        self._ext_complete: Optional[bool] = None  # None = not looked at yet
+        self._ext_checked = 0.0
+        self._ext_view: Optional[Dict[str, Any]] = None  # what /_health shows; replaced, never mutated
+        self._blobs_seen = _LRU(BLOB_SEEN_MAX)  # "<kind>:<sha256>" -> _BLOB_STORED | _BLOB_CAPPED | _BLOB_FAILED
+        self._blob_new: Dict[str, Deque[float]] = {}  # kind -> monotonic times of new blobs in the window
+        self._blob_cap_warned: Set[str] = set()
 
     # -- lifecycle --
 
@@ -391,6 +467,7 @@ class _Relay:
             except Exception as exc:
                 snapshot = {"error": type(exc).__name__}
         schema = self._schema
+        ext = self._ext_view
         return JSONResponse(
             {
                 "status": "ok",
@@ -400,6 +477,11 @@ class _Relay:
                 "in_flight": self._in_flight,
                 "counters": counters,
                 "schema": dict(schema) if schema is not None else None,
+                "schema_ext": (
+                    {"request_columns_missing": list(ext["request_columns_missing"]),
+                     "provider_blobs": ext["provider_blobs"]}
+                    if ext is not None else None
+                ),
                 "db_writer": snapshot,
             }
         )
@@ -471,6 +553,7 @@ class _Relay:
         )
 
     def _observe_headers(self, flight: _Flight, upstream: httpx.Response) -> None:
+        flight.headers_at = time.monotonic()
         flight.status_code = upstream.status_code
         content_type = upstream.headers.get("content-type", "")
         flight.is_stream = content_type.split(";", 1)[0].strip().lower() == "text/event-stream"
@@ -480,11 +563,15 @@ class _Relay:
             return  # compressed despite accept-encoding: identity -- relayed as is, not parsed
         if flight.kind == "generate":
             if flight.is_stream:
-                flight.acc = wire.SSEAccumulator()
+                # The clock only notes when the first thought / answer part was parsed (the same
+                # clock as t0); it adds no work beyond a reading per first part.
+                flight.acc = wire.SSEAccumulator(clock=time.monotonic)
             else:
                 flight.collect_limit = self.max_capture_bytes
         elif flight.kind == "quota" and upstream.status_code == 200:
             flight.collect_limit = QUOTA_BODY_MAX
+        elif flight.kind == "snapshot" and upstream.status_code == 200:
+            flight.collect_limit = SNAPSHOT_BODY_MAX
         if flight.collect_limit:
             flight.collected = bytearray()
 
@@ -547,16 +634,26 @@ class _Relay:
     # -- capture job (writer thread) --
 
     def _capture_job(self, conn: Any, *, flight: _Flight) -> None:
-        """Parse the request and write its rows: request, then turn or quota. Runs on the writer thread."""
+        """Parse the request and write its rows: blobs, request, then turn or quota. Runs on the writer thread."""
         stage = "schema"
         try:
             if not self._schema_ready(conn):
                 return
+            columns_present, blobs_present = self._ext_schema(conn)
             stage = "parse"
             self._parse(flight)
+            if not flight.blob_done:
+                # Set even after a failure: a job retried by the writer does not write or count it again.
+                try:
+                    self._write_blobs(conn, flight, blobs_present)
+                except Exception as exc:
+                    self._capture_error("blob", exc)  # costs the blobs of this request, not its rows
+                finally:
+                    flight.blob_done = True
+                    flight.snapshot = None
             stage = "request"
             if not flight.row_written:
-                flight.request_row_id = store.log_request(conn, **self._request_columns(flight))
+                self._write_request(conn, flight, columns_present)
                 flight.row_written = True
             if flight.kind == "generate" and not flight.turn_done:
                 stage = "turn"
@@ -576,6 +673,31 @@ class _Relay:
                 raise CaptureConnectionError(
                     "agy capture: database connection unusable ({})".format(type(exc).__name__)
                 ) from None
+
+    def _write_request(self, conn: Any, flight: _Flight, columns_present: Set[str]) -> None:
+        """Write the request row; when the database rejects it, retry once without the body columns.
+
+        ``response_message`` / ``thinking_blocks`` / ``response_extra`` carry whatever
+        the upstream sent. If one of them makes the row fail while the connection
+        still works, losing those columns is better than losing the request row and
+        the turn row behind it. Any other failure (no body column carried, dead
+        connection, the retry failing too) propagates as before.
+        """
+        columns = self._request_columns(flight)
+        try:
+            flight.request_row_id = store.log_request(conn, available_columns=columns_present, **columns)
+        except Exception as exc:
+            carried = [name for name in _REQUEST_BODY_COLUMNS
+                       if columns.get(name) is not None and name in columns_present]
+            if not carried or not self._connection_usable(conn):
+                raise
+            self._capture_error("request_ext", exc)
+            for name in _REQUEST_BODY_COLUMNS:
+                columns[name] = None
+            flight.request_row_id = store.log_request(conn, available_columns=columns_present, **columns)
+            return  # no answer body on this row, so aux_bodies stays as it is
+        if self._body_written(columns, columns_present):
+            self._count("aux_bodies")
 
     def _schema_ready(self, conn: Any) -> bool:
         cached = self._schema
@@ -602,6 +724,53 @@ class _Relay:
         elif previous is False:
             logger.warning("agy capture resumed: provider tables present")
 
+    def _ext_schema(self, conn: Any) -> Tuple[Set[str], bool]:
+        """(provider_requests columns to write, provider_blobs usable) for this job. Never raises.
+
+        The required tables are present (``_schema_ready``). A database migrated
+        before ``store.NEW_REQUEST_COLUMNS`` / ``provider_blobs`` keeps its rows
+        coming: ``log_request`` leaves the missing columns out and no blob is
+        written. Looked at again every ``SCHEMA_RECHECK_S`` while something is
+        missing, so a later migration takes effect without a restart. When the
+        look itself fails, this job writes the original columns only and the next
+        job looks again.
+        """
+        complete = self._ext_complete
+        if complete is None or (not complete and time.monotonic() - self._ext_checked >= SCHEMA_RECHECK_S):
+            try:
+                columns = set(store.request_columns_present(conn))
+                blobs = bool(store.tables_present(conn, store.OPTIONAL_TABLES).get("provider_blobs"))
+            except Exception as exc:
+                self._capture_error("schema_ext", exc)
+                return set(), False
+            self._note_ext_schema(columns, blobs)
+        return self._ext_columns, self._ext_blobs
+
+    def _note_ext_schema(self, columns: Set[str], blobs: bool) -> None:
+        missing = [name for name in store.NEW_REQUEST_COLUMNS if name not in columns]
+        complete = not missing and blobs
+        previous = self._ext_complete
+        self._ext_columns = columns
+        self._ext_blobs = blobs
+        self._ext_complete = complete
+        self._ext_checked = time.monotonic()
+        self._ext_view = {"request_columns_missing": missing, "provider_blobs": blobs}
+        if complete == previous:
+            return
+        if not complete:
+            what = []
+            if missing:
+                what.append("provider_requests columns " + ", ".join(missing))
+            if not blobs:
+                what.append("table provider_blobs")
+            # A WARNING once per change of state, not per job: rows keep coming meanwhile.
+            logger.warning(
+                "agy capture: %s missing; rows are written without them (run docs/migrate-provider-columns.py)",
+                "; ".join(what),
+            )
+        elif previous is False:
+            logger.warning("agy capture: provider_requests columns and provider_blobs present; writing all columns")
+
     def _connection_usable(self, conn: Any) -> bool:
         """After a failed write: does the connection still answer? Refreshes the schema cache on the way."""
         try:
@@ -625,6 +794,10 @@ class _Relay:
                     flight.resp = wire.parse_json_response(bytes(flight.collected))
             elif flight.kind == "quota" and flight.collected is not None and flight.status_code == 200:
                 flight.quota = wire.parse_quota_summary(bytes(flight.collected))
+            elif (flight.kind == "snapshot" and flight.collected is not None and flight.status_code == 200
+                  and flight.stream_end == "completed"):
+                # Only a complete answer: a cut-short body would hash as a snapshot that never existed.
+                flight.snapshot = wire.parse_json_value(bytes(flight.collected))
         finally:
             flight.body = None
             flight.acc = None
@@ -634,6 +807,10 @@ class _Relay:
     def _parent(req: wire.AgyRequest) -> Optional[str]:
         root = req.root_conversation_id
         return root if root and root != req.conversation_id else None
+
+    @staticmethod
+    def _since_t0(flight: _Flight, at: Optional[float]) -> Optional[float]:
+        return (at - flight.t0) * 1000.0 if at is not None else None
 
     def _request_columns(self, flight: _Flight) -> Dict[str, Any]:
         columns: Dict[str, Any] = {
@@ -645,6 +822,10 @@ class _Relay:
             "stream_end": flight.stream_end,
             "request_body_bytes": flight.request_body_bytes,
             "response_bytes": flight.response_bytes,
+            "headers_ms": self._since_t0(flight, flight.headers_at),
+            "system_hash": flight.system_hash,
+            "tools_hash": flight.tools_hash,
+            "response_hash": flight.response_hash,
         }
         errors = [flight.error] if flight.error else []
         req = flight.req
@@ -659,17 +840,144 @@ class _Relay:
                 message_count=req.message_count,
                 step_index=req.step_index,
                 client_session_id=req.client_session_id,
+                trajectory_id=req.trajectory_id,
+                system_chars=req.system_chars,
+                tools_count=req.tools_count,
             )
         resp = flight.resp
         if resp is not None:
             columns.update(wire.usage_columns(resp.usage))
-            columns["model_version"] = resp.model_version
-            columns["raw_usage"] = resp.usage
+            columns.update(
+                model_version=resp.model_version,
+                raw_usage=resp.usage,
+                finish_reason=resp.finish_reason,
+                trace_id=resp.trace_id,
+                response_id=resp.response_id,
+                first_thought_ms=self._since_t0(flight, resp.first_thought_at),
+                first_answer_ms=self._since_t0(flight, resp.first_answer_at),
+                # Every generate call: grounding and similar candidate keys have no other place.
+                response_extra=resp.extra or None,
+            )
+            if self._aux_body_wanted(flight):
+                columns["response_message"] = resp.blocks or None
+                columns["thinking_blocks"] = resp.thinking or None
             if resp.error:
                 errors.append(resp.error)
         if errors:
             columns["error"] = "; ".join(errors)
         return columns
+
+    def _aux_body_wanted(self, flight: _Flight) -> bool:
+        """Does the answer of this generate call go on its request row? Decided before the request row is
+        written, and only for calls that get no turn row, so an answer is never stored twice.
+
+        Agent calls: when ``_turn_wanted`` says no (cut short, error, no conversation id).
+        Other request types: those named in ``LLM_RELAY_AGY_AUX_BODY_TYPES``; ``*`` = all of
+        them, calls without a ``requestType`` included (those never get a turn row either).
+        """
+        req = flight.req
+        if flight.kind != "generate" or flight.resp is None or flight.body_too_large or req is None:
+            return False
+        request_type = req.request_type
+        if request_type == "agent":
+            return not self._turn_wanted(flight)
+        if not request_type:
+            return self.aux_all_types
+        return self.aux_all_types or request_type in self.aux_body_types
+
+    @staticmethod
+    def _body_written(columns: Dict[str, Any], present: Set[str]) -> bool:
+        """Did the request row just written get an answer body (a column that exists and a value)?"""
+        return any(columns.get(name) is not None and name in present
+                   for name in ("response_message", "thinking_blocks"))
+
+    # -- blobs (writer thread) --
+
+    def _blob_items(self, flight: _Flight) -> List[Tuple[str, str, int, Any]]:
+        """(kind, sha256, size, body) of what this request carries for provider_blobs.
+
+        Also sets the hash columns on the flight: they are recorded whether or not
+        the blob itself can be written (no table, ``LLM_RELAY_AGY_BLOBS=0``, cap).
+        """
+        items: List[Tuple[str, str, int, Any]] = []
+        req = flight.req
+        if flight.kind == "generate" and req is not None:
+            for kind, column, value in (("system_instruction", "system_hash", req.system_instruction),
+                                        ("tools", "tools_hash", req.tools)):
+                digest = wire.content_hash(value)
+                if digest is not None:
+                    setattr(flight, column, digest[0])
+                    items.append((kind, digest[0], digest[1], value))
+        elif flight.kind == "snapshot" and flight.snapshot is not None:
+            digest = wire.content_hash(flight.snapshot)
+            if digest is not None:
+                flight.response_hash = digest[0]
+                items.append((SNAPSHOT_ENDPOINTS[flight.endpoint], digest[0], digest[1], flight.snapshot))
+        return items
+
+    def _write_blobs(self, conn: Any, flight: _Flight, table_present: bool) -> None:
+        """Write the blobs of one request, each on its own: a failing one costs only itself. Never raises."""
+        items = self._blob_items(flight)
+        if not items or not table_present or not self.blobs:
+            return
+        for kind, sha256, size, body in items:
+            try:
+                self._store_blob(conn, kind, sha256, size, body)
+            except Exception as exc:
+                self._capture_error("blob", exc)
+                if self._connection_usable(conn):
+                    # The value itself was refused: do not try (and count) it on every later request.
+                    # A dead connection marks nothing, so the next request tries again.
+                    self._blobs_seen.put(self._blob_key(kind, sha256), _BLOB_FAILED)
+
+    @staticmethod
+    def _blob_key(kind: str, sha256: str) -> str:
+        return "{}:{}".format(kind, sha256)
+
+    def _store_blob(self, conn: Any, kind: str, sha256: str, size: int, body: Any) -> None:
+        """Write one blob unless this process already stored it (or saw it refused), or the cap for its
+        kind is reached."""
+        key = self._blob_key(kind, sha256)
+        state = self._blobs_seen.get(key)
+        if state == _BLOB_STORED or state == _BLOB_FAILED:
+            return  # the usual case: agy resends the same system prompt and tools on every call
+        now = time.monotonic()
+        if self._blob_cap_reached(kind, now):
+            if state is None:
+                self._blobs_seen.put(key, _BLOB_CAPPED)  # counted once; written later if the window frees up
+                self._count("blobs_skipped_cap")
+            self._warn_blob_cap(kind)
+            return
+        inserted = store.log_blob(conn, provider=PROVIDER, kind=kind, sha256=sha256, size_bytes=size, body=body)
+        self._blobs_seen.put(key, _BLOB_STORED)  # also when it was there already (another process, a restart)
+        if inserted:
+            if self.blob_max_new_per_day > 0:
+                self._blob_new.setdefault(kind, deque()).append(now)
+            self._count("blobs_written")
+
+    def _blob_cap_reached(self, kind: str, now: float) -> bool:
+        cap = self.blob_max_new_per_day
+        if cap <= 0:
+            return False
+        times = self._blob_new.get(kind)
+        if not times:
+            return False
+        while times and now - times[0] >= BLOB_CAP_WINDOW_S:
+            times.popleft()
+        return len(times) >= cap
+
+    def _warn_blob_cap(self, kind: str) -> None:
+        if kind in self._blob_cap_warned:
+            return
+        self._blob_cap_warned.add(kind)
+        # Kind and numbers only: never a hash or a body.
+        logger.warning(
+            "agy capture: %d new %s blobs within 24 h (LLM_RELAY_AGY_BLOB_MAX_NEW_PER_DAY); further new ones keep"
+            " only their hash on the request row (counted in blobs_skipped_cap)",
+            self.blob_max_new_per_day, kind,
+        )
+
+    # -- turns and quota (writer thread) --
 
     @staticmethod
     def _turn_wanted(flight: _Flight) -> bool:
