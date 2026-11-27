@@ -28,6 +28,8 @@ connection and reads no environment, which lets the migration script import
 
 from __future__ import annotations
 
+import math
+import re
 import sqlite3
 from typing import Any, Dict, List, Optional, Set, Tuple
 
@@ -190,7 +192,11 @@ SQLITE_SCHEMA: str = ";\n\n".join(_ddl(1)) + ";\n"
 PG_DDL: List[str] = _ddl(2)
 
 _QUOTA_FIELDS = ("group_name", "bucket_id", "quota_window", "remaining_fraction", "reset_time", "display_name")
-_REPLACEMENT = "\ufffd"  # REPLACEMENT CHARACTER, stands in for NUL
+_REPLACEMENT = "\ufffd"  # REPLACEMENT CHARACTER, stands in for NUL and lone surrogates
+# Characters PostgreSQL refuses: NUL (jsonb and text) and any UTF-16 surrogate code point.
+# json.loads joins a valid surrogate pair into one astral character, so whatever is left
+# in a Python str in U+D800..U+DFFF is unpaired and has no UTF-8 encoding.
+_PG_REJECTED_CHARS = re.compile(r"[\x00\ud800-\udfff]")
 
 
 def _is_sqlite(conn: Any) -> bool:
@@ -261,15 +267,29 @@ def request_columns_present(conn: Any) -> Set[str]:
 
 
 def strip_nul(value: Any) -> Any:
-    """Replace every ``"\\x00"`` with ``"\\ufffd"`` in strings, recursively, dict keys included.
+    """Replace the values PostgreSQL rejects, recursively, dict keys included.
 
-    PostgreSQL ``jsonb`` rejects the ``\\u0000`` escape and ``text`` rejects the
-    NUL byte (2026-10: about 660 conversation turns were lost that way).
+    - strings: every NUL and every surrogate code point (U+D800..U+DFFF) becomes
+      ``"\\ufffd"``. ``jsonb`` rejects the ``\\u0000`` escape and unpaired
+      surrogates, ``text`` rejects NUL, and the client cannot encode a lone
+      surrogate as UTF-8 at all (2026-10: about 660 conversation turns were lost
+      to NUL alone). A string without such characters is returned as is.
+    - non-finite floats (``json.loads`` gives them for ``NaN`` and ``1e400``):
+      ``jsonb`` has no such numbers, so they become the strings ``"NaN"``,
+      ``"Infinity"`` and ``"-Infinity"``. bool, int and finite floats stay.
+
     Containers are rebuilt (list, tuple, dict keep their type); any other value
-    is returned unchanged.
+    is returned unchanged. The name predates the surrogate and float cases and is
+    kept for the callers.
     """
     if isinstance(value, str):
-        return value.replace("\x00", _REPLACEMENT) if "\x00" in value else value
+        return _PG_REJECTED_CHARS.sub(_REPLACEMENT, value) if _PG_REJECTED_CHARS.search(value) else value
+    if isinstance(value, float):
+        if math.isnan(value):
+            return "NaN"
+        if math.isinf(value):
+            return "Infinity" if value > 0 else "-Infinity"
+        return value
     if isinstance(value, dict):
         return {strip_nul(k): strip_nul(v) for k, v in value.items()}
     if isinstance(value, list):
@@ -482,7 +502,10 @@ def log_blob(conn: Any, *, provider: str, kind: str, sha256: str, size_bytes: in
     """Store one blob unless (provider, kind, sha256) is already there; True when a row was inserted.
 
     ``body`` is the JSON value (dict/list/...) whose canonical form hashes to
-    ``sha256``; ``ts`` is the first time it was seen. Relies on the unique
+    ``sha256``; ``ts`` is the first time it was seen. ``sha256`` covers the body
+    as received, while the stored body goes through ``strip_nul``: in the rare
+    body with NUL, a lone surrogate or a non-finite number, rehashing the stored
+    body gives a different value. Relies on the unique
     ``idx_provider_blobs_key``: PostgreSQL ``ON CONFLICT ... DO NOTHING
     RETURNING id`` (no row back = already stored), SQLite ``INSERT OR IGNORE``
     and its rowcount.

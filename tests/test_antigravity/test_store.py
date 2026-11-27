@@ -258,8 +258,72 @@ def test_strip_nul_replaces_in_nested_values_and_dict_keys():
 
 def test_strip_nul_leaves_other_values_unchanged():
     marker = object()
-    for value in (None, 0, 1.5, True, b"bytes\x00", marker, "plain", "한국어"):
+    for value in (None, 0, 1.5, True, b"bytes\x00", marker, "plain", "한국어", "emoji \U0001F600", 10 ** 40):
         assert store.strip_nul(value) is value
+
+
+# What json.loads hands over for input PostgreSQL then refuses (2026-11-27 check on a session temp table):
+# unpaired surrogates in values and keys, and the non-finite numbers. A valid pair is joined into one character.
+LONE_HIGH = json.loads('"\\ud83d"')
+LONE_LOW = json.loads('"\\ude00"')
+POS_INF = json.loads("1e400")
+NEG_INF = json.loads("-1e400")
+NOT_A_NUMBER = json.loads("NaN")
+
+
+def _assert_pg_safe(value):
+    json.dumps(value, allow_nan=False)  # no NaN / Infinity left
+    json.dumps(value, ensure_ascii=False).encode("utf-8")  # strict: no lone surrogate left
+    assert not _contains_nul(value)
+
+
+def test_strip_nul_replaces_lone_surrogates_and_non_finite_numbers():
+    assert json.loads('"\\ud83d\\ude00"') == "\U0001F600"  # the premise: a valid pair is one astral character
+    value = {
+        "k" + LONE_HIGH: ["a" + LONE_LOW + "b", (NOT_A_NUMBER, POS_INF, NEG_INF, 2.5, 7, False),
+                          {"deep": {LONE_LOW + LONE_HIGH: "x" + NUL}}],
+        "ok": "emoji \U0001F600",
+        "big": 10 ** 40,
+    }
+    out = store.strip_nul(value)
+    assert out == {
+        "k" + REPLACEMENT: ["a" + REPLACEMENT + "b", ("NaN", "Infinity", "-Infinity", 2.5, 7, False),
+                            {"deep": {REPLACEMENT * 2: "x" + REPLACEMENT}}],
+        "ok": "emoji \U0001F600",
+        "big": 10 ** 40,
+    }
+    assert isinstance(out["k" + REPLACEMENT][1], tuple)
+    assert out["ok"] is value["ok"] and out["k" + REPLACEMENT][1][5] is False
+    _assert_pg_safe(out)
+    with pytest.raises(ValueError):
+        json.dumps(value, allow_nan=False)  # the input itself would have been refused
+    with pytest.raises(UnicodeEncodeError):
+        json.dumps(value, ensure_ascii=False).encode("utf-8")
+    for scalar, expected in ((LONE_HIGH, REPLACEMENT), (NOT_A_NUMBER, "NaN"), (POS_INF, "Infinity"),
+                             (NEG_INF, "-Infinity"), (chr(0xD800) + chr(0xDFFF), REPLACEMENT * 2)):
+        assert store.strip_nul(scalar) == expected
+        _assert_pg_safe(store.strip_nul(scalar))
+
+
+def test_values_postgresql_refuses_round_trip_through_request_and_turn_rows(conn):
+    extra = {"groundingMetadata": {"score": NOT_A_NUMBER, "q" + LONE_HIGH: [POS_INF, "t" + LONE_LOW]}}
+    blocks = [{"type": "text", "text": "answer " + LONE_HIGH + " \U0001F600"}]
+    rid = store.log_request(conn, provider=PROVIDER, endpoint="generateContent", session_id="s" + LONE_LOW,
+                            raw_usage={"ratio": NEG_INF}, response_extra=extra, response_message=blocks)
+    row = dict(conn.execute("SELECT * FROM provider_requests WHERE id = ?", (rid,)).fetchone())
+    assert row["session_id"] == "s" + REPLACEMENT
+    assert json.loads(row["raw_usage"]) == {"ratio": "-Infinity"}
+    assert json.loads(row["response_extra"]) == {
+        "groundingMetadata": {"score": "NaN", "q" + REPLACEMENT: ["Infinity", "t" + REPLACEMENT]}}
+    assert json.loads(row["response_message"]) == [{"type": "text", "text": "answer " + REPLACEMENT + " \U0001F600"}]
+    turn_id = store.log_turn(conn, provider=PROVIDER, session_id="s1", turn_number=1, storage_mode="full",
+                             request_messages=[{"role": "user", "content": "q" + LONE_HIGH}],
+                             response_message=blocks, thinking_blocks=[{"type": "thinking", "signal": POS_INF}],
+                             last_user_prompt="q" + LONE_HIGH)
+    turn = dict(conn.execute("SELECT * FROM provider_turns WHERE id = ?", (turn_id,)).fetchone())
+    assert json.loads(turn["request_messages"]) == [{"role": "user", "content": "q" + REPLACEMENT}]
+    assert json.loads(turn["thinking_blocks"]) == [{"type": "thinking", "signal": "Infinity"}]
+    assert turn["last_user_prompt"] == "q" + REPLACEMENT
 
 
 # ── log_request ──
