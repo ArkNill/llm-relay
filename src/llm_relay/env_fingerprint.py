@@ -41,6 +41,7 @@ _RELEVANT_ENV_VARS = (
     "LLM_RELAY_HISTORY",
     "LLM_RELAY_LANG",
     "LLM_TOKEN_CEILING",
+    "LLM_TOKEN_ZONE_B",
 )
 
 # Ports the relay typically wants. Agents use this to spot conflicts before

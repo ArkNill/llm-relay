@@ -9,6 +9,7 @@ import pytest
 from starlette.applications import Starlette
 from starlette.testclient import TestClient
 
+from llm_relay.api._zones import _env_switch_on
 from llm_relay.api.routes import (
     _classify_zone,
     _classify_zone_absolute,
@@ -44,6 +45,9 @@ def _zone_env(monkeypatch):
         monkeypatch.setattr(mod, "_CACHED_TOKEN_A_RED", 900_000)
         monkeypatch.setattr(mod, "_CACHED_TOKEN_A_HARD", 1_000_000)
         monkeypatch.setattr(mod, "_CACHED_TOKEN_CEILING", 1_000_000)
+    # Zone B stays on for these tests whatever the operator's .env.local says
+    # (proxy.db loads it on import); the switch itself is covered in TestZoneBSwitch.
+    monkeypatch.setattr(_zones_mod, "_CACHED_ZONE_B_ENABLED", True)
 
 
 # Default empty-metrics dict for mocking get_turn_count returns
@@ -943,6 +947,104 @@ class TestComputeZoneBundle:
         assert bundle["zone"] == "orange"
         assert bundle["zone_a"] == "orange"
         assert bundle["zone_b"] == "orange"
+
+
+class TestZoneBSwitch:
+    """LLM_TOKEN_ZONE_B=off: the overall zone follows Zone A alone."""
+
+    @pytest.fixture
+    def raised_a(self, monkeypatch):
+        # Zone A thresholds moved above the fixed Zone B ratios of a 1M ceiling.
+        import llm_relay.api._zones as _zones_mod
+
+        monkeypatch.setattr(_zones_mod, "_CACHED_TOKEN_A_YELLOW", 680_000)
+        monkeypatch.setattr(_zones_mod, "_CACHED_TOKEN_A_ORANGE", 760_000)
+        monkeypatch.setattr(_zones_mod, "_CACHED_TOKEN_A_RED", 780_000)
+        return _zones_mod
+
+    @pytest.mark.parametrize(
+        "tokens, expected",
+        [
+            (550_000, "green"),
+            (690_000, "yellow"),
+            (720_000, "yellow"),
+            (765_000, "orange"),
+            (790_000, "red"),
+            (1_000_000, "hard"),
+        ],
+    )
+    def test_off_follows_zone_a(self, raised_a, monkeypatch, tokens, expected):
+        monkeypatch.setattr(raised_a, "_CACHED_ZONE_B_ENABLED", False)
+        bundle = _compute_zone_bundle(current_ctx=tokens, peak_ctx=tokens)
+        assert bundle["zone"] == expected
+        assert bundle["zone_a"] == expected
+        assert bundle["zone_b"] == "green"
+        assert bundle["zone_b_peak"] == "green"
+        assert bundle["zone_b_message"] is None
+
+    @pytest.mark.parametrize(
+        "tokens, expected",
+        [
+            (550_000, "yellow"),  # A green, B yellow (55%)
+            (720_000, "orange"),  # A yellow, B orange (72%)
+            (790_000, "red"),  # A red, B orange
+        ],
+    )
+    def test_on_keeps_worst_of_a_and_b(self, raised_a, tokens, expected):
+        bundle = _compute_zone_bundle(current_ctx=tokens, peak_ctx=tokens)
+        assert bundle["zone"] == expected
+
+    def test_off_message_and_next_come_from_zone_a(self, raised_a, monkeypatch):
+        monkeypatch.setattr(raised_a, "_CACHED_ZONE_B_ENABLED", False)
+        bundle = _compute_zone_bundle(current_ctx=720_000, peak_ctx=720_000)
+        assert bundle["message"] == bundle["zone_a_message"]
+        assert bundle["next_threshold"] == 760_000
+        assert bundle["zone_a_next"] == 760_000
+
+    def test_off_ignores_explicit_ceiling(self, raised_a, monkeypatch):
+        # display.py passes its own ceiling for session-file providers.
+        monkeypatch.setattr(raised_a, "_CACHED_ZONE_B_ENABLED", False)
+        bundle = _compute_zone_bundle(current_ctx=150_000, peak_ctx=190_000, ceiling=200_000)
+        assert bundle["zone"] == "green"
+        assert bundle["zone_b"] == "green"
+        assert bundle["zone_b_peak"] == "green"
+
+    def test_off_leaves_ratio_classifier_alone(self, raised_a, monkeypatch):
+        monkeypatch.setattr(raised_a, "_CACHED_ZONE_B_ENABLED", False)
+        z, *_ = _classify_zone_ratio(720_000)
+        assert z == "orange"
+
+    @patch("llm_relay.proxy.db.get_ttl_tier", return_value=_TTL_UNKNOWN)
+    @patch("llm_relay.proxy.db.get_session_cache_stats", return_value=_CACHE_ZERO)
+    @patch("llm_relay.proxy.db.get_conn")
+    @patch("llm_relay.proxy.db.get_turn_count")
+    def test_off_turns_endpoint(self, mock_count, mock_conn, _mc, _mt, raised_a, monkeypatch):
+        monkeypatch.setattr(raised_a, "_CACHED_ZONE_B_ENABLED", False)
+        mock_conn.return_value = MagicMock()
+        mock_count.return_value = _empty_metrics(
+            turns=100, first_ts=1000.0, last_ts=8000.0,
+            current_ctx=720_000, peak_ctx=720_000,
+        )
+        client = TestClient(_make_app())
+        data = client.get("/api/v1/turns/zone-b-off").json()
+        assert data["zone"] == "yellow"
+        assert data["zone_a"] == "yellow"
+        assert data["zone_b"] == "green"
+        assert data["ceiling"] == 1000000  # the ratio display keeps its ceiling
+
+    @pytest.mark.parametrize("value", ["off", "OFF", " Off ", "0", "false", "no"])
+    def test_env_off_values(self, monkeypatch, value):
+        monkeypatch.setenv("LLM_TOKEN_ZONE_B", value)
+        assert _env_switch_on("LLM_TOKEN_ZONE_B") is False
+
+    @pytest.mark.parametrize("value", ["on", "1", "true", "", "anything-else"])
+    def test_env_on_values(self, monkeypatch, value):
+        monkeypatch.setenv("LLM_TOKEN_ZONE_B", value)
+        assert _env_switch_on("LLM_TOKEN_ZONE_B") is True
+
+    def test_env_unset_is_on(self, monkeypatch):
+        monkeypatch.delenv("LLM_TOKEN_ZONE_B", raising=False)
+        assert _env_switch_on("LLM_TOKEN_ZONE_B") is True
 
 
 # ── DB layer: new metric fields ──
