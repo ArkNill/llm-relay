@@ -557,7 +557,8 @@ def _load_migration(monkeypatch):
 
 def test_migration_script_uses_the_store_ddl(monkeypatch):
     module, _ = _load_migration(monkeypatch)
-    assert module.PG_DDL is store.PG_DDL and module.TABLES is store.TABLES
+    # The report covers the optional provider_blobs too, else its index would always read "missing".
+    assert module.PG_DDL is store.PG_DDL and module.ALL_TABLES is store.ALL_TABLES
     assert module.INDEX_NAMES == tuple(EXPECTED_INDEXES)
     assert "proxy" not in " ".join(_module_level_imports(MIGRATION.read_text(encoding="utf-8")))
 

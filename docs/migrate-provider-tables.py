@@ -2,13 +2,18 @@
 
 The Antigravity relay (``llm_relay.antigravity``) records requests, conversation
 turns and quota snapshots in three dedicated tables -- provider_requests,
-provider_turns, provider_quota -- and five indexes on them. The relay does not
-change the PostgreSQL schema itself: it checks for the tables and leaves capture
-off until they exist. SQLite stores get the same tables from the relay
-(``store.ensure_schema``).
+provider_turns, provider_quota -- and keeps system prompts, tool lists and model
+snapshots once each in provider_blobs (optional: capture runs without it). The
+relay does not change the PostgreSQL schema itself: it checks for the three
+required tables and leaves capture off until they exist. SQLite stores get the
+same tables from the relay (``store.ensure_schema``).
+
+The report and the "complete" verdict cover every table and index of
+``ALL_TABLES``. Columns added to a table after it was created are not this
+script's job: run ``docs/migrate-provider-columns.py`` for those.
 
 New tables only. Every statement is ``CREATE TABLE IF NOT EXISTS`` or
-``CREATE INDEX IF NOT EXISTS`` on one of the three new tables (``PG_DDL`` in
+``CREATE [UNIQUE] INDEX IF NOT EXISTS`` on one of the provider tables (``PG_DDL`` in
 ``llm_relay.antigravity.store`` is the single source of truth). No existing table
 is referenced, so the Claude Code proxy's tables (``requests``,
 ``conversation_turns``, ...) are neither altered nor locked, and it is safe to run
@@ -38,26 +43,26 @@ except ImportError:
     sys.exit(1)
 
 try:
-    from llm_relay.antigravity.store import INDEXES, PG_DDL, TABLES
+    from llm_relay.antigravity.store import ALL_TABLES, INDEXES, PG_DDL
 except ImportError:  # a checkout without the package installed
     sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
-    from llm_relay.antigravity.store import INDEXES, PG_DDL, TABLES
+    from llm_relay.antigravity.store import ALL_TABLES, INDEXES, PG_DDL
 
 INDEX_NAMES = tuple(index[0] for index in INDEXES)
 
 
 def table_rows(conn) -> Dict[str, Optional[int]]:
     """Row count per provider table, None when the table is missing."""
-    placeholders = ", ".join(["%s"] * len(TABLES))
+    placeholders = ", ".join(["%s"] * len(ALL_TABLES))
     present = {
         row[0] for row in conn.execute(
             "SELECT table_name FROM information_schema.tables WHERE table_schema = current_schema()"
-            " AND table_name IN ({})".format(placeholders), TABLES,
+            " AND table_name IN ({})".format(placeholders), ALL_TABLES,
         ).fetchall()
     }
     counts: Dict[str, Optional[int]] = {}
-    for table in TABLES:
-        # The name comes from the fixed TABLES tuple, never from input.
+    for table in ALL_TABLES:
+        # The name comes from the fixed ALL_TABLES tuple, never from input.
         counts[table] = conn.execute("SELECT count(*) FROM " + table).fetchone()[0] if table in present else None
     return counts
 
@@ -68,8 +73,8 @@ def indexes_present(conn) -> Dict[str, bool]:
         row[0] for row in conn.execute(
             "SELECT indexname FROM pg_indexes WHERE schemaname = current_schema()"
             " AND tablename IN ({}) AND indexname IN ({})".format(
-                ", ".join(["%s"] * len(TABLES)), ", ".join(["%s"] * len(INDEX_NAMES))),
-            TABLES + INDEX_NAMES,
+                ", ".join(["%s"] * len(ALL_TABLES)), ", ".join(["%s"] * len(INDEX_NAMES))),
+            ALL_TABLES + INDEX_NAMES,
         ).fetchall()
     }
     return {name: name in found for name in INDEX_NAMES}
@@ -79,7 +84,7 @@ def _report(conn) -> bool:
     """Print which tables and indexes exist; return whether all of them do."""
     counts = table_rows(conn)
     indexes = indexes_present(conn)
-    for table in TABLES:
+    for table in ALL_TABLES:
         rows = counts[table]
         print("table {}: {}".format(table, "missing" if rows is None else "present, {} rows".format(rows)))
     for name in INDEX_NAMES:
