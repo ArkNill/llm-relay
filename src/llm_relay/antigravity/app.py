@@ -72,11 +72,13 @@ SCHEMA_RECHECK_S = 60.0
 QUOTA_BODY_MAX = 1024 * 1024  # retrieveUserQuotaSummary answers with a few KB of JSON
 SNAPSHOT_BODY_MAX = 4 * 1024 * 1024  # fetchAvailableModels / listExperiments; larger answers are not kept
 # Request types whose answer goes on the request row (they never get a turn row). "*" = every
-# type but "agent"; agent calls get it only when they get no turn row (see _aux_body_wanted).
+# type but "agent", calls without a requestType included; agent calls get it only when they get
+# no turn row (see _aux_body_wanted).
 DEFAULT_AUX_BODY_TYPES = "checkpoint,web_search"
 BLOB_SEEN_MAX = 4096  # (kind, sha256) this process already stored or found stored (LRU)
 # Safety valve: if a system prompt or snapshot changed on every call, each call would add a blob.
 # At most this many new blobs per kind and BLOB_CAP_WINDOW_S; beyond that only the hash is kept.
+# The window lives in process memory only: a restart starts it empty.
 DEFAULT_BLOB_MAX_NEW_PER_DAY = 16
 BLOB_CAP_WINDOW_S = 24 * 3600.0
 # Quota rows: agy polls the summary several times per call, unused buckets report a reset time
@@ -112,9 +114,15 @@ _COUNTERS = (
     "aux_bodies", "blobs_written", "blobs_skipped_cap",
 )
 _MISSING = object()
-# _Relay._blobs_seen values: in provider_blobs (written now or found there), or left out by the cap.
+# _Relay._blobs_seen values: in provider_blobs (written now or found there), left out by the cap,
+# or rejected by the database while the connection stayed fine (the value itself is the problem,
+# so this process neither tries it again nor counts it again).
 _BLOB_STORED = "stored"
 _BLOB_CAPPED = "capped"
+_BLOB_FAILED = "failed"
+# Request row JSON columns that carry arbitrary upstream values; when the database rejects the row
+# with them, it is written once more without them (see _write_request).
+_REQUEST_BODY_COLUMNS = ("response_message", "thinking_blocks", "response_extra")
 
 
 # ── Small helpers ──
@@ -377,7 +385,7 @@ class _Relay:
         self._ext_complete: Optional[bool] = None  # None = not looked at yet
         self._ext_checked = 0.0
         self._ext_view: Optional[Dict[str, Any]] = None  # what /_health shows; replaced, never mutated
-        self._blobs_seen = _LRU(BLOB_SEEN_MAX)  # "<kind>:<sha256>" -> _BLOB_STORED | _BLOB_CAPPED
+        self._blobs_seen = _LRU(BLOB_SEEN_MAX)  # "<kind>:<sha256>" -> _BLOB_STORED | _BLOB_CAPPED | _BLOB_FAILED
         self._blob_new: Dict[str, Deque[float]] = {}  # kind -> monotonic times of new blobs in the window
         self._blob_cap_warned: Set[str] = set()
 
@@ -645,11 +653,8 @@ class _Relay:
                     flight.snapshot = None
             stage = "request"
             if not flight.row_written:
-                columns = self._request_columns(flight)
-                flight.request_row_id = store.log_request(conn, available_columns=columns_present, **columns)
+                self._write_request(conn, flight, columns_present)
                 flight.row_written = True
-                if self._body_written(columns, columns_present):
-                    self._count("aux_bodies")
             if flight.kind == "generate" and not flight.turn_done:
                 stage = "turn"
                 if self._turn_wanted(flight):
@@ -668,6 +673,31 @@ class _Relay:
                 raise CaptureConnectionError(
                     "agy capture: database connection unusable ({})".format(type(exc).__name__)
                 ) from None
+
+    def _write_request(self, conn: Any, flight: _Flight, columns_present: Set[str]) -> None:
+        """Write the request row; when the database rejects it, retry once without the body columns.
+
+        ``response_message`` / ``thinking_blocks`` / ``response_extra`` carry whatever
+        the upstream sent. If one of them makes the row fail while the connection
+        still works, losing those columns is better than losing the request row and
+        the turn row behind it. Any other failure (no body column carried, dead
+        connection, the retry failing too) propagates as before.
+        """
+        columns = self._request_columns(flight)
+        try:
+            flight.request_row_id = store.log_request(conn, available_columns=columns_present, **columns)
+        except Exception as exc:
+            carried = [name for name in _REQUEST_BODY_COLUMNS
+                       if columns.get(name) is not None and name in columns_present]
+            if not carried or not self._connection_usable(conn):
+                raise
+            self._capture_error("request_ext", exc)
+            for name in _REQUEST_BODY_COLUMNS:
+                columns[name] = None
+            flight.request_row_id = store.log_request(conn, available_columns=columns_present, **columns)
+            return  # no answer body on this row, so aux_bodies stays as it is
+        if self._body_written(columns, columns_present):
+            self._count("aux_bodies")
 
     def _schema_ready(self, conn: Any) -> bool:
         cached = self._schema
@@ -842,7 +872,8 @@ class _Relay:
         written, and only for calls that get no turn row, so an answer is never stored twice.
 
         Agent calls: when ``_turn_wanted`` says no (cut short, error, no conversation id).
-        Other request types: those named in ``LLM_RELAY_AGY_AUX_BODY_TYPES`` (``*`` = all).
+        Other request types: those named in ``LLM_RELAY_AGY_AUX_BODY_TYPES``; ``*`` = all of
+        them, calls without a ``requestType`` included (those never get a turn row either).
         """
         req = flight.req
         if flight.kind != "generate" or flight.resp is None or flight.body_too_large or req is None:
@@ -851,7 +882,7 @@ class _Relay:
         if request_type == "agent":
             return not self._turn_wanted(flight)
         if not request_type:
-            return False
+            return self.aux_all_types
         return self.aux_all_types or request_type in self.aux_body_types
 
     @staticmethod
@@ -885,17 +916,30 @@ class _Relay:
         return items
 
     def _write_blobs(self, conn: Any, flight: _Flight, table_present: bool) -> None:
+        """Write the blobs of one request, each on its own: a failing one costs only itself. Never raises."""
         items = self._blob_items(flight)
         if not items or not table_present or not self.blobs:
             return
         for kind, sha256, size, body in items:
-            self._store_blob(conn, kind, sha256, size, body)
+            try:
+                self._store_blob(conn, kind, sha256, size, body)
+            except Exception as exc:
+                self._capture_error("blob", exc)
+                if self._connection_usable(conn):
+                    # The value itself was refused: do not try (and count) it on every later request.
+                    # A dead connection marks nothing, so the next request tries again.
+                    self._blobs_seen.put(self._blob_key(kind, sha256), _BLOB_FAILED)
+
+    @staticmethod
+    def _blob_key(kind: str, sha256: str) -> str:
+        return "{}:{}".format(kind, sha256)
 
     def _store_blob(self, conn: Any, kind: str, sha256: str, size: int, body: Any) -> None:
-        """Write one blob unless this process already stored it, or the cap for its kind is reached."""
-        key = "{}:{}".format(kind, sha256)
+        """Write one blob unless this process already stored it (or saw it refused), or the cap for its
+        kind is reached."""
+        key = self._blob_key(kind, sha256)
         state = self._blobs_seen.get(key)
-        if state == _BLOB_STORED:
+        if state == _BLOB_STORED or state == _BLOB_FAILED:
             return  # the usual case: agy resends the same system prompt and tools on every call
         now = time.monotonic()
         if self._blob_cap_reached(kind, now):

@@ -1210,12 +1210,196 @@ def test_blob_failure_does_not_block_request_or_turn_rows(conn, monkeypatch, cap
     (row,) = rows(conn, "provider_requests")
     assert row["system_hash"] is not None and row["tools_hash"] is not None  # hashed before the write failed
     assert len(rows(conn, "provider_turns")) == 1
-    assert counters["capture_errors"] == 1 and counters["turns_captured"] == 1 and counters["blobs_written"] == 0
+    # One error per blob (system_instruction, tools): each is tried on its own.
+    assert counters["capture_errors"] == 2 and counters["turns_captured"] == 1 and counters["blobs_written"] == 0
     assert rows(conn, "provider_blobs") == []
     warnings = [r.getMessage() for r in caplog.records
                 if r.levelno == logging.WARNING and "agy capture" in r.getMessage()]
     assert len(warnings) == 1 and "blob" in warnings[0] and "RuntimeError" in warnings[0]
     assert all("payload-looking" not in r.getMessage() and not r.exc_info for r in caplog.records)
+
+
+def test_one_failing_blob_costs_only_itself_and_is_not_retried(conn, monkeypatch):
+    calls: List[str] = []
+    real_log_blob = store.log_blob
+
+    def picky_log_blob(connection, **kwargs):
+        calls.append(kwargs["kind"])
+        if kwargs["kind"] == "system_instruction":
+            raise sqlite3.DataError("value refused")
+        return real_log_blob(connection, **kwargs)
+
+    monkeypatch.setattr(store, "log_blob", picky_log_blob)
+    with relay(Upstream(agent_responder), SyncWriter(conn)) as client:
+        _send_turns(client, ("turn1",))
+        first = health(client)["counters"]
+        _send_turns(client, ("turn1_after_tools",))  # the same system prompt and tools again
+        second = health(client)["counters"]
+    assert [b["kind"] for b in rows(conn, "provider_blobs")] == ["tools"]
+    assert first["capture_errors"] == 1 and first["blobs_written"] == 1
+    # The connection was fine, so the refused value is marked: no second try, no second count.
+    assert second["capture_errors"] == 1 and calls == ["system_instruction", "tools"]
+    request = _fixture_request()
+    hashes = (_hash(request["systemInstruction"]), _hash(request["tools"]))
+    assert [(r["system_hash"], r["tools_hash"]) for r in rows(conn, "provider_requests")] == [hashes] * 2
+    assert len(rows(conn, "provider_turns")) == 2
+
+
+def test_blob_failure_on_a_dead_connection_is_tried_again_by_the_next_request(conn, monkeypatch):
+    calls: List[str] = []
+    real_log_blob = store.log_blob
+    real_probe = store.tables_present
+    state = {"dead": True}
+
+    def flaky_log_blob(connection, **kwargs):
+        calls.append(kwargs["kind"])
+        if state["dead"]:
+            raise sqlite3.OperationalError("connection lost")
+        return real_log_blob(connection, **kwargs)
+
+    def probe(connection, tables=store.TABLES):
+        if state["dead"]:
+            raise sqlite3.OperationalError("connection lost")
+        return real_probe(connection, tables)
+
+    class HealingWriter(SyncWriter):
+        def submit(self, fn, *, size_hint=0, **kwargs):
+            try:
+                fn(self.conn, **kwargs)
+            finally:
+                state["dead"] = False  # the writer's next connection works; this job is not retried here
+
+    monkeypatch.setattr(store, "log_blob", flaky_log_blob)
+    with relay(Upstream(agent_responder), HealingWriter(conn)) as client:
+        # Fill the schema caches first with a call that carries no system prompt or tools.
+        state["dead"] = False
+        assert client.post(QUOTA_PATH, content=b"{}", headers=AUTH).status_code == 200
+        monkeypatch.setattr(store, "tables_present", probe)
+        state["dead"] = True
+        _send_turns(client, ("turn1",))  # the capture job fails for the writer; the answer is relayed regardless
+        _send_turns(client, ("turn1_after_tools",))
+        counters = health(client)["counters"]
+    assert calls == ["system_instruction", "tools", "system_instruction", "tools"]
+    assert sorted(b["kind"] for b in rows(conn, "provider_blobs")) == ["system_instruction", "tools"]
+    assert counters["blobs_written"] == 2
+
+
+def test_request_row_rejected_with_body_columns_is_written_without_them(conn, monkeypatch):
+    real_log_request = store.log_request
+
+    def picky_log_request(connection, **kwargs):
+        if any(kwargs.get(name) is not None for name in app_module._REQUEST_BODY_COLUMNS):
+            raise sqlite3.DataError("value refused")
+        return real_log_request(connection, **kwargs)
+
+    monkeypatch.setattr(store, "log_request", picky_log_request)
+    citations = {"citations": [{"uri": "https://example.test/c", "startIndex": 0}]}
+    body = sse(answer_event([{"text": "answer"}]), answer_event([{"text": ""}], finish="STOP",
+                                                                citationMetadata=citations))
+    upstream = Upstream(lambda request: httpx.Response(200, headers=SSE_HEADERS, stream=ChunkStream(_chunks(body, 50))))
+    with relay(upstream, SyncWriter(conn)) as client:
+        assert client.post(STREAM_PATH, content=_raw("req_turn1.json"), headers=AUTH).content == body
+        checkpoint = request_variant("turn1", request_type="checkpoint", request_id="checkpoint/fixture-2")
+        assert client.post(STREAM_PATH, content=checkpoint, headers=AUTH).status_code == 200
+        counters = health(client)["counters"]
+    agent_row, checkpoint_row = rows(conn, "provider_requests")
+    for row in (agent_row, checkpoint_row):
+        assert all(row[c] is None for c in app_module._REQUEST_BODY_COLUMNS)
+        assert row["finish_reason"] == "STOP"  # the rest of the row is there
+    assert agent_row["request_type"] == "agent" and checkpoint_row["request_type"] == "checkpoint"
+    assert len(rows(conn, "provider_turns")) == 1  # the agent turn behind its request row
+    assert counters["capture_errors"] == 2 and counters["aux_bodies"] == 0 and counters["turns_captured"] == 1
+
+
+def test_request_row_failure_on_a_dead_connection_is_not_retried_without_body_columns(conn, monkeypatch, caplog):
+    caplog.set_level(logging.WARNING, logger="llm-relay.antigravity.app")
+    calls: List[Dict[str, Any]] = []
+
+    def failing_log_request(connection, **kwargs):
+        calls.append(kwargs)
+        raise sqlite3.OperationalError("connection lost")
+
+    def dead_probe(connection, tables=store.TABLES):
+        raise sqlite3.OperationalError("connection lost")
+
+    with relay(Upstream(side_call_responder), SyncWriter(conn)) as client:
+        assert client.post(QUOTA_PATH, content=b"{}", headers=AUTH).status_code == 200  # fills the schema caches
+        monkeypatch.setattr(store, "log_request", failing_log_request)
+        monkeypatch.setattr(store, "tables_present", dead_probe)
+        # The capture job raises CaptureConnectionError for the writer; the answer is relayed regardless.
+        assert client.post(GENERATE_PATH, content=WEB_SEARCH_BODY, headers=AUTH).status_code == 200
+    assert len(calls) == 1 and calls[0]["response_extra"] is not None  # no second try without the body columns
+    assert rows(conn, "provider_requests")[-1]["endpoint"] == QUOTA_PATH.rsplit(":", 1)[1]
+    assert not any("request_ext" in r.getMessage() for r in caplog.records)
+
+
+def test_star_includes_generate_calls_without_request_type(conn, monkeypatch):
+    untyped = json.loads(WEB_SEARCH_BODY)
+    del untyped["requestType"]
+    untyped_body = json.dumps(untyped).encode("utf-8")
+
+    def responder(request):
+        return reply_json(200, answer_event([{"text": "untyped"}], finish="STOP"))
+
+    def run(connection):
+        with relay(Upstream(responder), SyncWriter(connection)) as client:
+            assert client.post(GENERATE_PATH, content=untyped_body, headers=AUTH).status_code == 200
+            counters = health(client)["counters"]
+        (row,) = rows(connection, "provider_requests")
+        assert row["request_type"] is None
+        return row, counters
+
+    row, counters = run(conn)  # the default list names types only
+    assert all(row[c] is None for c in BODY_COLUMNS) and counters["aux_bodies"] == 0
+    monkeypatch.setenv("LLM_RELAY_AGY_AUX_BODY_TYPES", "*")
+    other = make_db(conn_path(conn).with_name("star.db"))
+    try:
+        row, counters = run(other)
+        assert json.loads(row["response_message"]) == [{"type": "text", "text": "untyped"}]
+        assert counters["aux_bodies"] == 1 and counters["capture_errors"] == 0
+        assert rows(other, "provider_turns") == []
+    finally:
+        other.close()
+
+
+def conn_path(connection: sqlite3.Connection) -> Path:
+    return Path(connection.execute("PRAGMA database_list").fetchone()["file"])
+
+
+def test_snapshot_cut_short_has_no_hash_and_no_blob(conn):
+    class BrokenStream(httpx.AsyncByteStream):
+        async def __aiter__(self):
+            yield json.dumps(MODELS).encode("utf-8")  # a complete JSON value, then the upstream fails
+            raise httpx.ReadError("connection reset")
+
+    upstream = Upstream(lambda request: httpx.Response(200, headers=JSON_HEADERS, stream=BrokenStream()))
+    app = create_app(upstream_transport=httpx.MockTransport(upstream), writer=SyncWriter(conn))
+    with TestClient(app, raise_server_exceptions=False) as client:
+        client.post(MODELS_PATH, content=b"{}", headers=AUTH)
+        counters = health(client)["counters"]
+    (row,) = rows(conn, "provider_requests")
+    assert row["stream_end"] == "upstream_error"
+    assert row["response_hash"] is None
+    assert rows(conn, "provider_blobs") == []
+    assert counters["blobs_written"] == 0 and counters["capture_errors"] == 0
+
+
+def test_daily_cap_counts_only_blobs_new_to_the_store(conn, monkeypatch):
+    monkeypatch.setenv("LLM_RELAY_AGY_BLOB_MAX_NEW_PER_DAY", "1")
+    known = dict(MODELS, version="already-stored")
+    fresh = dict(MODELS, version="new")
+    digest = wire.content_hash(known)
+    assert digest is not None
+    # Stored before this process started (another process, or before a restart).
+    assert store.log_blob(conn, provider=PROVIDER, kind="available_models", sha256=digest[0], size_bytes=digest[1],
+                          body=known)
+    answers = {"fetchAvailableModels": [known, fresh]}
+    with relay(Upstream(snapshot_responder(answers)), SyncWriter(conn)) as client:
+        for _ in range(2):
+            assert client.post(MODELS_PATH, content=b"{}", headers=AUTH).status_code == 200
+        counters = health(client)["counters"]
+    assert [b["sha256"] for b in rows(conn, "provider_blobs")] == [_hash(known), _hash(fresh)]
+    assert counters["blobs_written"] == 1 and counters["blobs_skipped_cap"] == 0
 
 
 def test_retried_job_writes_blobs_and_request_row_once(conn, monkeypatch):
