@@ -5,6 +5,14 @@ All notable changes to llm-relay are documented here.
 ## [Unreleased]
 
 ### Added
+- **`LLM_TOKEN_ZONE_B=off` lets the Claude Code zone follow Zone A alone** (2026-11-27): the
+  overall zone is the worse of Zone A (absolute thresholds, `LLM_TOKEN_A_*`) and Zone B (a fixed
+  50/70/90% of `LLM_TOKEN_CEILING`), so raising the Zone A thresholds above those ratios had no
+  effect below them: with yellow at 680K and a 1M ceiling, 500K-680K still showed yellow. With the
+  switch off (`off`, `0`, `false` or `no`; read once at start) the `zone_b*` fields report green
+  and `zone`, `message` and `next_threshold` come from Zone A. The ceiling keeps driving the
+  `/ ceiling` figure and the progress bar. Default `on` (behaviour unchanged); Codex zones are not
+  affected.
 - **Delegated `agy` calls check the quota first** (2026-11-24): before an `antigravity-cli`
   delegation starts (`python -m llm_relay.orch delegate`, `cli_delegate`, `orch_delegate`), the
   executor runs `agy -p "/usage" --output-format json` (no agent turn, no tokens) and reads the

@@ -4,7 +4,8 @@ Provides threshold classification for live context tokens across two scales:
   A) Absolute thresholds — env LLM_TOKEN_A_YELLOW/ORANGE/RED/HARD (CC) or CODEX_TOKEN_A_* (Codex)
   B) Ratio-of-ceiling    — env LLM_TOKEN_CEILING / CODEX_TOKEN_ZONE_CEILING (50/70/90/100%)
 
-Overall zone = worst of A and B (max).
+Overall zone = worst of A and B (max). For Claude Code, LLM_TOKEN_ZONE_B=off
+takes scale B out of that judgment so the zone follows scale A alone.
 Also contains token metric utilities shared by session parsers.
 """
 
@@ -37,6 +38,21 @@ _CACHED_TOKEN_A_ORANGE = int(os.getenv("LLM_TOKEN_A_ORANGE", "700000"))
 _CACHED_TOKEN_A_RED = int(os.getenv("LLM_TOKEN_A_RED", "900000"))
 _CACHED_TOKEN_A_HARD = int(os.getenv("LLM_TOKEN_A_HARD", "1000000"))
 _CACHED_TOKEN_CEILING = int(os.getenv("LLM_TOKEN_CEILING", "1000000"))
+
+_SWITCH_OFF_VALUES = ("off", "0", "false", "no")
+
+
+def _env_switch_on(name: str) -> bool:
+    """Return False only when the env var holds an explicit off value."""
+    return os.getenv(name, "on").strip().lower() not in _SWITCH_OFF_VALUES
+
+
+# Zone B (ratio of the ceiling) is fixed at 50/70/90%, so an operator who moves
+# the Zone A thresholds above those ratios still gets the Zone B colour: with
+# A yellow at 680K and a 1M ceiling, 500K-680K shows yellow anyway.
+# LLM_TOKEN_ZONE_B=off (or 0/false/no) makes the overall zone follow Zone A
+# alone. The ceiling itself keeps driving the "/ ceiling" figure and the bar.
+_CACHED_ZONE_B_ENABLED = _env_switch_on("LLM_TOKEN_ZONE_B")
 
 
 def _classify_zone(turns: int) -> tuple:
@@ -120,7 +136,11 @@ def _compute_zone_bundle(current_ctx: int, peak_ctx: int, ceiling: Optional[int]
     """Compute Zone A/B on current_ctx (primary) + A/B on peak_ctx (reference).
 
     Returns a flat dict ready to be merged into the session response.
+    With LLM_TOKEN_ZONE_B=off the zone_b* fields report green (the same shape
+    a non-positive ceiling gives) and the overall zone is Zone A.
     """
+    if not _CACHED_ZONE_B_ENABLED:
+        ceiling = 0  # _classify_zone_ratio treats a non-positive ceiling as always green
     za_cur = _classify_zone_absolute(current_ctx)
     zb_cur = _classify_zone_ratio(current_ctx, ceiling=ceiling)
     za_peak = _classify_zone_absolute(peak_ctx)
