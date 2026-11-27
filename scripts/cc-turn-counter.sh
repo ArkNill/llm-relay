@@ -174,16 +174,16 @@ fi
 
 # === Phase 7: turn-end context line for the user (2026-10-20) ===
 # Printed as hook JSON `systemMessage` -> shown in the CC UI only, never sent to the model.
-# Zones follow LLM_TOKEN_A_* (relay display; 2026-10-20 user redefinition): green <600K / yellow 600-680K / orange 680-700K / red >=700K.
-# The green label states the hard limit (700K) and where wrap-up starts (600K).
+# Zones follow LLM_TOKEN_A_* (relay display; 2026-11-27 user redefinition, +80K each): green <680K / yellow 680-760K / orange 760-780K / red >=780K.
+# The green label states the hard limit (780K) and where wrap-up starts (680K).
 # Disable with LLM_TURN_CTX_MESSAGE=0.
 if [ "${LLM_TURN_CTX_MESSAGE:-1}" = "1" ] && [ "$API_OK" = true ] && [ -n "$CTX" ] && [ "$CTX" != "null" ]; then
     CTX_K=$(( CTX / 1000 ))
     case "$ZONE" in
-        green)  ZL="그린 <700K (600K부터 마무리 준비)" ;;
-        yellow) ZL="옐로 600~680K · 마무리 준비·인수인계 권장" ;;
-        orange) ZL="주황 680~700K · 지금 인수인계" ;;
-        red)    ZL="레드 ≥700K · 즉시 인수인계(필수)" ;;
+        green)  ZL="그린 <780K (680K부터 마무리 준비)" ;;
+        yellow) ZL="옐로 680~760K · 마무리 준비·인수인계 권장" ;;
+        orange) ZL="주황 760~780K · 지금 인수인계" ;;
+        red)    ZL="레드 ≥780K · 즉시 인수인계(필수)" ;;
         hard)   ZL="차단 ≥1M" ;;
         *)      ZL="$ZONE" ;;
     esac
